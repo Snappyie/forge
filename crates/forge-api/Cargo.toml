@@ -17,3 +17,4 @@ forge-auth = { path = "../forge-auth" }
 tower_governor = "0.4"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace"] }
+sqlx.workspace = true

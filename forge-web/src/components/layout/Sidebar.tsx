@@ -96,6 +96,27 @@ export function Sidebar() {
             Workers
           </Button>
         </Link>
+        <div className="pt-4 pb-1">
+          <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Features</p>
+        </div>
+        <Link href="/alerts" passHref>
+          <Button variant={getVariant("/alerts")} className={getStyle("/alerts")}>
+            <Activity className="mr-2 h-4 w-4 text-orange-500" />
+            Alerts
+          </Button>
+        </Link>
+        <Link href="/calendar" passHref>
+          <Button variant={getVariant("/calendar")} className={getStyle("/calendar")}>
+            <Terminal className="mr-2 h-4 w-4 text-purple-500" />
+            Calendar
+          </Button>
+        </Link>
+        <Link href="/audit" passHref>
+          <Button variant={getVariant("/audit")} className={getStyle("/audit")}>
+            <Box className="mr-2 h-4 w-4 text-teal-500" />
+            Audit Trail
+          </Button>
+        </Link>
       </nav>
 
       <div className="mt-auto px-4 py-4 border-t border-border/50">

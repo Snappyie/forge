@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 4. Initialize HTTP API router
-    let app = forge_api::create_router(); // In the future, pass `db` into the router state
+    let app = forge_api::create_router(_db.pool().clone());
 
     // 5. Bind server
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import { motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -17,6 +19,56 @@ import {
 } from "@/components/ui/dialog";
 
 export default function JobsPage() {
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [newJobName, setNewJobName] = useState("");
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
+
+  const fetchJobs = async () => {
+    try {
+      setIsLoading(true);
+      const res = await fetch("http://localhost:3000/api/v1/jobs");
+      if (res.ok) {
+        const json = await res.json();
+        setJobs(json.data || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch jobs:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchJobs();
+  }, []);
+
+  const handleCreateJob = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newJobName) return;
+    
+    try {
+      const res = await fetch("http://localhost:3000/api/v1/jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: newJobName,
+          tenant_id: "00000000-0000-0000-0000-000000000000" // Mock tenant for now
+        }),
+      });
+      
+      if (res.ok) {
+        setNewJobName("");
+        setIsDialogOpen(false);
+        fetchJobs(); // Refresh list
+      }
+    } catch (err) {
+      console.error("Failed to create job:", err);
+    }
+  };
+
   return (
     <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-50/50 via-background to-background dark:from-indigo-900/10 dark:via-background dark:to-background">
       <header className="flex justify-between items-center mb-8">
@@ -31,7 +83,7 @@ export default function JobsPage() {
           <p className="text-muted-foreground">Manage templates and automation routines.</p>
         </div>
         
-        <Dialog>
+        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger 
             render={
               <Button className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5" />
@@ -40,21 +92,29 @@ export default function JobsPage() {
             <PlusCircle className="mr-2 h-4 w-4" /> Create Job
           </DialogTrigger>
           <DialogContent className="sm:max-w-[425px]">
-            <DialogHeader>
-              <DialogTitle>Create New Job</DialogTitle>
-              <DialogDescription>
-                Define a new automation routine in your tenant.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="flex flex-col space-y-2">
-                <label htmlFor="name" className="text-sm font-medium leading-none">Job Name</label>
-                <input id="name" className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" placeholder="e.g. data-etl-pipeline" />
+            <form onSubmit={handleCreateJob}>
+              <DialogHeader>
+                <DialogTitle>Create New Job</DialogTitle>
+                <DialogDescription>
+                  Define a new automation routine in your tenant.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="flex flex-col space-y-2">
+                  <label htmlFor="name" className="text-sm font-medium leading-none">Job Name</label>
+                  <input 
+                    id="name" 
+                    value={newJobName}
+                    onChange={(e) => setNewJobName(e.target.value)}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" 
+                    placeholder="e.g. data-etl-pipeline" 
+                  />
+                </div>
               </div>
-            </div>
-            <DialogFooter>
-              <Button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white">Save changes</Button>
-            </DialogFooter>
+              <DialogFooter>
+                <Button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white">Create Job</Button>
+              </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
 
@@ -91,22 +151,34 @@ export default function JobsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                <TableRow className="transition-colors group hover:bg-muted/50 cursor-pointer">
-                  <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">job_123</TableCell>
-                  <TableCell className="font-medium">Data Pipeline Etl</TableCell>
-                  <TableCell className="text-muted-foreground">v2</TableCell>
-                  <TableCell>
-                    <Badge variant="outline" className="text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-900/20">Draft</Badge>
-                  </TableCell>
-                </TableRow>
-                <TableRow className="transition-colors group hover:bg-muted/50 cursor-pointer">
-                  <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">job_456</TableCell>
-                  <TableCell className="font-medium">Weekly Report Gen</TableCell>
-                  <TableCell className="text-muted-foreground">v5</TableCell>
-                  <TableCell>
-                    <Badge variant="outline" className="text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-900/20">Published</Badge>
-                  </TableCell>
-                </TableRow>
+                {isLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
+                      Loading jobs from database...
+                    </TableCell>
+                  </TableRow>
+                ) : jobs.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
+                      No jobs found. Create your first job above!
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  jobs.map(job => (
+                    <TableRow key={job.id} className="transition-colors group hover:bg-muted/50 cursor-pointer">
+                      <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">
+                        {job.id.substring(0, 8)}...
+                      </TableCell>
+                      <TableCell className="font-medium">{job.name}</TableCell>
+                      <TableCell className="text-muted-foreground">-</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-900/20">
+                          {job.status}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </CardContent>

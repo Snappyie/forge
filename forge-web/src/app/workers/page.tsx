@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -8,12 +9,35 @@ import { Button } from "@/components/ui/button";
 import { ServerCrash, Activity, Cpu, MemoryStick, Signal, Server, PowerOff } from "lucide-react";
 
 export default function WorkersPage() {
-  const workers = [
-    { id: "wrk_prod_alpha", status: "Online", hostname: "ip-10-0-1-44.ec2", version: "v1.2.4", uptime: "14d 2h", cpu: "14%", mem: "42%" },
-    { id: "wrk_prod_beta", status: "Online", hostname: "ip-10-0-1-105.ec2", version: "v1.2.4", uptime: "14d 2h", cpu: "28%", mem: "38%" },
-    { id: "wrk_prod_gamma", status: "Online", hostname: "ip-10-0-2-18.ec2", version: "v1.2.4", uptime: "5d 11h", cpu: "64%", mem: "71%" },
-    { id: "wrk_analytics_01", status: "Offline", hostname: "ip-10-0-3-99.ec2", version: "v1.2.3", uptime: "-", cpu: "-", mem: "-" },
-  ];
+  const [workers, setWorkers] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const fetchWorkers = async () => {
+    try {
+      setIsLoading(true);
+      const res = await fetch("http://localhost:3000/api/v1/workers");
+      if (res.ok) {
+        const json = await res.json();
+        // We'll merge with some mock stats since the DB doesn't track CPU/Mem directly right now
+        const enriched = (json.data || []).map((w: any) => ({
+          ...w,
+          version: "v1.2.4",
+          uptime: "14d 2h",
+          cpu: Math.floor(Math.random() * 80 + 10) + "%",
+          mem: Math.floor(Math.random() * 60 + 20) + "%"
+        }));
+        setWorkers(enriched);
+      }
+    } catch (err) {
+      console.error("Failed to fetch workers:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchWorkers();
+  }, []);
 
   return (
     <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-rose-50/50 via-background to-background dark:from-rose-900/10 dark:via-background dark:to-background">
@@ -43,7 +67,7 @@ export default function WorkersPage() {
                 </div>
                 <Badge className="bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400 shadow-none border-none animate-pulse">Healthy</Badge>
               </div>
-              <h3 className="text-3xl font-bold tracking-tight">3 / 4</h3>
+              <h3 className="text-3xl font-bold tracking-tight">{workers.filter(w => w.status === 'Online').length} / {workers.length}</h3>
               <p className="text-sm text-muted-foreground mt-1">Active Workers Online</p>
             </CardContent>
           </Card>
@@ -106,9 +130,21 @@ export default function WorkersPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {workers.map((w) => (
+                  {isLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                        Loading workers from database...
+                      </TableCell>
+                    </TableRow>
+                  ) : workers.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                        No active workers found.
+                      </TableCell>
+                    </TableRow>
+                  ) : workers.map((w) => (
                     <TableRow key={w.id} className="group">
-                      <TableCell className="font-mono text-sm font-medium">{w.id}</TableCell>
+                      <TableCell className="font-mono text-sm font-medium">{w.id.substring(0, 8)}...</TableCell>
                       <TableCell>
                         <Badge 
                           className={`shadow-none border-none ${
