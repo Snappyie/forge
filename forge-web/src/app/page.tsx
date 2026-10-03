@@ -26,49 +26,7 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="flex h-screen bg-background text-foreground overflow-hidden font-sans">
-      {/* Sidebar Mockup with Framer Motion slide-in */}
-      <motion.aside 
-        initial={{ x: -300 }}
-        animate={{ x: 0 }}
-        transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        className="w-64 border-r bg-card flex flex-col p-4 shadow-sm z-10"
-      >
-        <motion.div 
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.2 }}
-          className="font-bold text-3xl tracking-tight mb-8 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 bg-clip-text text-transparent px-4 py-2"
-        >
-          Forge
-        </motion.div>
-        
-        <nav className="space-y-1 flex-1">
-          <Button variant="secondary" className="w-full justify-start transition-transform hover:scale-[1.02]">
-            <Activity className="mr-2 h-4 w-4" />
-            Dashboard
-          </Button>
-          <Button variant="ghost" className="w-full justify-start text-muted-foreground hover:text-foreground transition-transform hover:scale-[1.02]">
-            <Box className="mr-2 h-4 w-4" />
-            Jobs
-          </Button>
-          <Button variant="ghost" className="w-full justify-start text-muted-foreground hover:text-foreground transition-transform hover:scale-[1.02]">
-            <Terminal className="mr-2 h-4 w-4" />
-            Executions
-          </Button>
-          <Button variant="ghost" className="w-full justify-start text-muted-foreground hover:text-foreground transition-transform hover:scale-[1.02]">
-            <ServerCrash className="mr-2 h-4 w-4" />
-            Queues
-          </Button>
-          <Button variant="ghost" className="w-full justify-start text-muted-foreground hover:text-foreground transition-transform hover:scale-[1.02]">
-            <Users className="mr-2 h-4 w-4" />
-            Workers
-          </Button>
-        </nav>
-      </motion.aside>
-
-      {/* Main Content */}
-      <main className="flex-1 p-8 overflow-y-auto relative bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-50/50 via-background to-background dark:from-indigo-900/10 dark:via-background dark:to-background">
+    <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-50/50 via-background to-background dark:from-indigo-900/10 dark:via-background dark:to-background">
         <header className="flex justify-between items-center mb-8">
           <div>
             <motion.h1 
@@ -186,6 +144,5 @@ export default function Home() {
           </Card>
         </motion.div>
       </main>
-    </div>
   );
 }
