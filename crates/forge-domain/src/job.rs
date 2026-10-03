@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use crate::id::{JobId, JobVersionId, TenantId};
-use crate::policy::{RetryPolicy, ConcurrencyPolicy};
 use crate::error::DomainError;
+use crate::id::{JobId, JobVersionId, QueueId, TenantId};
+use crate::policy::{ConcurrencyPolicy, Priority, RetryPolicy};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JobStatus {
@@ -29,10 +29,14 @@ pub struct ResourceRequirements {
 pub struct Job {
     pub id: JobId,
     pub tenant_id: TenantId,
+    /// Stable human-readable identifier, unique within the tenant (spec 02.2).
+    pub key: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub status: JobStatus,
     pub current_version_id: Option<JobVersionId>,
+    pub default_queue_id: Option<QueueId>,
+    pub priority: Priority,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -41,12 +45,33 @@ pub struct Job {
 pub struct JobVersion {
     pub id: JobVersionId,
     pub job_id: JobId,
+    pub version_number: u32,
     pub execution_type: ExecutionType,
     pub retry_policy: RetryPolicy,
     pub concurrency_policy: ConcurrencyPolicy,
     pub resource_requirements: ResourceRequirements,
     pub timeout_seconds: u32,
     pub created_at: DateTime<Utc>,
+    /// Set once published. A published version is immutable (spec 02.16,
+    /// invariant 4).
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+impl JobVersion {
+    pub fn is_published(&self) -> bool {
+        self.published_at.is_some()
+    }
+
+    /// Rejects any mutation of an already-published version.
+    pub fn ensure_mutable(&self) -> Result<(), DomainError> {
+        if self.is_published() {
+            return Err(DomainError::ValidationError(format!(
+                "job version {} is published and immutable",
+                self.id
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Job {
@@ -55,16 +80,28 @@ impl Job {
         Self {
             id: JobId::new(),
             tenant_id,
+            key: None,
             name,
             description: None,
             status: JobStatus::Draft,
             current_version_id: None,
+            default_queue_id: None,
+            priority: Priority::default(),
             created_at: now,
             updated_at: now,
         }
     }
 
+    /// Transitions with an explicit clock so tests stay deterministic.
     pub fn transition_to(&mut self, new_status: JobStatus) -> Result<(), DomainError> {
+        self.transition_to_at(new_status, Utc::now())
+    }
+
+    pub fn transition_to_at(
+        &mut self,
+        new_status: JobStatus,
+        now: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
         match (&self.status, &new_status) {
             (JobStatus::Draft, JobStatus::Active) => {
                 if self.current_version_id.is_none() {
@@ -83,7 +120,7 @@ impl Job {
                 });
             }
         }
-        self.updated_at = Utc::now();
+        self.updated_at = now;
         Ok(())
     }
 }

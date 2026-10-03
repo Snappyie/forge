@@ -88,6 +88,138 @@ Status: Accepted.
 Decision:
 Use an outbox for reliable event publication.
 
+## ADR-0011 Execution `ABANDONED` is an intermediate state, not terminal
+
+Status: Accepted.
+
+Amends: 02-domain-model.md §2.5/§2.6.
+
+Decision:
+`ABANDONED` is not a terminal state. The permitted transitions out of it are
+`ABANDONED -> QUEUED` (recovery re-queues the work) and
+`ABANDONED -> DEAD_LETTERED` (recovery gives up).
+
+Reason:
+The specification's own transition table lists `ABANDONED -> QUEUED`, and §2.5
+states that `ABANDONED` is an intermediate recovery state unless product policy
+makes it terminal. Treating it as terminal makes that required transition
+unreachable, so a lost worker would strand its execution permanently — in
+direct conflict with the "no silent job loss" design principle in README.md.
+
+`RECOVERED`, which appears in the §2.5 diagram, is not a state: it has no entry
+in the §2.6 transition table and no terminal classification. It is an artifact
+of the diagram and is not implemented.
+
+## ADR-0012 `FAILED` and `TIMED_OUT` permit retry and dead-letter exits
+
+Status: Accepted.
+
+Amends: 01-product-requirements.md invariant 3; 02-domain-model.md §2.6.
+
+Decision:
+A terminal execution may not return to an active state, with two documented
+exceptions: `FAILED -> RETRY_SCHEDULED` and `FAILED -> DEAD_LETTERED`, plus the
+equivalent pair for `TIMED_OUT`.
+
+Reason:
+Invariant 3 forbids terminal executions from becoming active again, while §2.6
+requires retry and dead-letter transitions out of `FAILED`. Reading the
+invariant as absolute would make the retry table unreachable. The exception is
+narrow: neither transition re-enters `QUEUED`, `DISPATCHED` or `RUNNING`, so
+the invariant's intent is preserved.
+
+## ADR-0013 Five-field cron dialect
+
+Status: Accepted.
+
+Amends: 09-scheduling-engine.md §9.4.
+
+Decision:
+V1 recurring schedules use standard five-field cron syntax
+(`minute hour day-of-month month day-of-week`). Six- and seven-field
+extensions are rejected rather than inferred.
+
+Reason:
+§9.4 explicitly defers the dialect choice but forbids silently supporting
+ambiguous dialects. Pinning one dialect and documenting it in the OpenAPI
+specification satisfies both halves of that requirement.
+
+## ADR-0014 Ambiguous local times fire once, at the first occurrence
+
+Status: Accepted.
+
+Amends: 09-scheduling-engine.md §9.6.
+
+Decision:
+Where a local time occurs twice during a DST fall-back, the schedule fires once,
+at the first (earlier) occurrence. Nonexistent local times during a
+spring-forward follow the schedule's configured misfire policy.
+
+Reason:
+§09.6 requires an explicitly documented first/second policy. Firing once avoids
+the duplicate execution that a "both" policy would produce, and the database
+constraint on `(schedule_id, scheduled_for)` would reject the second write
+anyway.
+
+## ADR-0015 A schedule's timezone is required
+
+Status: Accepted.
+
+Amends: 09-scheduling-engine.md §9.5.
+
+Decision:
+A recurring schedule without an IANA timezone is rejected, unless
+`FORGE_DEFAULT_TIMEZONE` is set explicitly, in which case that value is applied
+and recorded on the schedule. The built-in default for the setting is `UTC`.
+
+Reason:
+§09.5 prohibits silent machine-local timezone behaviour. Making the deployment
+default explicit and persisting it keeps schedules reproducible across hosts.
+
+## ADR-0016 Cancellation is cooperative only
+
+Status: Accepted.
+
+Amends: 10-execution-engine.md §10.6.
+
+Decision:
+V1 provides no hard-kill policy for cancellation. The server records the request,
+the worker observes it, stops, cleans up and acknowledges, and the server-side
+timeout remains authoritative.
+
+Reason:
+§10.6 states a hard-kill policy MAY exist but must be explicit. Omitting it
+entirely is explicit, and avoids implying a containment guarantee that a
+container executor cannot make across arbitrary runtimes.
+
+## ADR-0017 Runtime SQL queries instead of compile-time macros
+
+Status: Accepted.
+
+Decision:
+All SQL uses `sqlx::query_as::<_, T>` with `#[derive(FromRow)]`. The
+compile-time `query!`/`query_as!` macros are not used, and no `.sqlx` offline
+cache is committed.
+
+Reason:
+A committed query cache must be regenerated whenever a query or schema changes.
+Without it, a clean checkout or a CI clone cannot compile at all, which
+contradicts the README requirement that contributors can run the complete stack
+locally. Row-shape structs give the same type safety at the boundary.
+
+## ADR-0018 Status vocabularies use CHECK constraints, not native enums
+
+Status: Accepted.
+
+Decision:
+Status columns are `VARCHAR` plus a named `CHECK` constraint.
+
+Reason:
+Adding a value to a PostgreSQL enum requires DDL that cannot run inside a
+transaction in older server versions, which conflicts with the forward-only
+migration requirement in 08-storage-specification.md §8.1. CHECK constraints are
+dropped and recreated in place.
+
 ## Future ADR candidates
 
 - Queue implementation.
