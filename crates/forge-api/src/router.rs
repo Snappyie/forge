@@ -33,15 +33,144 @@ pub struct AppState {
     pub version: String,
 }
 
+use axum::middleware;
+use crate::middleware::auth::require_auth;
+use forge_auth::Role;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower::ServiceBuilder;
+use tower_http::trace::TraceLayer;
+
 pub fn create_router() -> Router {
     let state = Arc::new(AppState {
         version: "1.0".to_string(),
     });
 
+    // Configure rate limiting (e.g. 100 requests per second per IP)
+    let governor_conf = Box::new(
+        GovernorConfigBuilder::default()
+            .per_second(2)
+            .burst_size(10)
+            .finish()
+            .unwrap(),
+    );
+
+    // Endpoints that require authentication
+    let api_routes = Router::new()
+        .route("/api/v1/jobs", post(create_job).get(list_jobs))
+        .route("/api/v1/invites", post(create_invite))
+        .route_layer(middleware::from_fn(require_auth));
+
+    // Public endpoints (health, invite acceptance which handles its own auth/token verification)
     Router::new()
         .route("/api/v1/health/live", get(health_live))
-        .route("/api/v1/jobs", post(create_job).get(list_jobs))
+        .route("/api/v1/invites/accept", post(accept_invite))
+        .route("/api/v1/auth/register", post(register))
+        .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/refresh", post(refresh))
+        .merge(api_routes)
+        // Apply Rate Limiting globally across all routes
+        .layer(ServiceBuilder::new()
+            .layer(TraceLayer::new_for_http())
+            .layer(GovernorLayer {
+                config: Arc::new(*governor_conf),
+            })
+        )
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+pub struct CreateInvitePayload {
+    pub email: String,
+    pub role: Role,
+}
+
+// POST /api/v1/invites (Requires Auth, requires TenantAdmin)
+async fn create_invite(
+    // In reality, we'd extract the Claims from the Extension here to verify the inviter is a TenantAdmin
+    Json(payload): Json<CreateInvitePayload>,
+) -> impl IntoResponse {
+    let response = ApiResponse {
+        data: serde_json::json!({
+            "invite_token": Uuid::new_v4(),
+            "email": payload.email,
+            "role": payload.role,
+        }),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    (StatusCode::CREATED, Json(response))
+}
+
+#[derive(Deserialize)]
+pub struct AcceptInvitePayload {
+    pub token: String,
+}
+
+// POST /api/v1/invites/accept
+async fn accept_invite(Json(_payload): Json<AcceptInvitePayload>) -> impl IntoResponse {
+    // In reality, this endpoint verifies the invite token, creates a TenantMembership, 
+    // and returns a newly minted JWT.
+    let response = ApiResponse {
+        data: serde_json::json!({
+            "status": "accepted",
+            "message": "TenantMembership created. You can now request a JWT."
+        }),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    (StatusCode::OK, Json(response))
+}
+
+#[derive(Deserialize)]
+pub struct AuthPayload {
+    pub email: String,
+    pub password: String, // Would be hashed with argon2 in actual handler
+}
+
+// POST /api/v1/auth/register
+async fn register(Json(_payload): Json<AuthPayload>) -> impl IntoResponse {
+    // 1. Hash password via argon2
+    // 2. Insert into users table
+    // 3. Return success
+    let response = ApiResponse {
+        data: serde_json::json!({"message": "User registered successfully"}),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    (StatusCode::CREATED, Json(response))
+}
+
+// POST /api/v1/auth/login
+async fn login(Json(_payload): Json<AuthPayload>) -> impl IntoResponse {
+    // 1. Fetch user by email
+    // 2. Verify argon2 hash
+    // 3. Issue short-lived JWT access_token
+    // 4. Issue long-lived refresh_token in DB
+    let response = ApiResponse {
+        data: serde_json::json!({
+            "access_token": "mock.jwt.token",
+            "refresh_token": Uuid::new_v4(),
+        }),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    (StatusCode::OK, Json(response))
+}
+
+#[derive(Deserialize)]
+pub struct RefreshPayload {
+    pub refresh_token: Uuid,
+}
+
+// POST /api/v1/auth/refresh
+async fn refresh(Json(_payload): Json<RefreshPayload>) -> impl IntoResponse {
+    // 1. Lookup refresh token in DB
+    // 2. Issue new access_token
+    // 3. Rotate refresh_token (invalidate old, issue new)
+    let response = ApiResponse {
+        data: serde_json::json!({
+            "access_token": "mock.jwt.token",
+            "refresh_token": Uuid::new_v4(),
+        }),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    (StatusCode::OK, Json(response))
 }
 
 // GET /api/v1/health/live
@@ -80,4 +209,74 @@ async fn list_jobs() -> impl IntoResponse {
         request_id: Uuid::new_v4().to_string(),
     };
     (StatusCode::OK, Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, StatusCode},
+    };
+    use std::net::SocketAddr;
+    use tower::ServiceExt; // for `oneshot`
+
+    fn add_ip<T>(mut req: Request<T>) -> Request<T> {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
+    #[tokio::test]
+    async fn test_health_live() {
+        let app = create_router();
+
+        let req = Request::builder()
+            .uri("/api/v1/health/live")
+            .body(Body::empty())
+            .unwrap();
+            
+        let response = app.oneshot(add_ip(req)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_routes() {
+        let app = create_router();
+
+        // Test login
+        let login_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"email":"test@test.com","password":"pass"}"#))
+            .unwrap();
+            
+        let response = app.clone().oneshot(add_ip(login_req)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    
+    #[tokio::test]
+    async fn test_rate_limiting() {
+        let app = create_router();
+
+        // Send 15 requests instantly to trigger the rate limiter (burst is 10)
+        let mut failed = false;
+        for i in 0..15 {
+            let req = Request::builder()
+                .uri("/api/v1/health/live")
+                .body(Body::empty())
+                .unwrap();
+                
+            let response = app.clone().oneshot(add_ip(req)).await.unwrap();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                failed = true;
+                break;
+            }
+        }
+        
+        assert!(failed, "Rate limiter did not trigger");
+    }
 }

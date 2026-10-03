@@ -13,3 +13,7 @@ serde_json.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 forge-domain = { path = "../forge-domain" }
+forge-auth = { path = "../forge-auth" }
+tower_governor = "0.4"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace"] }

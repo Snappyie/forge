@@ -1,15 +1,15 @@
 [package]
-name = "forge-executor"
+name = "forge-auth"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
-chrono.workspace = true
+jsonwebtoken = "9.2"
+argon2 = "0.5"
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
+chrono.workspace = true
 forge-domain = { path = "../forge-domain" }
