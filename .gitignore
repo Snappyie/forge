@@ -1,2 +1,6 @@
 **/target
 crates/forge-domain/target
+/node_modules
+.env.*
+.env
+**/.env
