@@ -1,83 +1,153 @@
 "use client";
 
+/**
+ * Audit log (spec 7.14).
+ *
+ * Read-only: spec 05 endpoint 52 exposes no mutation, so this page offers
+ * none. Filters map onto the API's query parameters.
+ */
+
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { Search, ShieldAlert, Filter, Download } from "lucide-react";
+import { RefreshCw } from "lucide-react";
+
+import { useQuery } from "@/lib/useQuery";
+import { formatTimestamp, type AuditEvent } from "@/lib/types";
+import { AsyncBoundary } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { ResourceShell } from "@/components/ui/resource-shell";
+import { Input } from "@/components/ui/input";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export default function AuditPage() {
-  const auditLogs = [
-    { id: "au_901", user: "Admin", action: "Changed schedule", object: "Nightly Settlement", before: "0 2 * * *", after: "0 3 * * *", ip: "192.168.1.42", time: "10m ago", env: "Production" },
-    { id: "au_902", user: "System", action: "Paused job", object: "Data Sync", before: "Active", after: "Paused", ip: "10.0.0.1", time: "1h ago", env: "Production" },
-    { id: "au_903", user: "DevUser1", action: "Created job", object: "Report Gen", before: "-", after: "Created", ip: "192.168.1.105", time: "3h ago", env: "Dev" },
-  ];
+  const [action, setAction] = useState("ALL");
+  const [resource, setResource] = useState("");
+
+  const params = new URLSearchParams({ limit: "50" });
+  if (action !== "ALL") params.set("action", action);
+  if (resource.trim()) params.set("resource", resource.trim());
+
+  const query = useQuery<{ data: AuditEvent[] }>(`/audit-events?${params.toString()}`);
+  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const filtering = action !== "ALL" || resource.trim().length > 0;
 
   return (
-    <ResourceShell
-      title="Audit Trail"
-      subtitle="Track who changed what, when, and where."
-      actions={
-        <div className="flex gap-2">
-          <Button variant="outline"><Filter className="w-4 h-4 mr-2" /> Filter</Button>
-          <Button variant="outline"><Download className="w-4 h-4 mr-2" /> Export CSV</Button>
+    <div className="flex flex-col gap-4 p-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold">Audit</h1>
+          <p className="text-xs text-muted-foreground">
+            Security-relevant actions, append-only.
+          </p>
         </div>
-      }
-    >
-      <Card className="border-border/50 shadow-sm">
-        <CardHeader>
-          <div className="flex justify-between items-center">
-            <CardTitle className="flex items-center gap-2"><ShieldAlert className="w-5 h-5" /> Security & Changes</CardTitle>
-            <div className="relative">
-              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <input 
-                className="h-9 w-64 rounded-md border border-input bg-background pl-9 pr-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="Search audit logs..."
-              />
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
+
+        <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
+          <RefreshCw className="size-3.5" aria-hidden />
+          Refresh
+        </Button>
+      </header>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={action} onValueChange={(value) => setAction(value ?? "ALL")}>
+          <SelectTrigger className="w-48" aria-label="Filter by action">
+            <SelectValue placeholder="Action" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">All actions</SelectItem>
+            <SelectItem value="job.create">job.create</SelectItem>
+            <SelectItem value="job.archive">job.archive</SelectItem>
+            <SelectItem value="execution.cancel">execution.cancel</SelectItem>
+            <SelectItem value="worker.revoke">worker.revoke</SelectItem>
+            <SelectItem value="api_key.create">api_key.create</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <Input
+          value={resource}
+          onChange={(e) => setResource(e.target.value)}
+          placeholder="Filter by resource type"
+          aria-label="Filter by resource"
+          className="w-56"
+        />
+      </div>
+
+      <div className="rounded-lg border border-border">
+        <AsyncBoundary
+          state={query.state}
+          error={query.error}
+          forbidden={query.forbidden}
+          empty={query.state === "ready" && rows.length === 0}
+          onRetry={query.reload}
+          loadingLabel="Loading audit events"
+          emptyTitle={filtering ? "No audit events match" : "No audit events yet"}
+          emptyDescription={
+            filtering
+              ? "Clear the filters to see the full history."
+              : "Security-relevant actions will appear here."
+          }
+        >
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Time</TableHead>
-                <TableHead>User</TableHead>
+                <TableHead>When</TableHead>
                 <TableHead>Action</TableHead>
-                <TableHead>Object</TableHead>
-                <TableHead>Environment</TableHead>
-                <TableHead>Change (Before → After)</TableHead>
-                <TableHead className="text-right">IP Address</TableHead>
+                <TableHead>Resource</TableHead>
+                <TableHead>Actor</TableHead>
+                <TableHead>Result</TableHead>
+                <TableHead>Request</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {auditLogs.map((log) => (
-                <TableRow key={log.id} className="group">
-                  <TableCell className="text-muted-foreground whitespace-nowrap">{log.time}</TableCell>
-                  <TableCell className="font-medium">{log.user}</TableCell>
-                  <TableCell>{log.action}</TableCell>
-                  <TableCell className="font-mono text-xs">{log.object}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline" className={log.env === 'Production' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-muted'}>
-                      {log.env}
-                    </Badge>
+              {rows.map((event) => (
+                <TableRow key={event.id}>
+                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                    {formatTimestamp(event.created_at)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{event.action}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {event.resource_type}
+                    {event.resource_id ? (
+                      <code className="ml-1">
+                        {event.resource_id.slice(0, 8)}
+                      </code>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {event.actor_type}
+                    {event.actor_id ? ` ${event.actor_id.slice(0, 8)}` : ""}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-2 text-xs font-mono">
-                      <span className="text-red-500 bg-red-50 dark:bg-red-900/20 px-1 rounded">{log.before}</span>
-                      <span className="text-muted-foreground">→</span>
-                      <span className="text-green-500 bg-green-50 dark:bg-green-900/20 px-1 rounded">{log.after}</span>
-                    </div>
+                    <span
+                      className={
+                        event.result === "SUCCESS"
+                          ? "text-xs text-emerald-600 dark:text-emerald-400"
+                          : "text-xs text-red-600 dark:text-red-400"
+                      }
+                    >
+                      {event.result}
+                    </span>
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs text-muted-foreground">{log.ip}</TableCell>
+                  <TableCell className="font-mono text-[10px] text-muted-foreground">
+                    {event.request_id ? event.request_id.slice(0, 8) : "—"}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-        </CardContent>
-      </Card>
-    </ResourceShell>
+        </AsyncBoundary>
+      </div>
+    </div>
   );
 }

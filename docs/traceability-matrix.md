@@ -10,7 +10,7 @@ the specification and its implementation.
 | Domain | Primary spec | Main tests | Implementation |
 |---|---|---|---|
 | Jobs | 01, 02 | AT-STATE, AT-API | `forge-domain::job`, `forge-storage::jobs` |
-| Scheduling | 01, 09 | AT-SCH | `forge-domain::schedule`, `forge-storage::scheduling`; engine in Phase 4 |
+| Scheduling | 01, 09 | AT-SCH | `forge-scheduler` (engine, cron, misfire, clock) |
 | Execution | 01, 10 | AT-STATE, AT-REC | `forge-domain::execution`, `forge-storage::jobs`; worker runtime Phase 5 |
 | Workers | 01, 10 | AT-WKR | `forge-storage::scheduling` (register/heartbeat/drain/revoke) |
 | Retries | 02, 10 | AT-RETRY | `forge-domain::policy` — AT-RETRY-001..007 implemented |
@@ -28,22 +28,23 @@ the specification and its implementation.
 
 ## Conformance status by acceptance family
 
-| Family | Total | Implemented | Phase |
+Every acceptance-test ID in `20-acceptance-test-catalog.md` has at least one
+test that names it, so searching for an ID finds both the specification and its
+implementation.
+
+| Family | Total | Implemented | Where |
 |---|---|---|---|
-| AT-STATE | 4 | 4 | 2 |
-| AT-RETRY | 7 | 7 | 2 |
-| AT-WF (validation) | 2 | 2 | 2 |
-| AT-SCH (catch-up) | 1 | 1 | 2 |
-| AT-SCH (occurrence uniqueness) | 1 | 1 | 1, 3 |
-| AT-TEN | 4 | 2 | 3 |
-| AT-CON | 5 | 2 | 3 |
-| AT-WKR | 5 | 3 | 3 |
-| AT-API | 7 | 2 | 3, 8 |
-| AT-OBS | 5 | 1 | 3 |
-| AT-SCH (cron/timezone/DST) | 9 | 0 | 4 |
-| AT-WF (execution) | 6 | 0 | 5 |
-| AT-SEC | 6 | 0 | 7 |
-| AT-REC | 5 | 1 | 3, 10 |
+| AT-SCH | 10 | 10 | `forge-scheduler` unit + integration |
+| AT-STATE | 4 | 4 | `forge-domain::execution` |
+| AT-RETRY | 7 | 7 | `forge-domain::policy` |
+| AT-WKR | 5 | 5 | `forge-storage`, `forge-executor` |
+| AT-CON | 5 | 5 | `forge-storage/tests/concurrency_acceptance.rs` |
+| AT-WF | 8 | 8 | `forge-domain::workflow`, `forge-executor::workflow_engine` |
+| AT-TEN | 4 | 4 | `forge-storage`, `forge-api/tests/api_integration.rs` |
+| AT-API | 7 | 7 | `forge-api` unit + integration |
+| AT-SEC | 6 | 6 | `forge-auth` SSRF/RBAC, rate and sandbox policy |
+| AT-REC | 5 | 5 | `forge-events/tests/recovery_acceptance.rs` |
+| AT-OBS | 5 | 5 | `forge-observability`, `forge-executor` |
 
 A release cannot be called production-capable while mandatory acceptance tests
 are failing (20-acceptance-test-catalog.md).

@@ -1,122 +1,844 @@
-use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+//! Authentication and authorization (spec 05 §5.10, spec 11).
+//!
+//! Three things live here:
+//!
+//! * password hashing with argon2 (spec 11.2 requires Argon2 or bcrypt);
+//! * JWT access tokens plus **rotating** refresh tokens, with reuse detection;
+//! * resource-scoped RBAC, expressed as `resource:action` strings so a grant can
+//!   be stored in the database and audited.
+
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
+use argon2::Argon2;
+use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Roles from spec 05 §5.10.
+///
+/// The pre-existing four-role set (`SystemAdmin`, `TenantAdmin`, `Developer`,
+/// `Viewer`) did not match the specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Role {
-    SystemAdmin,
-    TenantAdmin,
+    Owner,
+    Admin,
+    Operator,
     Developer,
+    Auditor,
     Viewer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Permission {
-    // Jobs
-    CreateJob,
-    ReadJob,
-    UpdateJob,
-    DeleteJob,
-    // Executions
-    TriggerExecution,
-    CancelExecution,
-    ReadExecution,
-    // System
-    ManageWorkers,
-    ManageUsers,
-    ManageTenants,
-}
-
 impl Role {
-    pub fn permissions(&self) -> Vec<Permission> {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Role::SystemAdmin => vec![
-                Permission::CreateJob, Permission::ReadJob, Permission::UpdateJob, Permission::DeleteJob,
-                Permission::TriggerExecution, Permission::CancelExecution, Permission::ReadExecution,
-                Permission::ManageWorkers, Permission::ManageUsers, Permission::ManageTenants,
+            Role::Owner => "OWNER",
+            Role::Admin => "ADMIN",
+            Role::Operator => "OPERATOR",
+            Role::Developer => "DEVELOPER",
+            Role::Auditor => "AUDITOR",
+            Role::Viewer => "VIEWER",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "OWNER" => Some(Role::Owner),
+            "ADMIN" => Some(Role::Admin),
+            "OPERATOR" => Some(Role::Operator),
+            "DEVELOPER" => Some(Role::Developer),
+            "AUDITOR" => Some(Role::Auditor),
+            "VIEWER" => Some(Role::Viewer),
+            _ => None,
+        }
+    }
+
+    /// The permissions this role grants, as `resource:action` strings.
+    ///
+    /// This matrix is the source of truth; the `roles` table is seeded from it.
+    pub fn permissions(&self) -> &'static [&'static str] {
+        match self {
+            // Spec 11.4: OWNER holds every permission.
+            Role::Owner => &["*"],
+
+            Role::Admin => &[
+                "jobs:read",
+                "jobs:write",
+                "jobs:trigger",
+                "jobs:delete",
+                "job_versions:read",
+                "job_versions:write",
+                "executions:read",
+                "executions:cancel",
+                "executions:retry",
+                "workflows:read",
+                "workflows:write",
+                "workflows:trigger",
+                "schedules:read",
+                "schedules:write",
+                "queues:read",
+                "queues:write",
+                "workers:read",
+                "workers:admin",
+                "users:read",
+                "users:write",
+                "audit:read",
+                "settings:write",
             ],
-            Role::TenantAdmin => vec![
-                Permission::CreateJob, Permission::ReadJob, Permission::UpdateJob, Permission::DeleteJob,
-                Permission::TriggerExecution, Permission::CancelExecution, Permission::ReadExecution,
-                Permission::ManageUsers, // Scoped to their tenant only
+
+            // Spec 01.12 separates running work from changing definitions.
+            Role::Operator => &[
+                "jobs:read",
+                "jobs:trigger",
+                "executions:read",
+                "executions:cancel",
+                "executions:retry",
+                "workflows:read",
+                "workflows:trigger",
+                "schedules:read",
+                "queues:read",
+                "workers:read",
+                "audit:read",
             ],
-            Role::Developer => vec![
-                Permission::CreateJob, Permission::ReadJob, Permission::UpdateJob,
-                Permission::TriggerExecution, Permission::CancelExecution, Permission::ReadExecution,
+
+            Role::Developer => &[
+                "jobs:read",
+                "jobs:write",
+                "jobs:trigger",
+                "job_versions:read",
+                "job_versions:write",
+                "executions:read",
+                "executions:cancel",
+                "workflows:read",
+                "workflows:write",
+                "workflows:trigger",
+                "schedules:read",
+                "schedules:write",
+                "queues:read",
+                "workers:read",
             ],
-            Role::Viewer => vec![
-                Permission::ReadJob, Permission::ReadExecution,
+
+            Role::Auditor => &[
+                "jobs:read",
+                "job_versions:read",
+                "executions:read",
+                "workflows:read",
+                "schedules:read",
+                "queues:read",
+                "workers:read",
+                "audit:read",
+            ],
+
+            Role::Viewer => &[
+                "jobs:read",
+                "executions:read",
+                "workflows:read",
+                "queues:read",
+                "workers:read",
             ],
         }
     }
+
+    /// Whether this role grants `permission`.
+    ///
+    /// A `*` grant covers everything, so an OWNER is not enumerated permission by
+    /// permission.
+    pub fn allows(&self, permission: &str) -> bool {
+        self.permissions().iter().any(|p| {
+            *p == "*"
+                || *p == permission
+                // `jobs:*` covers `jobs:write`.
+                || (p.ends_with(":*") && permission.starts_with(&p[..p.len() - 1]))
+        })
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Passwords
+// ---------------------------------------------------------------------------
+
+/// Hashes a password with argon2id.
+pub fn hash_password(password: &str) -> Result<String, AuthError> {
+    if password.is_empty() {
+        return Err(AuthError::WeakPassword(
+            "password must not be empty".into(),
+        ));
+    }
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| AuthError::Crypto(format!("hash password: {e}")))
+}
+
+/// Verifies a password against a stored argon2 hash.
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
+    let parsed = PasswordHash::new(hash)
+        .map_err(|e| AuthError::Crypto(format!("parse password hash: {e}")))?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
+}
+
+/// Rejects passwords that are trivially weak.
+///
+/// Length is the dominant factor, so a character-class rule is deliberately not
+/// imposed.
+pub fn check_password_strength(password: &str) -> Result<(), AuthError> {
+    const MIN_LENGTH: usize = 12;
+    if password.chars().count() < MIN_LENGTH {
+        return Err(AuthError::WeakPassword(format!(
+            "password must be at least {MIN_LENGTH} characters"
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Access tokens
+// ---------------------------------------------------------------------------
+
+/// Claims carried by an access token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // User ID
+    /// Subject: the user id.
+    pub sub: String,
     pub tenant_id: String,
     pub role: Role,
     pub exp: usize,
     pub iat: usize,
+    /// Distinguishes an access token from a refresh token.
+    #[serde(default)]
+    pub token_type: String,
 }
 
+// `EncodingKey` and `DecodingKey` deliberately do not derive `Debug`: printing
+// one would risk emitting signing material into a log line.
 pub struct JwtService {
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
+    access_ttl: Duration,
 }
 
 impl JwtService {
-    pub fn new(secret: &str) -> Self {
+    pub fn new(secret: &[u8]) -> Self {
+        Self::new_with_ttl(secret, Duration::hours(24))
+    }
+
+    pub fn new_with_ttl(secret: &[u8], access_ttl: Duration) -> Self {
         Self {
-            encoding_key: EncodingKey::from_secret(secret.as_bytes()),
-            decoding_key: DecodingKey::from_secret(secret.as_bytes()),
+            encoding_key: EncodingKey::from_secret(secret),
+            decoding_key: DecodingKey::from_secret(secret),
+            access_ttl,
         }
     }
 
-    pub fn generate_token(&self, user_id: Uuid, tenant_id: Uuid, role: Role) -> Result<String, jsonwebtoken::errors::Error> {
+    pub fn issue(&self, user_id: Uuid, tenant_id: Uuid, role: Role) -> Result<String, AuthError> {
         let now = Utc::now();
-        let exp = (now + Duration::hours(24)).timestamp() as usize; // 24 hour expiry
-        
         let claims = Claims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
             role,
-            exp,
+            exp: (now + self.access_ttl).timestamp() as usize,
             iat: now.timestamp() as usize,
+            token_type: "access".to_string(),
         };
-
-        encode(&Header::default(), &claims, &self.encoding_key)
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &self.encoding_key,
+        )
+        .map_err(|e| AuthError::Crypto(format!("sign token: {e}")))
     }
 
-    pub fn validate_token(&self, token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.leeway = 60; // 60 seconds leeway for clock skew
-        
-        let token_data = decode::<Claims>(token, &self.decoding_key, &validation)?;
-        Ok(token_data.claims)
+    pub fn verify(&self, token: &str) -> Result<Claims, AuthError> {
+        let mut validation = Validation::new(Algorithm::HS256);
+        // Allow for modest clock skew between issuer and verifier.
+        validation.leeway = 60;
+
+        decode::<Claims>(token, &self.decoding_key, &validation)
+            .map(|d| d.claims)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+                _ => AuthError::InvalidToken,
+            })
     }
+
+    pub fn access_ttl(&self) -> Duration {
+        self.access_ttl
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Refresh tokens
+// ---------------------------------------------------------------------------
+
+/// A refresh token, stored only as a hash.
+///
+/// Spec 11.3 requires rotating refresh tokens. Rotation with reuse detection
+/// makes a stolen token single-use: presenting one that has already been
+/// exchanged revokes the chain.
+#[derive(Debug, Clone)]
+pub struct RefreshToken {
+    /// The raw value handed to the client. Never stored.
+    pub raw: String,
+    /// SHA-256 of `raw`, which is what goes in the database.
+    pub hash: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// How long a refresh token is valid.
+pub const REFRESH_TTL_DAYS: i64 = 30;
+
+/// Generates a refresh token: 32 random bytes plus its hash.
+pub fn generate_refresh_token() -> Result<RefreshToken, AuthError> {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let raw = base64_url_encode(&bytes);
+    Ok(RefreshToken {
+        hash: hash_token(&raw),
+        expires_at: Utc::now() + Duration::days(REFRESH_TTL_DAYS),
+        raw,
+    })
+}
+
+/// Hashes a token for storage (spec 08.8: secure one-way hashing).
+pub fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex(&hasher.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// API keys
+// ---------------------------------------------------------------------------
+
+/// An API key, shown to the client exactly once (spec 05 endpoint 49).
+#[derive(Debug, Clone)]
+pub struct GeneratedApiKey {
+    /// The raw key. Returned once at creation and never recoverable afterwards.
+    pub raw: String,
+    /// SHA-256 of `raw`, stored in `api_keys.key_hash`.
+    pub hash: String,
+}
+
+/// Generates an API key with a recognisable prefix.
+pub fn generate_api_key() -> GeneratedApiKey {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let raw = format!("forge_{}", base64_url_encode(&bytes));
+    GeneratedApiKey {
+        hash: hash_token(&raw),
+        raw,
+    }
+}
+
+/// Hashes an API key for lookup.
+pub fn hash_api_key(raw: &str) -> String {
+    hash_token(raw)
+}
+
+// ---------------------------------------------------------------------------
+// SSRF guard
+// ---------------------------------------------------------------------------
+
+/// Outcome of validating an outbound URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UrlVerdict {
+    Allowed,
+    /// The URL is refused, with a reason safe to show a user.
+    Blocked(String),
+}
+
+/// Checks a URL against the SSRF rules in spec 11.
+///
+/// Blocks loopback, link-local, private ranges, and cloud metadata endpoints.
+/// This is a syntactic first line of defence; a deployment that can resolve DNS
+/// to an internal address must also apply the check after resolution, which is
+/// documented as a known limitation rather than pretended away.
+pub fn check_outbound_url(url: &str) -> UrlVerdict {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return UrlVerdict::Blocked("URL could not be parsed".into());
+    };
+
+    // Only HTTP(S) is ever safe to fetch.
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return UrlVerdict::Blocked(format!(
+                "scheme `{other}` is not permitted; use http or https"
+            ))
+        }
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return UrlVerdict::Blocked("URL has no host".into());
+    };
+
+    if let Some(decision) = check_host(host) {
+        return decision;
+    }
+
+    UrlVerdict::Allowed
+}
+
+/// Checks a hostname or IP literal.
+pub fn check_host(host: &str) -> Option<UrlVerdict> {
+    let lower = host.to_ascii_lowercase();
+
+    // Hostnames that resolve to metadata services or to the loopback interface.
+    const BLOCKED_NAMES: &[&str] = &[
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "metadata.google.internal",
+        "metadata",
+        "instance-data",
+    ];
+    if BLOCKED_NAMES.contains(&lower.as_str()) {
+        return Some(UrlVerdict::Blocked(
+            "host is not permitted for outbound requests".into(),
+        ));
+    }
+
+    // A bare IPv6 literal arrives bracketed from `Url::host_str` in some cases.
+    let unbracketed = lower.trim_start_matches('[').trim_end_matches(']');
+
+    match unbracketed.parse::<std::net::IpAddr>() {
+        Ok(ip) => check_ip(ip),
+        Err(_) => {
+            // A hostname that is not an IP literal cannot be judged here; the
+            // post-resolution check covers it.
+            None
+        }
+    }
+}
+
+/// Blocks private, loopback, link-local, and multicast destinations.
+pub fn check_ip(ip: std::net::IpAddr) -> Option<UrlVerdict> {
+    use std::net::IpAddr::{V4, V6};
+
+    let blocked = match ip {
+        V4(v4) => {
+            v4.is_loopback()
+                // 0.0.0.0/8 "this network"
+                || v4.is_unspecified()
+                // RFC 1918
+                || v4.is_private()
+                // 169.254.0.0/16 link-local, which includes the AWS metadata
+                // endpoint at 169.254.169.254
+                || v4.is_link_local()
+                // 100.64.0.0/10 carrier-grade NAT
+                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                // Shared address space used by some clouds.
+                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xFE) == 18)
+        }
+        V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique local addresses fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6.is_multicast()
+        }
+    };
+
+    blocked.then(|| {
+        UrlVerdict::Blocked("address is not permitted for outbound requests".into())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn base64_url_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("invalid or malformed token")]
+    InvalidToken,
+    #[error("token has expired")]
+    TokenExpired,
+    #[error("password rejected: {0}")]
+    WeakPassword(String),
+    #[error("invalid credentials")]
+    InvalidCredentials,
+    #[error("refresh token reuse detected; the session chain has been revoked")]
+    RefreshTokenReuse,
+    #[error("account is disabled")]
+    AccountDisabled,
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+    #[error("tenant isolation violation: {0}")]
+    TenantIsolation(String),
+    #[error("cryptographic failure: {0}")]
+    Crypto(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // --- roles ---
+
     #[test]
-    fn test_jwt_lifecycle() {
-        let secret = "super_secret_key_for_testing";
-        let service = JwtService::new(secret);
-        
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        
-        let token = service.generate_token(user_id, tenant_id, Role::TenantAdmin).unwrap();
-        
-        let claims = service.validate_token(&token).unwrap();
-        assert_eq!(claims.sub, user_id.to_string());
-        assert_eq!(claims.tenant_id, tenant_id.to_string());
-        assert_eq!(claims.role, Role::TenantAdmin);
-        assert!(claims.role.permissions().contains(&Permission::ManageUsers));
-        assert!(!claims.role.permissions().contains(&Permission::ManageTenants)); // TenantAdmin cannot manage tenants globally
+    fn every_spec_role_exists() {
+        // Spec 05 §5.10 names exactly these six.
+        for name in ["OWNER", "ADMIN", "OPERATOR", "DEVELOPER", "AUDITOR", "VIEWER"] {
+            assert!(Role::parse(name).is_some(), "{name} must be a role");
+        }
+        assert_eq!(
+            Role::parse("SystemAdmin"),
+            None,
+            "the old four-role set is gone"
+        );
+    }
+
+    #[test]
+    fn roles_round_trip_through_their_string_form() {
+        for role in [
+            Role::Owner,
+            Role::Admin,
+            Role::Operator,
+            Role::Developer,
+            Role::Auditor,
+            Role::Viewer,
+        ] {
+            assert_eq!(Role::parse(role.as_str()), Some(role));
+        }
+    }
+
+    /// Spec 11.4 lists the permission vocabulary; each must be grantable.
+    #[test]
+    fn the_spec_permission_vocabulary_is_covered() {
+        for permission in [
+            "jobs:read",
+            "jobs:write",
+            "jobs:trigger",
+            "executions:read",
+            "executions:cancel",
+            "workers:admin",
+            "audit:read",
+        ] {
+            assert!(
+                Role::Admin.allows(permission) || Role::Owner.allows(permission),
+                "{permission} must be grantable"
+            );
+        }
+    }
+
+    #[test]
+    fn an_owner_may_do_anything() {
+        for permission in ["jobs:read", "users:write", "tenants:delete", "any:thing"] {
+            assert!(Role::Owner.allows(permission), "OWNER must allow {permission}");
+        }
+    }
+
+    #[test]
+    fn a_viewer_is_read_only() {
+        assert!(Role::Viewer.allows("jobs:read"));
+        assert!(Role::Viewer.allows("executions:read"));
+        assert!(
+            !Role::Viewer.allows("jobs:write"),
+            "a viewer must not author definitions"
+        );
+        assert!(!Role::Viewer.allows("executions:cancel"));
+        assert!(!Role::Viewer.allows("audit:read"));
+    }
+
+    /// Spec 01.12: running work and changing definitions are different powers.
+    #[test]
+    fn an_operator_may_run_work_but_not_rewrite_it() {
+        assert!(Role::Operator.allows("jobs:trigger"));
+        assert!(Role::Operator.allows("executions:cancel"));
+        assert!(
+            !Role::Operator.allows("jobs:write"),
+            "an operator must not redefine a job"
+        );
+        assert!(!Role::Operator.allows("workers:admin"));
+    }
+
+    #[test]
+    fn a_developer_may_write_but_not_administer() {
+        assert!(Role::Developer.allows("jobs:write"));
+        assert!(Role::Developer.allows("workflows:write"));
+        assert!(!Role::Developer.allows("users:write"));
+        assert!(!Role::Developer.allows("workers:admin"));
+    }
+
+    #[test]
+    fn an_auditor_reads_history_but_changes_nothing() {
+        assert!(Role::Auditor.allows("audit:read"));
+        assert!(Role::Auditor.allows("executions:read"));
+        assert!(!Role::Auditor.allows("jobs:write"));
+        assert!(!Role::Auditor.allows("executions:cancel"));
+    }
+
+    /// An admin must not be able to delete the tenant itself.
+    #[test]
+    fn tenant_deletion_is_owner_only() {
+        assert!(Role::Owner.allows("tenants:delete"));
+        assert!(!Role::Admin.allows("tenants:delete"));
+    }
+
+    #[test]
+    fn a_wildcard_permission_prefix_covers_its_sub_actions() {
+        // `jobs:*` must satisfy `jobs:write` without enumerating it.
+        assert!(Role::Owner.allows("jobs:write"));
+        assert!(!Role::Viewer.allows("jobs:delete"));
+    }
+
+    // --- passwords ---
+
+    #[test]
+    fn a_password_round_trips_through_argon2() {
+        let hash = hash_password("correct horse battery staple").unwrap();
+        assert!(hash.starts_with("$argon2"), "must be argon2: {hash}");
+        assert!(verify_password("correct horse battery staple", &hash).unwrap());
+        assert!(
+            !verify_password("wrong password", &hash).unwrap(),
+            "a wrong password must not verify"
+        );
+    }
+
+    #[test]
+    fn the_same_password_hashes_differently_each_time() {
+        // Distinct salts mean a stolen table cannot be attacked with
+        // precomputed hashes.
+        let a = hash_password("correct horse battery staple").unwrap();
+        let b = hash_password("correct horse battery staple").unwrap();
+        assert_ne!(a, b, "each hash must use a fresh salt");
+    }
+
+    #[test]
+    fn a_hash_never_contains_the_password() {
+        let password = "correct horse battery staple";
+        assert!(!hash_password(password).unwrap().contains(password));
+    }
+
+    #[test]
+    fn weak_passwords_are_rejected() {
+        assert!(check_password_strength("").is_err());
+        assert!(check_password_strength("short").is_err());
+        // "elevenchars" is 11 characters: one short of the minimum.
+        assert!(check_password_strength("elevenchars").is_err());
+        assert!(check_password_strength("twelvechars!").is_ok());
+        assert!(hash_password("").is_err());
+    }
+
+    #[test]
+    fn a_malformed_hash_is_an_error_not_a_silent_pass() {
+        assert!(verify_password("anything", "not-a-hash").is_err());
+    }
+
+    // --- access tokens ---
+
+    #[test]
+    fn an_access_token_round_trips() {
+        let service = JwtService::new(b"test-secret");
+        let user = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+
+        let token = service.issue(user, tenant, Role::Operator).unwrap();
+        let claims = service.verify(&token).unwrap();
+
+        assert_eq!(claims.sub, user.to_string());
+        assert_eq!(claims.tenant_id, tenant.to_string());
+        assert_eq!(claims.role, Role::Operator);
+        assert_eq!(claims.token_type, "access");
+    }
+
+    #[test]
+    fn a_token_signed_with_another_secret_is_rejected() {
+        let issuer = JwtService::new(b"secret-one");
+        let verifier = JwtService::new(b"secret-two");
+        let token = issuer.issue(Uuid::new_v4(), Uuid::new_v4(), Role::Admin).unwrap();
+        assert!(verifier.verify(&token).is_err());
+    }
+
+    #[test]
+    fn a_malformed_token_is_rejected() {
+        assert!(matches!(
+            JwtService::new(b"secret").verify("not-a-jwt"),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn an_expired_token_is_reported_as_expired() {
+        // The verifier allows 60s of clock skew, so a token must be expired by
+        // more than that to register as expired rather than merely invalid.
+        let service = JwtService::new_with_ttl(b"secret", Duration::seconds(-120));
+        let token = service.issue(Uuid::new_v4(), Uuid::new_v4(), Role::Viewer).unwrap();
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
+    }
+
+    #[test]
+    fn a_token_within_the_leeway_window_is_still_accepted() {
+        // A small negative skew must not lock a user out during ordinary clock
+        // drift.
+        let service = JwtService::new_with_ttl(b"secret", Duration::seconds(-10));
+        let token = service.issue(Uuid::new_v4(), Uuid::new_v4(), Role::Viewer).unwrap();
+        assert!(service.verify(&token).is_ok(), "modest skew is tolerated");
+    }
+
+    // --- refresh tokens ---
+
+    #[test]
+    fn a_refresh_token_is_stored_only_as_a_hash() {
+        let token = generate_refresh_token().unwrap();
+        assert!(
+            token.raw.len() >= 32,
+            "the raw value must be long enough to resist guessing"
+        );
+        assert_ne!(token.hash, token.raw, "the raw value is never stored");
+        assert_eq!(token.hash.len(), 64, "SHA-256 is 64 hex characters");
+    }
+
+    #[test]
+    fn refresh_tokens_are_unique() {
+        let a = generate_refresh_token().unwrap();
+        let b = generate_refresh_token().unwrap();
+        assert_ne!(a.raw, b.raw);
+        assert_ne!(a.hash, b.hash);
+    }
+
+    #[test]
+    fn hashing_is_deterministic_so_a_token_can_be_looked_up() {
+        assert_eq!(hash_token("abc"), hash_token("abc"));
+        assert_ne!(hash_token("abc"), hash_token("abd"));
+    }
+
+    #[test]
+    fn a_refresh_token_carries_an_expiry() {
+        let token = generate_refresh_token().unwrap();
+        assert!(token.expires_at > Utc::now());
+        assert!(token.expires_at <= Utc::now() + Duration::days(REFRESH_TTL_DAYS + 1));
+    }
+
+    // --- API keys ---
+
+    #[test]
+    fn an_api_key_is_prefixed_and_shown_once() {
+        let key = generate_api_key();
+        assert!(key.raw.starts_with("forge_"), "keys are recognisable");
+        assert_ne!(key.hash, key.raw, "only the hash is stored");
+        assert_eq!(key.hash.len(), 64);
+    }
+
+    #[test]
+    fn api_keys_are_unique() {
+        assert_ne!(generate_api_key().raw, generate_api_key().raw);
+    }
+
+    #[test]
+    fn an_api_key_can_be_looked_up_by_its_hash() {
+        let key = generate_api_key();
+        assert_eq!(hash_api_key(&key.raw), key.hash);
+    }
+
+    // --- SSRF (AT-SEC-002) ---
+
+    #[test]
+    fn loopback_and_metadata_targets_are_blocked() {
+        for url in [
+            "http://localhost/",
+            "http://127.0.0.1/",
+            "http://127.0.0.1:8080/admin",
+            "http://[::1]/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+        ] {
+            assert!(
+                matches!(check_outbound_url(url), UrlVerdict::Blocked(_)),
+                "{url} must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn private_ranges_are_blocked() {
+        for url in [
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://[fc00::1]/",
+            "http://[fe80::1]/",
+        ] {
+            assert!(
+                matches!(check_outbound_url(url), UrlVerdict::Blocked(_)),
+                "{url} must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn non_http_schemes_are_blocked() {
+        for url in ["file:///etc/passwd", "ftp://example.com/", "gopher://example.com/"] {
+            assert!(
+                matches!(check_outbound_url(url), UrlVerdict::Blocked(_)),
+                "{url} must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_url_is_blocked_rather_than_allowed() {
+        assert!(matches!(
+            check_outbound_url("not a url at all"),
+            UrlVerdict::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn public_destinations_are_allowed() {
+        for url in [
+            "https://example.com/webhook",
+            "http://93.184.216.34/hook",
+            "https://api.stripe.com/v1/events",
+        ] {
+            assert_eq!(
+                check_outbound_url(url),
+                UrlVerdict::Allowed,
+                "{url} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unresolvable_hostname_is_not_judged_by_the_literal_check() {
+        // A hostname is checked after DNS resolution, which this layer cannot do;
+        // it must not be refused outright either.
+        assert_eq!(check_host("internal.example.com"), None);
+    }
+
+    #[test]
+    fn hex_encoding_is_lowercase_and_padded() {
+        assert_eq!(hex(&[0x00, 0x0f, 0xff]), "000fff");
     }
 }

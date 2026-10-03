@@ -1,195 +1,202 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { ServerCrash, Activity, Cpu, MemoryStick, Signal, Server, PowerOff } from "lucide-react";
+/**
+ * Worker list (spec 7.12).
+ *
+ * Drain and revoke are gated on the `workers:admin` permission, so a viewer
+ * sees the fleet without seeing controls they cannot use.
+ */
+
 import Link from "next/link";
+import { useState } from "react";
+import { Loader2, Power, RefreshCw, ShieldOff } from "lucide-react";
+
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { useQuery } from "@/lib/useQuery";
+import { formatRelative, formatTimestamp, roleCan, type Worker } from "@/lib/types";
+import { AsyncBoundary } from "@/components/states";
+import { StatusBadge } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export default function WorkersPage() {
-  const [workers, setWorkers] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const { session } = useAuth();
+  const [status, setStatus] = useState("ALL");
+  const path = status === "ALL" ? "/workers?limit=50" : `/workers?limit=50&status=${status}`;
+  const query = useQuery<{ data: Worker[] }>(path);
 
-  const fetchWorkers = async () => {
-    try {
-      setIsLoading(true);
-      const res = await fetch("http://localhost:3000/api/v1/workers");
-      if (res.ok) {
-        const json = await res.json();
-        // We'll merge with some mock stats since the DB doesn't track CPU/Mem directly right now
-        const enriched = (json.data || []).map((w: any) => ({
-          ...w,
-          version: "v1.2.4",
-          uptime: "14d 2h",
-          cpu: Math.floor(Math.random() * 80 + 10) + "%",
-          mem: Math.floor(Math.random() * 60 + 20) + "%"
-        }));
-        setWorkers(enriched);
-      }
-    } catch (err) {
-      console.error("Failed to fetch workers:", err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchWorkers();
-  }, []);
+  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const canAdmin = roleCan(session?.role, "workers:admin");
 
   return (
-    <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-rose-50/50 via-background to-background dark:from-rose-900/10 dark:via-background dark:to-background">
-      <header className="flex justify-between items-center mb-8">
+    <div className="flex flex-col gap-4 p-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <motion.h1 
-            initial={{ y: -20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            className="text-4xl font-bold tracking-tight mb-2 text-foreground"
-          >
-            Worker Fleet
-          </motion.h1>
-          <p className="text-muted-foreground">Monitor cluster health and worker execution capacity.</p>
+          <h1 className="text-lg font-semibold">Workers</h1>
+          <p className="text-xs text-muted-foreground">
+            {rows.length} registered; a revoked worker never receives work again.
+          </p>
         </div>
-        <Button className="bg-rose-600 hover:bg-rose-700 text-white">
-          <ServerCrash className="mr-2 h-4 w-4" /> Provision Worker
-        </Button>
+
+        <div className="flex items-center gap-2">
+          <Select value={status} onValueChange={(value) => setStatus(value ?? "ALL")}>
+            <SelectTrigger className="w-40" aria-label="Filter by status">
+              <SelectValue placeholder="Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">All statuses</SelectItem>
+              <SelectItem value="READY">Ready</SelectItem>
+              <SelectItem value="BUSY">Busy</SelectItem>
+              <SelectItem value="DRAINING">Draining</SelectItem>
+              <SelectItem value="OFFLINE">Offline</SelectItem>
+              <SelectItem value="REVOKED">Revoked</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
+            <RefreshCw className="size-3.5" aria-hidden />
+            Refresh
+          </Button>
+        </div>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
-          <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-            <CardContent className="p-6">
-              <div className="flex justify-between items-start mb-4">
-                <div className="bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-400 p-2 rounded-lg">
-                  <Activity className="w-5 h-5" />
-                </div>
-                <Badge className="bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400 shadow-none border-none animate-pulse">Healthy</Badge>
-              </div>
-              <h3 className="text-3xl font-bold tracking-tight">{workers.filter(w => w.status === 'Online').length} / {workers.length}</h3>
-              <p className="text-sm text-muted-foreground mt-1">Active Workers Online</p>
-            </CardContent>
-          </Card>
-        </motion.div>
-        
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
-          <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-            <CardContent className="p-6">
-              <div className="flex justify-between items-start mb-4">
-                <div className="bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400 p-2 rounded-lg">
-                  <Server className="w-5 h-5" />
-                </div>
-              </div>
-              <h3 className="text-3xl font-bold tracking-tight">1,204</h3>
-              <p className="text-sm text-muted-foreground mt-1">Jobs Processed (24h)</p>
-            </CardContent>
-          </Card>
-        </motion.div>
-
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
-          <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-            <CardContent className="p-6">
-              <div className="flex justify-between items-start mb-4">
-                <div className="bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400 p-2 rounded-lg">
-                  <Signal className="w-5 h-5" />
-                </div>
-                <span className="text-xs font-medium text-amber-600 dark:text-amber-400 flex items-center"><Activity className="w-3 h-3 mr-1" /> Load Spiking</span>
-              </div>
-              <h3 className="text-3xl font-bold tracking-tight">42</h3>
-              <p className="text-sm text-muted-foreground mt-1">Queue Depth (Pending)</p>
-            </CardContent>
-          </Card>
-        </motion.div>
+      <div className="rounded-lg border border-border">
+        <AsyncBoundary
+          state={query.state}
+          error={query.error}
+          forbidden={query.forbidden}
+          empty={query.state === "ready" && rows.length === 0}
+          onRetry={query.reload}
+          loadingLabel="Loading workers"
+          emptyTitle="No workers registered"
+          emptyDescription="Register a worker to begin executing queued work."
+        >
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Worker</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Draining</TableHead>
+                <TableHead>Last heartbeat</TableHead>
+                {canAdmin ? <TableHead className="text-right">Actions</TableHead> : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((worker) => (
+                <TableRow key={worker.id}>
+                  <TableCell>
+                    <Link
+                      href={`/workers/${worker.id}`}
+                      className="font-medium underline-offset-4 hover:underline"
+                    >
+                      {worker.name ?? worker.hostname}
+                    </Link>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {worker.hostname}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={worker.status} />
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {worker.draining ? "yes" : "no"}
+                  </TableCell>
+                  <TableCell
+                    className="text-xs text-muted-foreground"
+                    title={formatTimestamp(worker.last_heartbeat_at)}
+                  >
+                    {formatRelative(worker.last_heartbeat_at)}
+                  </TableCell>
+                  {canAdmin ? (
+                    <TableCell className="text-right">
+                      <WorkerActions worker={worker} onDone={query.reload} />
+                    </TableCell>
+                  ) : null}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </AsyncBoundary>
       </div>
+    </div>
+  );
+}
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4 }}
-      >
-        <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-          <CardHeader>
-            <CardTitle>Worker Nodes</CardTitle>
-            <CardDescription>
-              Detailed health metrics for connected pollers.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="rounded-md border border-border/50">
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent bg-muted/20">
-                    <TableHead>Worker ID</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Hostname</TableHead>
-                    <TableHead>Version</TableHead>
-                    <TableHead>Uptime</TableHead>
-                    <TableHead>Load</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {isLoading ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                        Loading workers from database...
-                      </TableCell>
-                    </TableRow>
-                  ) : workers.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                        No active workers found.
-                      </TableCell>
-                    </TableRow>
-                  ) : workers.map((w) => (
-                    <TableRow key={w.id} className="group cursor-pointer hover:bg-muted/50">
-                      <TableCell className="font-mono text-sm font-medium">
-                        <Link href={`/workers/${w.id}`} className="hover:underline">
-                          {w.id.substring(0, 8)}...
-                        </Link>
-                      </TableCell>
-                      <TableCell>
-                        <Badge 
-                          className={`shadow-none border-none ${
-                            w.status === 'Online' ? 'bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-400' :
-                            'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
-                          }`}
-                        >
-                          {w.status === 'Online' && <span className="w-1.5 h-1.5 rounded-full bg-green-500 mr-2 animate-pulse" />}
-                          {w.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{w.hostname}</TableCell>
-                      <TableCell className="font-mono text-xs">{w.version}</TableCell>
-                      <TableCell className="text-muted-foreground">{w.uptime}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-col gap-1 w-32">
-                          <div className="flex items-center justify-between text-xs text-muted-foreground">
-                            <span className="flex items-center"><Cpu className="w-3 h-3 mr-1"/> {w.cpu}</span>
-                            <span className="flex items-center"><MemoryStick className="w-3 h-3 mr-1"/> {w.mem}</span>
-                          </div>
-                          {w.status === 'Online' && (
-                            <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden flex">
-                              <div className="bg-indigo-500 h-full" style={{ width: w.cpu }} />
-                            </div>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity">
-                          <PowerOff className="h-4 w-4 text-muted-foreground" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      </motion.div>
-    </main>
+function WorkerActions({
+  worker,
+  onDone,
+}: {
+  worker: Worker;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function act(action: "drain" | "revoke", confirm: string) {
+    if (!window.confirm(confirm)) return;
+    setBusy(true);
+    try {
+      await api.post(`/workers/${worker.id}/${action}`);
+      onDone();
+    } catch (cause) {
+      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-end gap-1">
+      {worker.status !== "DRAINING" && worker.status !== "REVOKED" ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={busy}
+          aria-label={`Drain ${worker.hostname}`}
+          title="Drain: finish current work, accept nothing new"
+          onClick={() =>
+            act("drain", `Drain "${worker.hostname}"? It stops accepting new work.`)
+          }
+        >
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Power className="size-3.5" aria-hidden />
+          )}
+        </Button>
+      ) : null}
+
+      {worker.status !== "REVOKED" ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={busy}
+          aria-label={`Revoke ${worker.hostname}`}
+          title="Revoke: permanently"
+          onClick={() =>
+            act(
+              "revoke",
+              `Revoke "${worker.hostname}"? It can never receive work again.`,
+            )
+          }
+        >
+          <ShieldOff className="size-3.5" aria-hidden />
+        </Button>
+      ) : null}
+    </div>
   );
 }

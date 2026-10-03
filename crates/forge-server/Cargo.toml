@@ -19,3 +19,4 @@ forge-scheduler = { path = "../forge-scheduler" }
 forge-storage = { path = "../forge-storage" }
 forge-executor = { path = "../forge-executor" }
 forge-api = { path = "../forge-api" }
+forge-events = { path = "../forge-events" }

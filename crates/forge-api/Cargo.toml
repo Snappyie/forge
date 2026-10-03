@@ -13,10 +13,23 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-forge-domain = { path = "../forge-domain" }
-forge-auth = { path = "../forge-auth" }
-forge-config = { path = "../forge-config" }
+http = "1"
+sha2 = "0.10"
+tracing.workspace = true
+sqlx.workspace = true
 tower_governor = "0.4"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "cors", "request-id"] }
-sqlx.workspace = true
+
+forge-domain = { path = "../forge-domain" }
+forge-auth = { path = "../forge-auth" }
+forge-config = { path = "../forge-config" }
+forge-storage = { path = "../forge-storage" }
+forge-events = { path = "../forge-events" }
+forge-executor = { path = "../forge-executor" }
+forge-scheduler = { path = "../forge-scheduler" }
+forge-observability = { path = "../forge-observability" }
+[dev-dependencies]
+chrono-tz = "0.10"
+
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

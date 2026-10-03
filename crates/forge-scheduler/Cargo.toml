@@ -7,7 +7,17 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+chrono-tz = "0.10"
 uuid.workspace = true
 thiserror.workspace = true
-forge-domain = { path = "../forge-domain" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
 cron = "0.12"
+forge-domain = { path = "../forge-domain" }
+forge-storage = { path = "../forge-storage" }
+[dev-dependencies]
+forge-executor = { path = "../forge-executor" }
+forge-auth = { path = "../forge-auth" }

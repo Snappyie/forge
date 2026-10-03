@@ -137,29 +137,50 @@ Amends: 09-scheduling-engine.md §9.4.
 Decision:
 V1 recurring schedules use standard five-field cron syntax
 (`minute hour day-of-month month day-of-week`). Six- and seven-field
-extensions are rejected rather than inferred.
+extensions are rejected rather than inferred. Days of the week are numbered
+from **Sunday**, where `0` is Sunday and `1` is Monday.
 
 Reason:
 §9.4 explicitly defers the dialect choice but forbids silently supporting
 ambiguous dialects. Pinning one dialect and documenting it in the OpenAPI
 specification satisfies both halves of that requirement.
 
+Day-of-week numbering needs stating separately because the two conventions in
+common use disagree: the Unix convention treats `1` as Monday, whereas the
+underlying parser numbers from Sunday, so `1-5` means Sunday through Thursday
+rather than "weekdays". A schedule written under the Unix reading would fire on
+the wrong days. The OpenAPI description MUST carry this explicitly, and
+`forge_scheduler::schedule` tests pin the behaviour so it cannot drift.
+
+Implementation note: the parser takes a *six*-field expression beginning with
+seconds. Forge's dialect omits seconds, so a fixed `0 ` is prepended during
+parsing. Passing the raw string through would read `0 2 * * *` as
+second=0/minute=2, shifting every occurrence by one field.
+
 ## ADR-0014 Ambiguous local times fire once, at the first occurrence
 
 Status: Accepted.
 
-Amends: 09-scheduling-engine.md §9.6.
+Amends: 09-scheduling-engine.md §09.6.
 
 Decision:
-Where a local time occurs twice during a DST fall-back, the schedule fires once,
-at the first (earlier) occurrence. Nonexistent local times during a
-spring-forward follow the schedule's configured misfire policy.
+Where a local time occurs twice during a DST fall-back, the schedule fires
+once, at the first (earlier) occurrence. Nonexistent local times during a
+spring-forward shift forward past the gap, and the schedule's misfire policy
+then decides whether the shifted instant still fires.
 
 Reason:
-§09.6 requires an explicitly documented first/second policy. Firing once avoids
-the duplicate execution that a "both" policy would produce, and the database
-constraint on `(schedule_id, scheduled_for)` would reject the second write
-anyway.
+§09.6 requires an explicitly documented first/second policy. Firing once
+avoids the duplicate execution that a "both" policy would produce, and the
+database constraint on `(schedule_id, scheduled_for)` would reject the second
+write anyway.
+
+Implementation note: the underlying cron iterator walks local wall-clock time
+and steps *over* an ambiguous hour rather than emitting both candidates. That
+is compatible with this ADR — one wall-clock time yields at most one execution —
+but the practical consequence is that a schedule targeting the repeated hour
+does not run at all on the fall-back day. This is documented operator-facing
+behaviour, not a silent surprise.
 
 ## ADR-0015 A schedule's timezone is required
 

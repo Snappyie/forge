@@ -1,92 +1,215 @@
 "use client";
 
-import { motion } from "framer-motion";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Activity, LayoutList, Layers } from "lucide-react";
+/**
+ * Queue list (spec 7.13).
+ *
+ * Pause and resume are gated on `queues:write`.
+ */
+
+import { useState } from "react";
+import { Loader2, Pause, Play, Plus, RefreshCw } from "lucide-react";
+
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { useQuery } from "@/lib/useQuery";
+import { roleCan, type Queue } from "@/lib/types";
+import { AsyncBoundary } from "@/components/states";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 export default function QueuesPage() {
-  const queues = [
-    { name: "Critical", depth: 0, oldest: "—", throughput: "200/min" },
-    { name: "Normal", depth: 31, oldest: "12s", throughput: "80/min" },
-    { name: "Low", depth: 82, oldest: "3m", throughput: "20/min" },
-  ];
+  const { session } = useAuth();
+  const query = useQuery<{ data: Queue[] }>("/queues");
+  const [creating, setCreating] = useState(false);
+
+  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const canWrite = roleCan(session?.role, "queues:write");
 
   return (
-    <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-orange-50/50 via-background to-background dark:from-orange-900/10 dark:via-background dark:to-background">
-      <header className="mb-8">
-        <motion.h1 
-          initial={{ y: -20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          className="text-4xl font-bold tracking-tight mb-2 text-foreground flex items-center gap-3"
-        >
-          <Layers className="h-8 w-8 text-orange-500" /> Queue Management
-        </motion.h1>
-        <p className="text-muted-foreground">Monitor processing throughput and queue depth.</p>
+    <div className="flex flex-col gap-4 p-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold">Queues</h1>
+          <p className="text-xs text-muted-foreground">
+            A paused queue stops receiving work without cancelling what it holds.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
+            <RefreshCw className="size-3.5" aria-hidden />
+            Refresh
+          </Button>
+          {canWrite ? (
+            <Button size="sm" onClick={() => setCreating((open) => !open)}>
+              <Plus className="size-3.5" aria-hidden />
+              New queue
+            </Button>
+          ) : null}
+        </div>
       </header>
 
-      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
-        <Card className="bg-card/50 backdrop-blur-sm border-border/50">
-          <CardHeader>
-            <CardTitle>Active Queues</CardTitle>
-            <CardDescription>Current backlog across priority tiers.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Queue</TableHead>
-                  <TableHead>Depth</TableHead>
-                  <TableHead>Oldest Message</TableHead>
-                  <TableHead>Throughput</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {queues.map((q) => (
-                  <TableRow key={q.name}>
-                    <TableCell className="font-medium">{q.name}</TableCell>
-                    <TableCell>
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${q.depth > 50 ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400' : 'bg-muted text-foreground'}`}>
-                        {q.depth}
-                      </span>
+      {creating && canWrite ? (
+        <CreateQueueForm
+          onCreated={() => {
+            setCreating(false);
+            query.reload();
+          }}
+        />
+      ) : null}
+
+      <div className="rounded-lg border border-border">
+        <AsyncBoundary
+          state={query.state}
+          error={query.error}
+          forbidden={query.forbidden}
+          empty={query.state === "ready" && rows.length === 0}
+          onRetry={query.reload}
+          loadingLabel="Loading queues"
+          emptyTitle="No queues yet"
+          emptyDescription="A queue bounds how much work runs at once."
+        >
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Max concurrency</TableHead>
+                <TableHead>State</TableHead>
+                {canWrite ? <TableHead className="text-right">Actions</TableHead> : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((queue) => (
+                <TableRow key={queue.id}>
+                  <TableCell className="font-medium">{queue.name}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {queue.max_concurrency ?? "unlimited"}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {queue.paused ? "paused" : "active"}
+                  </TableCell>
+                  {canWrite ? (
+                    <TableCell className="text-right">
+                      <QueueActions queue={queue} onDone={query.reload} />
                     </TableCell>
-                    <TableCell className="text-muted-foreground">{q.oldest}</TableCell>
-                    <TableCell className="font-mono text-xs">{q.throughput}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </motion.div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
-          <Card className="bg-card/50 backdrop-blur-sm h-full border-border/50">
-            <CardHeader>
-              <CardTitle>Queue Depth Over Time</CardTitle>
-            </CardHeader>
-            <CardContent className="h-48 flex items-center justify-center border-t border-border/50 bg-muted/10">
-              <span className="text-muted-foreground text-sm flex items-center gap-2">
-                <Activity className="h-4 w-4" /> Real-time depth chart initialized
-              </span>
-            </CardContent>
-          </Card>
-        </motion.div>
-
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
-          <Card className="bg-card/50 backdrop-blur-sm h-full border-border/50">
-            <CardHeader>
-              <CardTitle>Arrival vs Processing Rate</CardTitle>
-            </CardHeader>
-            <CardContent className="h-48 flex items-center justify-center border-t border-border/50 bg-muted/10">
-              <span className="text-muted-foreground text-sm flex items-center gap-2">
-                <LayoutList className="h-4 w-4" /> Throughput analysis active
-              </span>
-            </CardContent>
-          </Card>
-        </motion.div>
+                  ) : null}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </AsyncBoundary>
       </div>
-    </main>
+    </div>
+  );
+}
+
+function QueueActions({ queue, onDone }: { queue: Queue; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const paused = queue.paused ?? false;
+
+  async function toggle() {
+    setBusy(true);
+    try {
+      await api.post(`/queues/${queue.id}/${paused ? "resume" : "pause"}`);
+      onDone();
+    } catch (cause) {
+      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={busy}
+      onClick={toggle}
+      aria-label={`${paused ? "Resume" : "Pause"} ${queue.name}`}
+    >
+      {busy ? (
+        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+      ) : paused ? (
+        <Play className="size-3.5" aria-hidden />
+      ) : (
+        <Pause className="size-3.5" aria-hidden />
+      )}
+      {paused ? "Resume" : "Pause"}
+    </Button>
+  );
+}
+
+function CreateQueueForm({ onCreated }: { onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [maxConcurrency, setMaxConcurrency] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await api.post("/queues", {
+        name: name.trim(),
+        max_concurrency: maxConcurrency ? Number(maxConcurrency) : undefined,
+      });
+      setName("");
+      setMaxConcurrency("");
+      onCreated();
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError
+          ? (cause.fieldError("name") ?? cause.message)
+          : "could not reach the server",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="flex flex-wrap items-end gap-3 rounded-lg border border-border p-4"
+    >
+      <div className="flex min-w-[12rem] flex-col gap-1.5">
+        <Label htmlFor="queue-name">Name</Label>
+        <Input
+          id="queue-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+        />
+      </div>
+      <div className="flex w-40 flex-col gap-1.5">
+        <Label htmlFor="queue-limit">Max concurrency</Label>
+        <Input
+          id="queue-limit"
+          type="number"
+          min={1}
+          value={maxConcurrency}
+          onChange={(e) => setMaxConcurrency(e.target.value)}
+          placeholder="unlimited"
+        />
+      </div>
+      <Button type="submit" disabled={busy}>
+        {busy ? "Creating…" : "Create"}
+      </Button>
+      {error ? (
+        <p role="alert" className="w-full text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </form>
   );
 }

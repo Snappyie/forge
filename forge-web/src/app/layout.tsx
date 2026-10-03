@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
-import { Sidebar } from "@/components/layout/Sidebar";
-import { CommandPalette } from "@/components/layout/CommandPalette";
+import { AuthProvider } from "@/lib/auth";
+import { AppShell } from "@/components/layout/AppShell";
+import { Toaster } from "@/components/ui/toast";
 import "./globals.css";
 
 const inter = Inter({
@@ -18,10 +19,8 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "Forge | Execution Engine",
-  description: "Advanced Job Orchestration Platform",
+  description: "Distributed job orchestration platform",
 };
-
-import { Toaster } from "@/components/ui/toast";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -29,13 +28,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       lang="en"
       className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased font-sans dark`}
     >
-      <body className="min-h-full flex bg-background text-foreground overflow-hidden">
-        <Sidebar />
-        <div className="flex-1 overflow-y-auto">
-          {children}
-        </div>
-        <Toaster />
-        <CommandPalette />
+      <body className="min-h-full bg-background text-foreground">
+        {/*
+          The shell lives here rather than in the root body so the sign-in and
+          register pages can opt out of the sidebar and header.
+        */}
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+          <Toaster />
+        </AuthProvider>
       </body>
     </html>
   );

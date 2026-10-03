@@ -56,11 +56,44 @@ impl ErrorClass {
             ErrorClass::Internal => "INTERNAL",
         }
     }
+
+    /// Parses the spec 02.14 spelling, case-insensitively.
+    pub fn parse(raw: &str) -> Option<Self> {
+        const ALL: &[ErrorClass] = &[
+            ErrorClass::Validation,
+            ErrorClass::Authentication,
+            ErrorClass::Authorization,
+            ErrorClass::NotFound,
+            ErrorClass::Conflict,
+            ErrorClass::RateLimited,
+            ErrorClass::Transient,
+            ErrorClass::DependencyUnavailable,
+            ErrorClass::Timeout,
+            ErrorClass::Cancellation,
+            ErrorClass::ResourceExhausted,
+            ErrorClass::Permanent,
+            ErrorClass::Internal,
+        ];
+        let upper = raw.trim().to_ascii_uppercase();
+        ALL.iter().copied().find(|c| c.as_str() == upper)
+    }
 }
 
 impl std::fmt::Display for ErrorClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ErrorClass {
+    type Err = DomainError;
+
+    /// Accepts the spec 02.14 spelling, case-insensitively, so a client may send
+    /// either `TIMEOUT` or `timeout`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| {
+            DomainError::ValidationError(format!("unknown error class: {s}"))
+        })
     }
 }
 

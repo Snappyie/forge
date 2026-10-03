@@ -1,235 +1,379 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
+/**
+ * Job list (spec 7.5).
+ *
+ * Reads live data through the typed client, and provides the loading, empty,
+ * error and permission-denied states spec 7.2 requires.
+ */
+
+import Link from "next/link";
+import { useMemo, useState } from "react";
+import { Archive, Loader2, Play, Plus, RefreshCw, Search } from "lucide-react";
+
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { useQuery } from "@/lib/useQuery";
+import {
+  formatRelative,
+  formatTimestamp,
+  roleCan,
+  type Job,
+  type Role,
+} from "@/lib/types";
+import { AsyncBoundary } from "@/components/states";
+import { PriorityBadge, StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { PlusCircle, Search, Settings2 } from "lucide-react";
-import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-  DialogFooter
 } from "@/components/ui/dialog";
-import { useToast } from "@/hooks/use-toast";
-import { PowerfulFilterBar } from "@/components/ui/filter-bar";
-import { BulkOperationsBar } from "@/components/ui/bulk-operations";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export default function JobsPage() {
-  const router = useRouter();
-  const { toast } = useToast();
-  
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [newJobName, setNewJobName] = useState("");
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set());
+  const { session } = useAuth();
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("ALL");
 
-  const fetchJobs = async () => {
-    try {
-      setIsLoading(true);
-      const res = await fetch("http://localhost:3000/api/v1/jobs");
-      if (res.ok) {
-        const json = await res.json();
-        setJobs(json.data || []);
-      }
-    } catch (err) {
-      console.error("Failed to fetch jobs:", err);
-      toast({ title: "Error", description: "Failed to fetch jobs.", variant: "destructive" });
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const query = useQuery<{ data: Job[] }>("/jobs");
+  const jobs = useMemo(() => {
+    const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+    return rows.filter((job) => {
+      if (status !== "ALL" && job.status !== status) return false;
+      if (!search.trim()) return true;
+      const needle = search.trim().toLowerCase();
+      return (
+        job.name.toLowerCase().includes(needle) ||
+        (job.key ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [query.data, search, status]);
 
-  useEffect(() => {
-    fetchJobs();
-  }, []);
-
-  const handleCreateJob = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newJobName) return;
-    
-    try {
-      const res = await fetch("http://localhost:3000/api/v1/jobs", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name: newJobName,
-          tenant_id: "00000000-0000-0000-0000-000000000000" // Mock tenant for now
-        }),
-      });
-      
-      if (res.ok) {
-        setNewJobName("");
-        setIsDialogOpen(false);
-        toast({ title: "Success", description: "Job created successfully." });
-        fetchJobs(); // Refresh list
-      } else {
-        toast({ title: "Error", description: "Failed to create job.", variant: "destructive" });
-      }
-    } catch (err) {
-      console.error("Failed to create job:", err);
-      toast({ title: "Error", description: "Failed to create job.", variant: "destructive" });
-    }
-  };
-
-  const toggleSelectAll = () => {
-    if (selectedJobs.size === jobs.length) {
-      setSelectedJobs(new Set());
-    } else {
-      setSelectedJobs(new Set(jobs.map(j => j.id)));
-    }
-  };
-
-  const toggleSelectJob = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const newSelected = new Set(selectedJobs);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
-    } else {
-      newSelected.add(id);
-    }
-    setSelectedJobs(newSelected);
-  };
+  // A filter that matches nothing is an empty result, not an empty collection.
+  const empty = query.state === "ready" && jobs.length === 0;
+  const filtering = search.trim().length > 0 || status !== "ALL";
 
   return (
-    <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-50/50 via-background to-background dark:from-indigo-900/10 dark:via-background dark:to-background">
-      <header className="flex justify-between items-center mb-8">
+    <div className="flex flex-col gap-4 p-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <motion.h1 
-            initial={{ y: -20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            className="text-4xl font-bold tracking-tight mb-2 text-foreground"
-          >
-            Job Definitions
-          </motion.h1>
-          <p className="text-muted-foreground">Manage templates and automation routines.</p>
+          <h1 className="text-lg font-semibold">Jobs</h1>
+          <p className="text-xs text-muted-foreground">
+            Definitions, versions, and schedules.
+          </p>
         </div>
-        
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-md transition-all hover:-translate-y-0.5 inline-flex shrink-0 items-center justify-center rounded-lg text-sm font-medium h-9 px-4 py-2">
-            <PlusCircle className="mr-2 h-4 w-4" /> Create Job
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-[425px]">
-            <form onSubmit={handleCreateJob}>
-              <DialogHeader>
-                <DialogTitle>Create New Job</DialogTitle>
-                <DialogDescription>
-                  Define a new automation routine in your tenant.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="flex flex-col space-y-2">
-                  <label htmlFor="name" className="text-sm font-medium leading-none">Job Name</label>
-                  <input 
-                    id="name" 
-                    value={newJobName}
-                    onChange={(e) => setNewJobName(e.target.value)}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" 
-                    placeholder="e.g. data-etl-pipeline" 
-                  />
-                </div>
-              </div>
-              <DialogFooter>
-                <Button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white">Create Job</Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
+            <RefreshCw className="size-3.5" aria-hidden />
+            Refresh
+          </Button>
+          {roleCan(session?.role, "jobs:write") ? (
+            <CreateJobDialog onCreated={query.reload} />
+          ) : null}
+        </div>
       </header>
 
-      <PowerfulFilterBar />
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[16rem] flex-1">
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <Input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter by name or key"
+            aria-label="Filter jobs"
+            className="pl-8"
+          />
+        </div>
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-foreground">Configured Jobs</CardTitle>
-                <CardDescription className="text-muted-foreground">
-                  View and edit existing job definitions.
-                </CardDescription>
-              </div>
-              <div className="flex space-x-2">
-                <Button variant="outline" size="sm"><Settings2 className="mr-2 h-4 w-4" />View</Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent bg-muted/20">
-                  <TableHead className="w-12 text-center">
-                     <Checkbox 
-                        checked={jobs.length > 0 && selectedJobs.size === jobs.length}
-                        onCheckedChange={toggleSelectAll} 
-                     />
-                  </TableHead>
-                  <TableHead className="font-medium text-muted-foreground">ID</TableHead>
-                  <TableHead className="font-medium text-muted-foreground">Name</TableHead>
-                  <TableHead className="font-medium text-muted-foreground">Version</TableHead>
-                  <TableHead className="font-medium text-muted-foreground">Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                      Loading jobs from database...
-                    </TableCell>
-                  </TableRow>
-                ) : jobs.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                      No jobs found. Create your first job above!
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  jobs.map(job => (
-                    <TableRow 
-                      key={job.id} 
-                      className="transition-colors group hover:bg-muted/50 cursor-pointer"
-                      onClick={() => router.push(`/jobs/${job.id}`)}
+        <Select value={status} onValueChange={(value) => setStatus(value ?? "ALL")}>
+          <SelectTrigger className="w-36" aria-label="Filter by status">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">All statuses</SelectItem>
+            <SelectItem value="DRAFT">Draft</SelectItem>
+            <SelectItem value="ACTIVE">Active</SelectItem>
+            <SelectItem value="ARCHIVED">Archived</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="rounded-lg border border-border">
+        <AsyncBoundary
+          state={query.state}
+          error={query.error}
+          forbidden={query.forbidden}
+          empty={empty}
+          onRetry={query.reload}
+          loadingLabel="Loading jobs"
+          emptyTitle={filtering ? "No jobs match this filter" : "No jobs yet"}
+          emptyDescription={
+            filtering
+              ? "Try a different search or clear the status filter."
+              : "Create a job to describe the work this tenant runs."
+          }
+        >
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Priority</TableHead>
+                <TableHead>Version</TableHead>
+                <TableHead>Updated</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {jobs.map((job) => (
+                <TableRow key={job.id}>
+                  <TableCell>
+                    <Link
+                      href={`/jobs/${job.id}`}
+                      className="font-medium underline-offset-4 hover:underline"
                     >
-                      <TableCell className="text-center" onClick={(e) => toggleSelectJob(job.id, e)}>
-                        <Checkbox checked={selectedJobs.has(job.id)} />
-                      </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">
-                        {job.id.substring(0, 8)}...
-                      </TableCell>
-                      <TableCell className="font-medium">{job.name}</TableCell>
-                      <TableCell className="text-muted-foreground">v1</TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-900/20">
-                          {job.status}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </motion.div>
+                      {job.name}
+                    </Link>
+                    {job.key ? (
+                      <code className="ml-2 text-xs text-muted-foreground">{job.key}</code>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={job.status} />
+                  </TableCell>
+                  <TableCell>
+                    <PriorityBadge priority={job.priority} />
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {job.current_version_id ? (
+                      <code>{job.current_version_id.slice(0, 8)}</code>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                  <TableCell
+                    className="text-xs text-muted-foreground"
+                    title={formatTimestamp(job.updated_at)}
+                  >
+                    {formatRelative(job.updated_at)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <RowActions job={job} role={session?.role} onDone={query.reload} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </AsyncBoundary>
+      </div>
+    </div>
+  );
+}
 
-      <BulkOperationsBar 
-        selectedCount={selectedJobs.size} 
-        onClear={() => setSelectedJobs(new Set())} 
-      />
-    </main>
+function RowActions({
+  job,
+  role,
+  onDone,
+}: {
+  job: Job;
+  role: Role | undefined;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function run() {
+    setBusy(true);
+    try {
+      // A generated idempotency key makes a double-click harmless.
+      await api.post(`/jobs/${job.id}/trigger`, {}, crypto.randomUUID());
+      onDone();
+    } catch (cause) {
+      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function archive() {
+    if (!window.confirm(`Archive "${job.name}"? It will stop being scheduled.`)) return;
+    setBusy(true);
+    try {
+      await api.delete(`/jobs/${job.id}`);
+      onDone();
+    } catch (cause) {
+      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-end gap-1">
+      {roleCan(role, "jobs:trigger") ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={busy}
+          aria-label={`Run ${job.name}`}
+          title="Run now"
+          onClick={run}
+        >
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Play className="size-3.5" aria-hidden />
+          )}
+        </Button>
+      ) : null}
+
+      {roleCan(role, "jobs:delete") && job.status !== "ARCHIVED" ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={busy}
+          aria-label={`Archive ${job.name}`}
+          title="Archive"
+          onClick={archive}
+        >
+          <Archive className="size-3.5" aria-hidden />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function CreateJobDialog({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [key, setKey] = useState("");
+  const [priority, setPriority] = useState("NORMAL");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      // A client-generated idempotency key means a retried submit creates one
+      // job rather than two (spec 02.15).
+      await api.post(
+        "/jobs",
+        { name: name.trim(), key: key.trim() || undefined, priority },
+        crypto.randomUUID(),
+      );
+      setOpen(false);
+      setName("");
+      setKey("");
+      onCreated();
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError
+          ? (cause.fieldError("name") ?? cause.message)
+          : "could not reach the server",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm">
+          <Plus className="size-3.5" aria-hidden />
+          New job
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Create a job</DialogTitle>
+          <DialogDescription>
+            A job is a reusable definition; publish a version before running it.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={submit} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="job-name">Name</Label>
+            <Input
+              id="job-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              autoFocus
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="job-key">Key (optional)</Label>
+            <Input
+              id="job-key"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="stable-identifier"
+            />
+            <p className="text-xs text-muted-foreground">Unique within this tenant.</p>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="job-priority">Priority</Label>
+            <Select value={priority} onValueChange={(value) => value && setPriority(value)}>
+              <SelectTrigger id="job-priority">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="CRITICAL">Critical</SelectItem>
+                <SelectItem value="HIGH">High</SelectItem>
+                <SelectItem value="NORMAL">Normal</SelectItem>
+                <SelectItem value="LOW">Low</SelectItem>
+                <SelectItem value="BACKGROUND">Background</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

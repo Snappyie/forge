@@ -90,12 +90,33 @@ fn parse_misfire_policy(raw: &str) -> MisfirePolicy {
     }
 }
 
-const DUE_COLUMNS: &str = "id, tenant_id, target_type, target_id, target_version_policy, \
-     schedule_type, cron_expression, timezone, misfire_policy, catch_up_policy, enabled, \
-     next_run_at, last_run_at";
-
 pub struct ScheduleRepository<'a> {
     pool: &'a PgPool,
+}
+
+/// A due schedule leased to one scheduler instance.
+///
+/// Field order matches the `RETURNING` clause in `claim_due`, which `FromRow`
+/// relies on positionally.
+#[derive(Debug, Clone, FromRow)]
+pub struct ClaimedSchedule {
+    /// Identifier of this claim, used to release it.
+    pub lease_id: Uuid,
+    pub lease_expires_at: DateTime<Utc>,
+    /// The schedule row itself, flattened in.
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub target_type: String,
+    pub target_id: Uuid,
+    pub target_version_policy: String,
+    pub schedule_type: String,
+    pub cron_expression: Option<String>,
+    pub timezone: String,
+    pub misfire_policy: String,
+    pub catch_up_policy: serde_json::Value,
+    pub enabled: bool,
+    pub next_run_at: DateTime<Utc>,
+    pub last_run_at: Option<DateTime<Utc>>,
 }
 
 impl<'a> ScheduleRepository<'a> {
@@ -103,23 +124,82 @@ impl<'a> ScheduleRepository<'a> {
         Self { pool }
     }
 
-    /// Claims up to `batch_size` schedules whose next run is due.
+    /// Atomically claims up to `batch_size` due schedules and leases them to
+    /// `worker_id`.
     ///
-    /// Paused/disabled schedules are excluded by the partial index on
-    /// `enabled = TRUE`, so the scan stays cheap as backlog accumulates.
-    pub async fn claim_due(&self, now: DateTime<Utc>, batch_size: i64) -> Result<Vec<DueSchedule>> {
-        sqlx::query_as::<_, DueSchedule>(&format!(
-            "SELECT {DUE_COLUMNS} FROM schedules
-             WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= $1
-             ORDER BY next_run_at ASC
-             FOR UPDATE SKIP LOCKED
-             LIMIT $2"
-        ))
-        .bind(now)
-        .bind(batch_size)
-        .fetch_all(self.pool)
+    /// A bare `SELECT ... FOR UPDATE SKIP LOCKED` would not be a claim at all:
+    /// the row lock is released the instant the implicit transaction ends, which
+    /// is as soon as the statement returns. Two schedulers would then both
+    /// receive the same schedule. Writing a lease marker inside the same
+    /// transaction is what makes the claim real, and `lease_expires_at` bounds
+    /// how long a crashed scheduler can hold a schedule.
+    pub async fn claim_due(
+        &self,
+        now: DateTime<Utc>,
+        batch_size: i64,
+        worker_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<Vec<ClaimedSchedule>> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from_sqlx)?;
+
+        let result = async {
+            let rows = sqlx::query_as::<_, ClaimedSchedule>(
+                "UPDATE schedules SET
+                     last_claimed_at = $2,
+                     claimed_by = $3,
+                     lease_expires_at = $2 + make_interval(secs => $4),
+                     updated_at = NOW()
+                 WHERE id IN (
+                     SELECT id FROM schedules
+                     WHERE enabled = TRUE
+                       AND next_run_at IS NOT NULL
+                       AND next_run_at <= $1
+                       AND (lease_expires_at IS NULL OR lease_expires_at <= $1)
+                     ORDER BY next_run_at ASC
+                     FOR UPDATE SKIP LOCKED
+                     LIMIT $5
+                 )
+                 RETURNING id AS lease_id, lease_expires_at, id, tenant_id, target_type,
+                     target_id, target_version_policy, schedule_type, cron_expression,
+                     timezone, misfire_policy, catch_up_policy, enabled, next_run_at, last_run_at",
+            )
+            .bind(now)
+            .bind(now)
+            .bind(worker_id)
+            .bind(lease_secs)
+            .bind(batch_size)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+            Ok(rows)
+        }
+        .await;
+
+        match result {
+            Ok(claimed) => {
+                tx.commit().await.map_err(StorageError::from_sqlx)?;
+                Ok(claimed)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Releases a claim so another scheduler may pick the schedule up.
+    pub async fn release_claim(&self, schedule_id: Uuid, worker_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE schedules SET lease_expires_at = NULL, updated_at = NOW()
+             WHERE id = $1 AND claimed_by = $2",
+        )
+        .bind(schedule_id)
+        .bind(worker_id)
+        .execute(self.pool)
         .await
-        .map_err(StorageError::from_sqlx)
+        .map_err(StorageError::from_sqlx)?;
+        Ok(())
     }
 
     /// Persists the next occurrence after an occurrence has been handled.

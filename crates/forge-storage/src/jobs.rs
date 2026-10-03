@@ -719,6 +719,44 @@ impl<'a> ExecutionRepository<'a> {
         .ok_or_else(|| StorageError::not_found("execution"))
     }
 
+    /// Reads an execution without a tenant filter.
+    ///
+    /// Reserved for trusted infrastructure paths — the lease reaper and the
+    /// completion gate — that hold the execution's own id but not its tenant.
+    /// Every API-facing path uses `get`, which is tenant-scoped.
+    pub async fn get_unchecked(&self, execution_id: Uuid) -> Result<Option<ExecutionRow>> {
+        sqlx::query_as::<_, ExecutionRow>(&format!(
+            "SELECT {EXECUTION_COLUMNS} FROM executions WHERE id = $1"
+        ))
+        .bind(execution_id)
+        .fetch_optional(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
+    }
+
+    /// Counts a recovery as a new attempt.
+    ///
+    /// `ABANDONED -> QUEUED` does not route through `RETRY_SCHEDULED`, so it
+    /// does not increment the counter on its own. Recovery calls this so a
+    /// worker that keeps dying exhausts its budget instead of being retried
+    /// forever.
+    pub async fn increment_attempt(
+        &self,
+        tenant_id: TenantId,
+        execution_id: Uuid,
+    ) -> Result<ExecutionRow> {
+        sqlx::query_as::<_, ExecutionRow>(&format!(
+            "UPDATE executions SET attempt_count = attempt_count + 1, updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2 RETURNING {EXECUTION_COLUMNS}"
+        ))
+        .bind(execution_id)
+        .bind(tenant_id.into_uuid())
+        .fetch_optional(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?
+        .ok_or_else(|| StorageError::not_found("execution"))
+    }
+
     pub async fn list(
         &self,
         tenant_id: TenantId,

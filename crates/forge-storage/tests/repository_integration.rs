@@ -125,23 +125,22 @@ impl TestDb {
     }
 }
 
-/// Runs an async block against a fresh database, skipping when none is available.
+/// Runs a body against a throwaway database and always drops it.
 ///
-/// Returns a future so call sites read `with_db!(..).await`. The throwaway
-/// database is always dropped afterwards, so repeated runs leave nothing
-/// behind. When no database is reachable the body is skipped rather than
-/// failing, so the suite stays usable on a machine without PostgreSQL.
+/// The body receives a cloned `PgPool` — a cheap shared handle — so nothing
+/// borrows the harness and cleanup always succeeds. When no database is
+/// reachable the body is skipped rather than failing, so the suite stays usable
+/// on a machine without PostgreSQL.
 macro_rules! with_db {
     ($body:expr) => {
         async move {
             match TestDb::new().await {
                 Some(db) => {
-                    // `Arc` is needed because the body takes a shared handle,
-                    // but only this scope holds the sole owner, so unwrapping
-                    // after the body to reclaim the database is sound.
-                    let shared = Arc::new(db);
-                    $body(shared.clone()).await;
-                    match Arc::try_unwrap(shared) {
+                    let db = Arc::new(db);
+                    $body(db.pool.clone()).await;
+                    // Only the harness holds the `TestDb`, so this always
+                    // succeeds and no database is left behind.
+                    match Arc::try_unwrap(db) {
                         Ok(db) => db.cleanup().await,
                         Err(_) => eprintln!("warning: test db handle still shared; not dropped"),
                     }
@@ -154,10 +153,19 @@ macro_rules! with_db {
     };
 }
 
+/// Inserts a tenant so tenant-scoped foreign keys resolve.
+async fn seed_tenant(pool: &PgPool, tenant: TenantId) {
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'Test Tenant')")
+        .bind(tenant.into_uuid())
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+}
+
 /// Creates a job with one published version, ready to have executions run.
-async fn scaffold(db: &TestDb, tenant: TenantId) -> (JobId, JobVersionId) {
-    db.seed_tenant(tenant).await;
-    let jobs = JobRepository::new(&db.pool);
+async fn scaffold(pool: &PgPool, tenant: TenantId) -> (JobId, JobVersionId) {
+    seed_tenant(pool, tenant).await;
+    let jobs = JobRepository::new(pool);
     let job = jobs
         .create(
             tenant,
@@ -170,7 +178,7 @@ async fn scaffold(db: &TestDb, tenant: TenantId) -> (JobId, JobVersionId) {
         .await
         .expect("create job");
 
-    let versions = JobVersionRepository::new(&db.pool);
+    let versions = JobVersionRepository::new(pool);
     let version = versions
         .create(
             tenant,
@@ -196,10 +204,10 @@ async fn scaffold(db: &TestDb, tenant: TenantId) -> (JobId, JobVersionId) {
 
 #[tokio::test]
 async fn job_round_trips_through_the_repository() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
 
         let created = jobs
             .create(tenant, Some("settle-daily".into()), "Settle Daily", None, Priority::High, None)
@@ -218,13 +226,13 @@ async fn job_round_trips_through_the_repository() {
 // AT-TEN-001: tenant A cannot read tenant B's job.
 #[tokio::test]
 async fn cross_tenant_job_read_is_not_found() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant_a = db.tenant();
-        let tenant_b = db.tenant();
-        db.seed_tenant(tenant_a).await;
-        db.seed_tenant(tenant_b).await;
+    with_db!(|pool: PgPool| async move {
+        let tenant_a = TenantId::from_uuid(Uuid::new_v4());
+        let tenant_b = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant_a).await;
+        seed_tenant(&pool, tenant_b).await;
 
-        let jobs = JobRepository::new(&db.pool);
+        let jobs = JobRepository::new(&pool);
         let job = jobs
             .create(tenant_a, Some("secret".into()), "Tenant A Job", None, Priority::Normal, None)
             .await
@@ -242,12 +250,12 @@ async fn cross_tenant_job_read_is_not_found() {
 // AT-TEN-004: tenant-scoped uniqueness.
 #[tokio::test]
 async fn job_key_is_unique_within_a_tenant_but_across_tenants() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant_a = db.tenant();
-        let tenant_b = db.tenant();
-        db.seed_tenant(tenant_a).await;
-        db.seed_tenant(tenant_b).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant_a = TenantId::from_uuid(Uuid::new_v4());
+        let tenant_b = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant_a).await;
+        seed_tenant(&pool, tenant_b).await;
+        let jobs = JobRepository::new(&pool);
 
         jobs.create(tenant_a, Some("shared-key".into()), "A1", None, Priority::Normal, None)
             .await
@@ -268,10 +276,10 @@ async fn job_key_is_unique_within_a_tenant_but_across_tenants() {
 
 #[tokio::test]
 async fn job_status_transitions_enforce_the_domain_machine() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, _) = scaffold(&db, tenant).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, _) = scaffold(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
 
         // DRAFT -> ACTIVE is allowed now that a version is published.
         let active = jobs.set_status(tenant, job_id, JobStatus::Active).await.unwrap();
@@ -287,10 +295,10 @@ async fn job_status_transitions_enforce_the_domain_machine() {
 // AT-API-007: a stale update returns a conflict.
 #[tokio::test]
 async fn stale_update_is_rejected_by_optimistic_concurrency() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
         let created = jobs
             .create(tenant, Some("k".into()), "Original", None, Priority::Normal, None)
             .await
@@ -318,10 +326,10 @@ async fn stale_update_is_rejected_by_optimistic_concurrency() {
 
 #[tokio::test]
 async fn archiving_is_soft_and_idempotent() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
         let created = jobs
             .create(tenant, Some("k".into()), "Doomed", None, Priority::Normal, None)
             .await
@@ -344,11 +352,11 @@ async fn archiving_is_soft_and_idempotent() {
 
 #[tokio::test]
 async fn version_numbers_increment_and_publishing_is_idempotent() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let jobs = JobRepository::new(&db.pool);
-        let versions = JobVersionRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
+        let versions = JobVersionRepository::new(&pool);
 
         let job = jobs
             .create(tenant, Some("k".into()), "Versioned", None, Priority::Normal, None)
@@ -395,13 +403,13 @@ async fn version_numbers_increment_and_publishing_is_idempotent() {
 
 #[tokio::test]
 async fn execution_creation_is_atomic_and_tenant_scoped() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let other = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        db.seed_tenant(other).await;
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let other = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        seed_tenant(&pool, other).await;
 
-        let executions = ExecutionRepository::new(&db.pool);
+        let executions = ExecutionRepository::new(&pool);
         let created = executions
             .create(NewExecution {
                 tenant_id: tenant,
@@ -431,10 +439,10 @@ async fn execution_creation_is_atomic_and_tenant_scoped() {
 
 #[tokio::test]
 async fn execution_transitions_replay_through_the_domain_machine() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let executions = ExecutionRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let executions = ExecutionRepository::new(&pool);
         let row = executions
             .create(NewExecution {
                 tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
@@ -468,10 +476,10 @@ async fn execution_transitions_replay_through_the_domain_machine() {
 // occurrence even without locking.
 #[tokio::test]
 async fn duplicate_schedule_occurrence_is_rejected() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let schedules = ScheduleRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let schedules = ScheduleRepository::new(&pool);
 
         let schedule_id = Uuid::new_v4();
         sqlx::query(
@@ -484,11 +492,11 @@ async fn duplicate_schedule_occurrence_is_rejected() {
         .bind(job_id.into_uuid())
         .bind(job_id.into_uuid())
         .bind(Utc::now())
-        .execute(&db.pool)
+        .execute(&pool)
         .await
         .unwrap();
 
-        let executions = ExecutionRepository::new(&db.pool);
+        let executions = ExecutionRepository::new(&pool);
         let occurrence = Utc::now();
 
         let base = NewExecution {
@@ -526,10 +534,10 @@ async fn duplicate_schedule_occurrence_is_rejected() {
 
 #[tokio::test]
 async fn concurrency_limit_admits_up_to_the_bound() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let executions = ExecutionRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let executions = ExecutionRepository::new(&pool);
 
         let policy = forge_storage::bounded_concurrency(2);
         assert_eq!(policy.scope, forge_domain::ConcurrencyScope::Job);
@@ -567,10 +575,10 @@ async fn concurrency_limit_admits_up_to_the_bound() {
 
 #[tokio::test]
 async fn cursor_pagination_walks_every_row_exactly_once() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
 
         for i in 0..7 {
             let name = format!("Job {i}");
@@ -604,10 +612,10 @@ async fn cursor_pagination_walks_every_row_exactly_once() {
 
 #[tokio::test]
 async fn job_filters_narrow_results() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let jobs = JobRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let jobs = JobRepository::new(&pool);
 
         jobs.create(tenant, Some("alpha".into()), "Alpha", None, Priority::Normal, None).await.unwrap();
         jobs.create(tenant, Some("beta".into()), "Beta", None, Priority::Critical, None).await.unwrap();
@@ -635,10 +643,10 @@ async fn job_filters_narrow_results() {
 
 #[tokio::test]
 async fn worker_registration_and_heartbeat() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let workers = WorkerRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let workers = WorkerRepository::new(&pool);
 
         let w = workers.register(tenant, "worker-1", "host-1", Some("0.1.0"), json!(["linux"]), json!({"region":"us-east-1"})).await.unwrap();
         assert_eq!(w.status, "READY");
@@ -656,10 +664,10 @@ async fn worker_registration_and_heartbeat() {
 
 #[tokio::test]
 async fn revoked_worker_cannot_heartbeat_or_receive_work() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let workers = WorkerRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let workers = WorkerRepository::new(&pool);
         let w = workers.register(tenant, "worker-2", "host-2", None, json!([]), json!({})).await.unwrap();
 
         workers.revoke(tenant, w.id).await.unwrap();
@@ -672,10 +680,10 @@ async fn revoked_worker_cannot_heartbeat_or_receive_work() {
 
 #[tokio::test]
 async fn lease_ownership_is_exclusive_and_renewable_by_its_holder_only() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let executions = ExecutionRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let executions = ExecutionRepository::new(&pool);
         let row = executions
             .create(NewExecution {
                 tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
@@ -686,11 +694,11 @@ async fn lease_ownership_is_exclusive_and_renewable_by_its_holder_only() {
             .await
             .unwrap();
 
-        let workers = WorkerRepository::new(&db.pool);
+        let workers = WorkerRepository::new(&pool);
         let w1 = workers.register(tenant, "w1", "h1", None, json!([]), json!({})).await.unwrap();
         let w2 = workers.register(tenant, "w2", "h2", None, json!([]), json!({})).await.unwrap();
 
-        let leases = LeaseRepository::new(&db.pool);
+        let leases = LeaseRepository::new(&pool);
         let lease = leases.acquire(tenant, row.id, w1.id, None, 20).await.unwrap();
 
         // A second worker cannot take the same execution's lease.
@@ -713,10 +721,10 @@ async fn lease_ownership_is_exclusive_and_renewable_by_its_holder_only() {
 
 #[tokio::test]
 async fn expired_leases_are_claimable_by_the_reaper() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let executions = ExecutionRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let executions = ExecutionRepository::new(&pool);
         let row = executions
             .create(NewExecution {
                 tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
@@ -726,9 +734,9 @@ async fn expired_leases_are_claimable_by_the_reaper() {
             })
             .await
             .unwrap();
-        let workers = WorkerRepository::new(&db.pool);
+        let workers = WorkerRepository::new(&pool);
         let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
-        let leases = LeaseRepository::new(&db.pool);
+        let leases = LeaseRepository::new(&pool);
 
         // Not yet expired: nothing to reap.
         leases.acquire(tenant, row.id, w.id, None, 3600).await.unwrap();
@@ -736,7 +744,7 @@ async fn expired_leases_are_claimable_by_the_reaper() {
 
         // Force expiry, then the reaper sees it.
         sqlx::query("UPDATE worker_leases SET expires_at = NOW() - INTERVAL '1 minute'")
-            .execute(&db.pool).await.unwrap();
+            .execute(&pool).await.unwrap();
         let expired = leases.claim_expired(10).await.unwrap();
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].execution_id, row.id);
@@ -750,11 +758,11 @@ async fn expired_leases_are_claimable_by_the_reaper() {
 
 #[tokio::test]
 async fn dispatch_claims_high_priority_work_first() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let executions = ExecutionRepository::new(&db.pool);
-        let workers = WorkerRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let executions = ExecutionRepository::new(&pool);
+        let workers = WorkerRepository::new(&pool);
         let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
 
         let mk = |priority: Priority, corr: &str| NewExecution {
@@ -782,11 +790,11 @@ async fn dispatch_claims_high_priority_work_first() {
 
 #[tokio::test]
 async fn concurrent_claimers_never_receive_the_same_execution() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        let (job_id, version_id) = scaffold(&db, tenant).await;
-        let executions = ExecutionRepository::new(&db.pool);
-        let workers = WorkerRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let executions = ExecutionRepository::new(&pool);
+        let workers = WorkerRepository::new(&pool);
 
         let total = 12;
         for i in 0..total {
@@ -804,7 +812,7 @@ async fn concurrent_claimers_never_receive_the_same_execution() {
         // Four claimers race. SKIP LOCKED must keep the claimed sets disjoint.
         let mut handles = Vec::new();
         for n in 0..4 {
-            let pool = db.pool.clone();
+            let pool = pool.clone();
             let worker = workers.register(tenant, &format!("w{n}"), &format!("h{n}"), None, json!([]), json!({})).await.unwrap().id;
             handles.push(tokio::spawn(async move {
                 let repo = ExecutionRepository::new(&pool);
@@ -835,10 +843,10 @@ async fn concurrent_claimers_never_receive_the_same_execution() {
 // AT-API-005 / AT-API-006
 #[tokio::test]
 async fn idempotency_replays_the_same_request_and_rejects_a_different_one() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let idem = IdempotencyRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let idem = IdempotencyRepository::new(&pool);
         let expires = Utc::now() + chrono::Duration::hours(24);
 
         let outcome = idem.reserve(tenant, "key-1", "POST /jobs", "fp-a", expires).await.unwrap();
@@ -861,8 +869,8 @@ async fn idempotency_replays_the_same_request_and_rejects_a_different_one() {
         assert!(matches!(conflict, IdempotencyOutcome::Conflict));
 
         // A different tenant may use the same key independently.
-        let other = db.tenant();
-        db.seed_tenant(other).await;
+        let other = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, other).await;
         assert!(matches!(
             idem.reserve(other, "key-1", "POST /jobs", "fp-a", expires).await.unwrap(),
             IdempotencyOutcome::Fresh
@@ -878,10 +886,10 @@ async fn idempotency_replays_the_same_request_and_rejects_a_different_one() {
 // AT-SEC-006: audit events are emitted for privileged actions.
 #[tokio::test]
 async fn audit_events_are_recorded_and_queryable() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let audit = AuditRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let audit = AuditRepository::new(&pool);
 
         audit.record(NewAuditEvent::new(tenant, "USER", None, "job.create", "job", Some(Uuid::new_v4())))
             .await
@@ -908,8 +916,8 @@ async fn audit_events_are_recorded_and_queryable() {
         assert_eq!(page.items[0].result, "SUCCESS");
 
         // Another tenant cannot read these events.
-        let other = db.tenant();
-        db.seed_tenant(other).await;
+        let other = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, other).await;
         assert!(audit
             .list(other, &Default::default(), None, 10)
             .await
@@ -922,10 +930,10 @@ async fn audit_events_are_recorded_and_queryable() {
 
 #[tokio::test]
 async fn outbox_claims_each_event_once_and_records_publication() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let outbox = OutboxRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let outbox = OutboxRepository::new(&pool);
 
         for _ in 0..3 {
             outbox.enqueue(Some(tenant), "execution.completed", "execution", Uuid::new_v4(), json!({"ok":true}))
@@ -949,10 +957,10 @@ async fn outbox_claims_each_event_once_and_records_publication() {
 
 #[tokio::test]
 async fn outbox_publisher_restart_does_not_lose_events() {
-    with_db!(|db: Arc<TestDb>| async move {
-        let tenant = db.tenant();
-        db.seed_tenant(tenant).await;
-        let outbox = OutboxRepository::new(&db.pool);
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        seed_tenant(&pool, tenant).await;
+        let outbox = OutboxRepository::new(&pool);
 
         let first = outbox.enqueue(Some(tenant), "a", "execution", Uuid::new_v4(), json!({})).await.unwrap();
         // Simulate a publisher that claimed but crashed before marking it.

@@ -1,0 +1,182 @@
+"use client";
+
+/**
+ * Data fetching for the console.
+ *
+ * Spec 7.2 requires every page to define loading, empty, error, and
+ * permission-denied states. This hook makes those four cases explicit so a page
+ * cannot accidentally omit one.
+ */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { ApiError } from "@/lib/api";
+import type { PageInfo } from "@/lib/api";
+
+export type LoadState = "loading" | "ready" | "error";
+
+export interface QueryResult<T> {
+  data: T | null;
+  state: LoadState;
+  /** The failure, when `state` is `error`. */
+  error: ApiError | null;
+  /** Whether the caller lacks permission (spec 7.2 permission-denied). */
+  forbidden: boolean;
+  /** Whether the collection came back empty. */
+  empty: boolean;
+  reload: () => void;
+}
+
+/** Reads one resource or a page of them. */
+export function useQuery<T>(
+  path: string | null,
+  deps: unknown[] = [],
+): QueryResult<T> {
+  const [data, setData] = useState<T | null>(null);
+  const [state, setState] = useState<LoadState>("loading");
+  const [error, setError] = useState<ApiError | null>(null);
+  const [nonce, setNonce] = useState(0);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    // A null path means the caller is not ready to fetch yet.
+    if (!path) {
+      setState("loading");
+      return;
+    }
+
+    // Abandon an in-flight request when the path changes, so a slow earlier
+    // response cannot overwrite a newer one.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setState("loading");
+    setError(null);
+
+    (async () => {
+      try {
+        const { api } = await import("@/lib/api");
+        const result = await api.get<T>(path, controller.signal);
+        if (controller.signal.aborted) return;
+        setData(result);
+        setState("ready");
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        const apiError =
+          cause instanceof ApiError
+            ? cause
+            : new ApiError(0, "INTERNAL_ERROR", String(cause));
+        setError(apiError);
+        setState("error");
+      }
+    })();
+
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, nonce, ...deps]);
+
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+
+  return {
+    data,
+    state,
+    error,
+    forbidden: error?.isForbidden ?? false,
+    empty: state === "ready" && isEmpty(data),
+    reload,
+  };
+}
+
+/** Whether a payload represents "nothing to show". */
+function isEmpty(data: unknown): boolean {
+  if (data === null || data === undefined) return true;
+  if (Array.isArray(data)) return data.length === 0;
+  if (typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    // The list envelope nests its rows under `data`.
+    if (Array.isArray(record.data)) return record.data.length === 0;
+    if (Array.isArray(record.items)) return record.items.length === 0;
+    if (Array.isArray(record.lines)) return record.lines.length === 0;
+    if (Array.isArray(record.occurrences)) return record.occurrences.length === 0;
+  }
+  return false;
+}
+
+/**
+ * Fetches successive pages with cursor pagination (spec 05 §5.14).
+ *
+ * The cursor is opaque, so it is passed straight back to the server without
+ * interpretation.
+ */
+export function usePaginatedQuery<T>(
+  path: string | null,
+  pageSize = 50,
+): QueryResult<T[]> & { page: PageInfo | null; loadMore: () => void } {
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [items, setItems] = useState<T[]>([]);
+  const [page, setPage] = useState<PageInfo | null>(null);
+  const [state, setState] = useState<LoadState>("loading");
+  const [error, setError] = useState<ApiError | null>(null);
+
+  useEffect(() => {
+    if (!path) return;
+    let cancelled = false;
+
+    setState("loading");
+    setError(null);
+
+    (async () => {
+      try {
+        const { api } = await import("@/lib/api");
+        const separator = path.includes("?") ? "&" : "?";
+        const query = `${path}${separator}limit=${pageSize}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const result = (await api.get<{ data: T[]; page?: PageInfo }>(query)) as {
+          data: T[];
+          page?: PageInfo;
+        };
+        if (cancelled) return;
+
+        const rows = Array.isArray(result.data) ? result.data : [];
+        setItems((previous) => (cursor ? [...previous, ...rows] : rows));
+        setPage(result.page ?? { next_cursor: null, has_more: false });
+        setState("ready");
+      } catch (cause) {
+        if (cancelled) return;
+        setError(
+          cause instanceof ApiError ? cause : new ApiError(0, "INTERNAL_ERROR", String(cause)),
+        );
+        setState("error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [path, cursor, pageSize]);
+
+  const loadMore = useCallback(() => {
+    setCursor((current) => current);
+    setPage(null);
+    // Re-fetch from the stored next cursor.
+    setCursor(page?.next_cursor ?? "");
+  }, [page]);
+
+  const reload = useCallback(() => {
+    setItems([]);
+    setPage(null);
+    setCursor(null);
+  }, []);
+
+  return {
+    data: items,
+    state,
+    error,
+    forbidden: error?.isForbidden ?? false,
+    empty: state === "ready" && items.length === 0,
+    reload,
+    page,
+    loadMore,
+  };
+}

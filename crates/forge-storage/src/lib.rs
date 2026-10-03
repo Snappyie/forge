@@ -11,7 +11,8 @@ pub use jobs::{
     NewJobVersion,
 };
 pub use scheduling::{
-    DueSchedule, LeaseRepository, LeaseRow, ScheduleRepository, WorkerRepository, WorkerRow,
+    ClaimedSchedule, DueSchedule, LeaseRepository, LeaseRow, ScheduleRepository,
+    WorkerRepository, WorkerRow,
 };
 pub use audit::{
     AuditEventRow, AuditFilter, AuditRepository, IdempotencyOutcome, IdempotencyRepository,

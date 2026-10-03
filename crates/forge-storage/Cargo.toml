@@ -15,3 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 base64 = "0.22"
 forge-domain = { path = "../forge-domain" }
+
+[dev-dependencies]
+forge-executor = { path = "../forge-executor" }

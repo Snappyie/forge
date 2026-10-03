@@ -25,9 +25,10 @@ pub async fn require_auth(
         None => return Err(StatusCode::UNAUTHORIZED),
     };
 
-    match state.jwt.validate_token(&token) {
+    match state.jwt.verify(&token) {
         Ok(claims) => {
-            // Store the authenticated claims in the request extensions so route handlers can access it
+            // Store the authenticated claims in the request extensions so route
+            // handlers can read the identity.
             req.extensions_mut().insert(Arc::new(claims));
             Ok(next.run(req).await)
         }

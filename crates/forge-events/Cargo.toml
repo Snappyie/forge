@@ -1,0 +1,22 @@
+[package]
+name = "forge-events"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["full"] }
+async-trait = "0.1"
+uuid.workspace = true
+forge-domain = { path = "../forge-domain" }
+forge-storage = { path = "../forge-storage" }
+[dev-dependencies]
+forge-scheduler = { path = "../forge-scheduler" }
+forge-executor = { path = "../forge-executor" }
