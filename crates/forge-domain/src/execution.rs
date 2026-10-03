@@ -102,3 +102,31 @@ impl Execution {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::TenantId;
+    use crate::id::JobId;
+    use crate::id::JobVersionId;
+
+    #[test]
+    fn test_execution_transitions() {
+        let tenant = TenantId::new();
+        let mut exec = Execution::new(tenant, JobId::new(), JobVersionId::new());
+        
+        assert_eq!(exec.status, ExecutionStatus::Queued);
+        
+        exec.transition_to(ExecutionStatus::Dispatched).unwrap();
+        assert_eq!(exec.status, ExecutionStatus::Dispatched);
+        
+        exec.transition_to(ExecutionStatus::Running).unwrap();
+        assert_eq!(exec.status, ExecutionStatus::Running);
+        
+        exec.transition_to(ExecutionStatus::Succeeded).unwrap();
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        
+        let err = exec.transition_to(ExecutionStatus::Failed);
+        assert!(err.is_err());
+    }
+}

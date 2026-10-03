@@ -97,3 +97,29 @@ impl Job {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_job_transitions() {
+        let tenant = TenantId::new();
+        let mut job = Job::new(tenant, "Report Job".to_string());
+        
+        // Initial state should be Draft
+        assert_eq!(job.status, JobStatus::Draft);
+        
+        let err = job.transition_to(JobStatus::Active);
+        assert!(err.is_err());
+        
+        // Add version
+        job.current_version_id = Some(JobVersionId::new());
+        job.transition_to(JobStatus::Active).unwrap();
+        assert_eq!(job.status, JobStatus::Active);
+        
+        // Active -> Archived
+        job.transition_to(JobStatus::Archived).unwrap();
+        assert_eq!(job.status, JobStatus::Archived);
+    }
+}
