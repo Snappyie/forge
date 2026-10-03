@@ -70,6 +70,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     lease.renew(30);
     println!("Renewed lease for 30s. New expiration: {}", lease.expires_at);
 
+    // 5. Test HTTP API (Phase 4)
+    println!("\n--- 5. HTTP API & Endpoints ---");
+    let router = forge_api::create_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    
+    // Spawn server in background
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    println!("Started Axum API server on port {}", port);
+    
+    let client = reqwest::Client::new();
+    let health_url = format!("http://127.0.0.1:{}/api/v1/health/live", port);
+    let res = client.get(&health_url).send().await?;
+    let status = res.status();
+    let body = res.text().await?;
+    
+    println!("GET /api/v1/health/live returned {}: {}", status, body);
+
     println!("\n=== All Tests Passed! ===");
     Ok(())
 }
