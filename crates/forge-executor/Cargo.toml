@@ -1,5 +1,5 @@
 [package]
-name = "forge-server"
+name = "forge-executor"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,8 +8,7 @@ license.workspace = true
 [dependencies]
 tokio.workspace = true
 chrono.workspace = true
-sqlx.workspace = true
+uuid.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 forge-domain = { path = "../forge-domain" }
-forge-scheduler = { path = "../forge-scheduler" }
-forge-storage = { path = "../forge-storage" }
-forge-executor = { path = "../forge-executor" }

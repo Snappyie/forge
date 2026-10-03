@@ -336,6 +336,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-executor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "forge-domain",
+ "serde",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "forge-scheduler"
 version = "0.1.0"
 dependencies = [
@@ -352,6 +364,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "forge-domain",
+ "forge-executor",
  "forge-scheduler",
  "forge-storage",
  "sqlx",

@@ -1,8 +1,11 @@
 use forge_domain::{Execution, ExecutionStatus, Job, JobStatus, TenantId, JobVersionId};
 use forge_scheduler::CronSchedule;
 use forge_storage::db::Database;
+use forge_executor::{Worker, Lease};
 use chrono::Utc;
 use std::env;
+use std::thread;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,6 +50,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fetch_one(db.pool())
         .await?;
     println!("Simple query 'SELECT 1' returned: {}", row.0);
+
+    // 4. Test Executor / Worker Protocol (Phase 3)
+    println!("\n--- 4. Executor / Worker Protocol ---");
+    let mut worker = Worker::new(tenant_id, "node-1.forge.internal".to_string(), vec!["docker".to_string()]);
+    println!("Registered Worker: {} on host {} (Status: {:?})", worker.id, worker.hostname, worker.status);
+    
+    // Simulate heartbeat
+    thread::sleep(Duration::from_millis(50));
+    worker.heartbeat();
+    println!("Heartbeat sent! Last heartbeat at: {}", worker.last_heartbeat_at);
+
+    // Issue a lease
+    let mut lease = Lease::new(execution.id, worker.id, 2); // 2 second lease
+    println!("Issued Lease for Execution {} to Worker {} (Expires: {})", lease.execution_id, lease.worker_id, lease.expires_at);
+    println!("Is lease expired? {}", lease.is_expired());
+    
+    // Renew lease
+    lease.renew(30);
+    println!("Renewed lease for 30s. New expiration: {}", lease.expires_at);
 
     println!("\n=== All Tests Passed! ===");
     Ok(())
