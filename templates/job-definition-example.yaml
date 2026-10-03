@@ -1,0 +1,31 @@
+apiVersion: forge/v1
+kind: Job
+metadata:
+  key: synthetic-daily-settlement
+  name: Synthetic Daily Settlement
+spec:
+  execution:
+    type: worker_task
+    task: synthetic.settlement
+  timeout: 30m
+  queue: settlement
+  priority: high
+  concurrency:
+    maxConcurrent: 1
+  retry:
+    maxAttempts: 5
+    strategy: exponential
+    initialDelay: 5s
+    multiplier: 2
+    maxDelay: 30m
+    jitter: true
+  resources:
+    cpu: 2
+    memory: 2Gi
+  schedule:
+    type: cron
+    expression: "0 2 * * *"
+    timezone: Asia/Kolkata
+    misfirePolicy: FIRE_ONCE
+    catchUpPolicy: CATCH_UP
+    maxCatchUp: 3

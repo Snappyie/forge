@@ -1,0 +1,33 @@
+apiVersion: forge/v1
+kind: Workflow
+metadata:
+  key: synthetic-settlement-workflow
+  name: Synthetic Settlement Workflow
+spec:
+  nodes:
+    - id: fetch
+      job: synthetic-fetch-transactions
+    - id: validate
+      job: synthetic-validate-transactions
+      dependsOn:
+        - fetch
+    - id: reconcile
+      job: synthetic-reconcile
+      dependsOn:
+        - validate
+    - id: fraud
+      job: synthetic-fraud-check
+      dependsOn:
+        - validate
+    - id: settle
+      job: synthetic-settle
+      dependsOn:
+        - reconcile
+        - fraud
+    - id: report
+      job: synthetic-generate-report
+      dependsOn:
+        - settle
+  policy:
+    dependencyCondition: ALL_SUCCEEDED
+    timeout: 2h

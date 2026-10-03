@@ -1,0 +1,9 @@
+{
+  "project": "Forge",
+  "spec_version": "0.1.0",
+  "generated": "2026-10-03",
+  "document_count": 39,
+  "normative_documents": [
+    "docs/traceability-matrix.md"
+  ]
+}
