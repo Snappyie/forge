@@ -1,20 +1,27 @@
 "use client";
 
 import { motion } from "framer-motion";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuGroup } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { MoreHorizontal, Play, XCircle, RotateCcw } from "lucide-react";
+import { MoreHorizontal, Play, XCircle, RotateCcw, GitCompare } from "lucide-react";
+import { PowerfulFilterBar } from "@/components/ui/filter-bar";
+import { useToast } from "@/hooks/use-toast";
+import Link from "next/link";
 
 export default function ExecutionsPage() {
+  const router = useRouter();
+  const { toast } = useToast();
+
   const executions = [
-    { id: "exec_1a2b3c", job: "Data Pipeline Etl", status: "Running", time: "2m 14s", user: "system" },
-    { id: "exec_9f8e7d", job: "Weekly Report Gen", status: "Failed", time: "45s", user: "neel@example.com" },
-    { id: "exec_5x4y3z", job: "Image Resize Batch", status: "Completed", time: "12ms", user: "system" },
-    { id: "exec_11a22b", job: "Data Pipeline Etl", status: "Completed", time: "4m 02s", user: "system" },
+    { id: "1a2b3c", job: "Data Pipeline Etl", status: "Running", time: "2m 14s", user: "system" },
+    { id: "9f8e7d", job: "Weekly Report Gen", status: "Failed", time: "45s", user: "neel@example.com" },
+    { id: "5x4y3z", job: "Image Resize Batch", status: "Completed", time: "12ms", user: "system" },
+    { id: "11a22b", job: "Data Pipeline Etl", status: "Completed", time: "4m 02s", user: "system" },
   ];
 
   return (
@@ -30,8 +37,17 @@ export default function ExecutionsPage() {
           </motion.h1>
           <p className="text-muted-foreground">Monitor and control active workflow traces.</p>
         </div>
-        <Button variant="outline">Export Logs</Button>
+        <div className="flex gap-2">
+          <Link href="/executions/compare" passHref>
+            <Button variant="outline" className="border-indigo-200 dark:border-indigo-900/50 text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20">
+              <GitCompare className="w-4 h-4 mr-2" /> Compare Executions
+            </Button>
+          </Link>
+          <Button variant="outline">Export Logs</Button>
+        </div>
       </header>
+
+      <PowerfulFilterBar />
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -73,9 +89,13 @@ export default function ExecutionsPage() {
                     </TableHeader>
                     <TableBody>
                       {executions.map((exec) => (
-                        <TableRow key={exec.id} className="transition-colors group hover:bg-muted/50">
+                        <TableRow 
+                          key={exec.id} 
+                          className="transition-colors group hover:bg-muted/50 cursor-pointer"
+                          onClick={() => router.push(`/executions/${exec.id}`)}
+                        >
                           <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">
-                            {exec.id}
+                            exec_{exec.id}
                           </TableCell>
                           <TableCell className="font-medium">{exec.job}</TableCell>
                           <TableCell className="text-muted-foreground text-sm">{exec.user}</TableCell>
@@ -93,21 +113,24 @@ export default function ExecutionsPage() {
                           </TableCell>
                           <TableCell className="text-right">
                             <DropdownMenu>
-                              <DropdownMenuTrigger 
-                                render={
-                                  <Button variant="ghost" className="h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                                }
-                              >
-                                <span className="sr-only">Open menu</span>
-                                <MoreHorizontal className="h-4 w-4" />
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" className="h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <span className="sr-only">Open menu</span>
+                                  <MoreHorizontal className="h-4 w-4" />
+                                </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
                                 <DropdownMenuGroup>
                                   <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                                  <DropdownMenuItem><Play className="mr-2 h-4 w-4" /> View Trace</DropdownMenuItem>
-                                  <DropdownMenuItem><RotateCcw className="mr-2 h-4 w-4" /> Retry Execution</DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => router.push(`/executions/${exec.id}`)}><Play className="mr-2 h-4 w-4" /> View Trace</DropdownMenuItem>
+                                  <DropdownMenuItem onClick={(e) => { e.stopPropagation(); toast({ title: "Retrying", description: `Queued execution ${exec.id} for retry.` }); }}><RotateCcw className="mr-2 h-4 w-4" /> Retry Execution</DropdownMenuItem>
                                   <DropdownMenuSeparator />
-                                  <DropdownMenuItem className="text-rose-600 dark:text-rose-400"><XCircle className="mr-2 h-4 w-4" /> Cancel</DropdownMenuItem>
+                                  <DropdownMenuItem 
+                                    className="text-rose-600 dark:text-rose-400"
+                                    onClick={(e) => { e.stopPropagation(); toast({ title: "Cancelled", description: `Execution ${exec.id} was cancelled.`, variant: "destructive" }); }}
+                                  >
+                                    <XCircle className="mr-2 h-4 w-4" /> Cancel
+                                  </DropdownMenuItem>
                                 </DropdownMenuGroup>
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -118,7 +141,6 @@ export default function ExecutionsPage() {
                   </Table>
                 </div>
               </TabsContent>
-              {/* Additional TabsContent for running, failed, etc can be implemented similarly */}
             </Tabs>
           </CardContent>
         </Card>

@@ -2,7 +2,7 @@
 
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
-import { Terminal, Activity, Box, Users, ServerCrash, Hexagon, ChevronDown, PlusCircle } from "lucide-react";
+import { Terminal, Activity, Box, Users, ServerCrash, Hexagon, ChevronDown, PlusCircle, GitMerge, Layers, Settings } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuGroup } from "@/components/ui/dropdown-menu";
@@ -96,6 +96,21 @@ export function Sidebar() {
             Workers
           </Button>
         </Link>
+        <Link href="/queues" passHref>
+          <Button variant={getVariant("/queues")} className={getStyle("/queues")}>
+            <Layers className="mr-2 h-4 w-4 text-orange-400" />
+            Queues
+          </Button>
+        </Link>
+        <div className="pt-4 pb-1">
+          <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Design</p>
+        </div>
+        <Link href="/workflows" passHref>
+          <Button variant={getVariant("/workflows")} className={getStyle("/workflows")}>
+            <GitMerge className="mr-2 h-4 w-4 text-pink-500" />
+            Workflows
+          </Button>
+        </Link>
         <div className="pt-4 pb-1">
           <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Features</p>
         </div>
@@ -115,6 +130,21 @@ export function Sidebar() {
           <Button variant={getVariant("/audit")} className={getStyle("/audit")}>
             <Box className="mr-2 h-4 w-4 text-teal-500" />
             Audit Trail
+          </Button>
+        </Link>
+        <div className="pt-4 pb-1">
+          <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Admin</p>
+        </div>
+        <Link href="/teams" passHref>
+          <Button variant={getVariant("/teams")} className={getStyle("/teams")}>
+            <Users className="mr-2 h-4 w-4 text-blue-400" />
+            Teams
+          </Button>
+        </Link>
+        <Link href="/settings" passHref>
+          <Button variant={getVariant("/settings")} className={getStyle("/settings")}>
+            <Settings className="mr-2 h-4 w-4 text-slate-500" />
+            Settings
           </Button>
         </Link>
       </nav>

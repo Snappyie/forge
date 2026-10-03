@@ -11,10 +11,12 @@ tokio.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 uuid.workspace = true
+chrono.workspace = true
 thiserror.workspace = true
 forge-domain = { path = "../forge-domain" }
 forge-auth = { path = "../forge-auth" }
+forge-config = { path = "../forge-config" }
 tower_governor = "0.4"
 tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "request-id"] }
 sqlx.workspace = true

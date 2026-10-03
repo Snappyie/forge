@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
+import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PlusCircle, Search, Settings2 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -17,12 +18,19 @@ import {
   DialogTrigger,
   DialogFooter
 } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import { PowerfulFilterBar } from "@/components/ui/filter-bar";
+import { BulkOperationsBar } from "@/components/ui/bulk-operations";
 
 export default function JobsPage() {
+  const router = useRouter();
+  const { toast } = useToast();
+  
   const [jobs, setJobs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [newJobName, setNewJobName] = useState("");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set());
 
   const fetchJobs = async () => {
     try {
@@ -34,6 +42,7 @@ export default function JobsPage() {
       }
     } catch (err) {
       console.error("Failed to fetch jobs:", err);
+      toast({ title: "Error", description: "Failed to fetch jobs.", variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -62,11 +71,34 @@ export default function JobsPage() {
       if (res.ok) {
         setNewJobName("");
         setIsDialogOpen(false);
+        toast({ title: "Success", description: "Job created successfully." });
         fetchJobs(); // Refresh list
+      } else {
+        toast({ title: "Error", description: "Failed to create job.", variant: "destructive" });
       }
     } catch (err) {
       console.error("Failed to create job:", err);
+      toast({ title: "Error", description: "Failed to create job.", variant: "destructive" });
     }
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedJobs.size === jobs.length) {
+      setSelectedJobs(new Set());
+    } else {
+      setSelectedJobs(new Set(jobs.map(j => j.id)));
+    }
+  };
+
+  const toggleSelectJob = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newSelected = new Set(selectedJobs);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedJobs(newSelected);
   };
 
   return (
@@ -84,11 +116,7 @@ export default function JobsPage() {
         </div>
         
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger 
-            render={
-              <Button className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5" />
-            }
-          >
+          <DialogTrigger className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-md transition-all hover:-translate-y-0.5 inline-flex shrink-0 items-center justify-center rounded-lg text-sm font-medium h-9 px-4 py-2">
             <PlusCircle className="mr-2 h-4 w-4" /> Create Job
           </DialogTrigger>
           <DialogContent className="sm:max-w-[425px]">
@@ -117,8 +145,9 @@ export default function JobsPage() {
             </form>
           </DialogContent>
         </Dialog>
-
       </header>
+
+      <PowerfulFilterBar />
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -135,7 +164,6 @@ export default function JobsPage() {
                 </CardDescription>
               </div>
               <div className="flex space-x-2">
-                <Button variant="outline" size="sm"><Search className="mr-2 h-4 w-4" />Filter</Button>
                 <Button variant="outline" size="sm"><Settings2 className="mr-2 h-4 w-4" />View</Button>
               </div>
             </div>
@@ -144,6 +172,12 @@ export default function JobsPage() {
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent bg-muted/20">
+                  <TableHead className="w-12 text-center">
+                     <Checkbox 
+                        checked={jobs.length > 0 && selectedJobs.size === jobs.length}
+                        onCheckedChange={toggleSelectAll} 
+                     />
+                  </TableHead>
                   <TableHead className="font-medium text-muted-foreground">ID</TableHead>
                   <TableHead className="font-medium text-muted-foreground">Name</TableHead>
                   <TableHead className="font-medium text-muted-foreground">Version</TableHead>
@@ -153,24 +187,31 @@ export default function JobsPage() {
               <TableBody>
                 {isLoading ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
                       Loading jobs from database...
                     </TableCell>
                   </TableRow>
                 ) : jobs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
                       No jobs found. Create your first job above!
                     </TableCell>
                   </TableRow>
                 ) : (
                   jobs.map(job => (
-                    <TableRow key={job.id} className="transition-colors group hover:bg-muted/50 cursor-pointer">
+                    <TableRow 
+                      key={job.id} 
+                      className="transition-colors group hover:bg-muted/50 cursor-pointer"
+                      onClick={() => router.push(`/jobs/${job.id}`)}
+                    >
+                      <TableCell className="text-center" onClick={(e) => toggleSelectJob(job.id, e)}>
+                        <Checkbox checked={selectedJobs.has(job.id)} />
+                      </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">
                         {job.id.substring(0, 8)}...
                       </TableCell>
                       <TableCell className="font-medium">{job.name}</TableCell>
-                      <TableCell className="text-muted-foreground">-</TableCell>
+                      <TableCell className="text-muted-foreground">v1</TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-900/20">
                           {job.status}
@@ -184,6 +225,11 @@ export default function JobsPage() {
           </CardContent>
         </Card>
       </motion.div>
+
+      <BulkOperationsBar 
+        selectedCount={selectedJobs.size} 
+        onClear={() => setSelectedJobs(new Set())} 
+      />
     </main>
   );
 }

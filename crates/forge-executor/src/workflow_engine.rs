@@ -1,5 +1,5 @@
-use forge_domain::workflow::{Workflow, Node, NodeType, Edge};
-use std::collections::{HashMap, HashSet, VecDeque};
+use forge_domain::workflow::{Edge, NodeType, Workflow};
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug)]
 pub enum NodeState {
@@ -134,6 +134,7 @@ impl WorkflowExecution {
 mod tests {
     use super::*;
     use forge_domain::id::{JobId, TenantId};
+    use forge_domain::workflow::Node;
 
     #[test]
     fn test_dag_execution_and_dependencies() {

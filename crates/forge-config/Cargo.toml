@@ -1,0 +1,10 @@
+[package]
+name = "forge-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+chrono = { workspace = true, features = ["serde"] }

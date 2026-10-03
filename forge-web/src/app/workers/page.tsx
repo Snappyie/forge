@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ServerCrash, Activity, Cpu, MemoryStick, Signal, Server, PowerOff } from "lucide-react";
+import Link from "next/link";
 
 export default function WorkersPage() {
   const [workers, setWorkers] = useState<any[]>([]);
@@ -143,8 +144,12 @@ export default function WorkersPage() {
                       </TableCell>
                     </TableRow>
                   ) : workers.map((w) => (
-                    <TableRow key={w.id} className="group">
-                      <TableCell className="font-mono text-sm font-medium">{w.id.substring(0, 8)}...</TableCell>
+                    <TableRow key={w.id} className="group cursor-pointer hover:bg-muted/50">
+                      <TableCell className="font-mono text-sm font-medium">
+                        <Link href={`/workers/${w.id}`} className="hover:underline">
+                          {w.id.substring(0, 8)}...
+                        </Link>
+                      </TableCell>
                       <TableCell>
                         <Badge 
                           className={`shadow-none border-none ${

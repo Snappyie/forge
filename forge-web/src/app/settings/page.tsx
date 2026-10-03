@@ -2,266 +2,95 @@
 
 import { motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Key, Lock, Users, PlusCircle, Trash2, Eye, EyeOff, MoreHorizontal } from "lucide-react";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-  DialogFooter
-} from "@/components/ui/dialog";
+import { Settings2, Webhook, Key, Database, RefreshCw, Download, GitBranch } from "lucide-react";
 
 export default function SettingsPage() {
   return (
-    <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-50/50 via-background to-background dark:from-indigo-900/10 dark:via-background dark:to-background">
+    <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-50/50 via-background to-background dark:from-slate-900/10 dark:via-background dark:to-background">
       <header className="flex justify-between items-center mb-8">
         <div>
           <motion.h1 
             initial={{ y: -20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
-            className="text-4xl font-bold tracking-tight mb-2 text-foreground"
+            className="text-4xl font-bold tracking-tight mb-2 text-foreground flex items-center gap-3"
           >
-            Workspace Settings
+            <Settings2 className="h-8 w-8 text-slate-500" /> Platform Settings
           </motion.h1>
-          <p className="text-muted-foreground">Manage access, secrets, and billing for Acme Corp.</p>
+          <p className="text-muted-foreground">Manage global configurations, integrations, and security.</p>
         </div>
       </header>
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <Tabs defaultValue="api-keys" className="w-full">
-          <TabsList className="mb-6 bg-card/50 backdrop-blur-sm border border-border/50 p-1">
-            <TabsTrigger value="api-keys" className="data-[state=active]:bg-indigo-600 data-[state=active]:text-white">
-              <Key className="w-4 h-4 mr-2" /> API Keys
-            </TabsTrigger>
-            <TabsTrigger value="secrets" className="data-[state=active]:bg-indigo-600 data-[state=active]:text-white">
-              <Lock className="w-4 h-4 mr-2" /> Secrets Vault
-            </TabsTrigger>
-            <TabsTrigger value="team" className="data-[state=active]:bg-indigo-600 data-[state=active]:text-white">
-              <Users className="w-4 h-4 mr-2" /> Team Members
-            </TabsTrigger>
-          </TabsList>
-          
-          {/* API KEYS TAB */}
-          <TabsContent value="api-keys">
-            <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-              <CardHeader className="flex flex-row items-center justify-between">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
+          <Card className="bg-card/50 backdrop-blur-sm border-border/50 h-full">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><Key className="w-5 h-5 text-amber-500" /> API Keys & Service Accounts</CardTitle>
+              <CardDescription>Manage programmatic access to the Forge API.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex justify-between items-center p-3 border rounded-md">
                 <div>
-                  <CardTitle>API Keys</CardTitle>
-                  <CardDescription>
-                    Manage programmatic access to your tenant.
-                  </CardDescription>
+                  <div className="font-medium">Production CI/CD Deployer</div>
+                  <div className="text-xs text-muted-foreground">Created 2 months ago • Last used 4 hours ago</div>
                 </div>
-                <Dialog>
-                  <DialogTrigger 
-                    render={
-                      <Button className="bg-indigo-600 hover:bg-indigo-700 text-white" />
-                    }
-                  >
-                    <PlusCircle className="mr-2 h-4 w-4" /> Generate Key
-                  </DialogTrigger>
-                  <DialogContent className="sm:max-w-[425px]">
-                    <DialogHeader>
-                      <DialogTitle>Generate API Key</DialogTitle>
-                      <DialogDescription>
-                        Create a new key. The secret will only be shown once.
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className="grid gap-4 py-4">
-                      <div className="flex flex-col space-y-2">
-                        <label className="text-sm font-medium">Key Description</label>
-                        <input className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" placeholder="e.g. Production CI/CD Bot" />
-                      </div>
-                    </div>
-                    <DialogFooter>
-                      <Button className="bg-indigo-600 text-white">Generate</Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              </CardHeader>
-              <CardContent>
-                <div className="rounded-md border border-border/50">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="hover:bg-transparent bg-muted/20">
-                        <TableHead>Description</TableHead>
-                        <TableHead>Prefix</TableHead>
-                        <TableHead>Created</TableHead>
-                        <TableHead>Last Used</TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      <TableRow className="group">
-                        <TableCell className="font-medium">Production CI/CD Bot</TableCell>
-                        <TableCell className="font-mono text-muted-foreground">forge_prod_***</TableCell>
-                        <TableCell className="text-muted-foreground">Oct 1, 2026</TableCell>
-                        <TableCell className="text-muted-foreground">2 hours ago</TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" className="text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                      <TableRow className="group">
-                        <TableCell className="font-medium">Local Development (Neel)</TableCell>
-                        <TableCell className="font-mono text-muted-foreground">forge_dev_***</TableCell>
-                        <TableCell className="text-muted-foreground">Sep 15, 2026</TableCell>
-                        <TableCell className="text-muted-foreground">Never</TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" className="text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
+                <Button variant="outline" size="sm">Revoke</Button>
+              </div>
+              <Button className="w-full" variant="outline">Generate New API Key</Button>
+            </CardContent>
+          </Card>
+        </motion.div>
 
-          {/* SECRETS VAULT TAB */}
-          <TabsContent value="secrets">
-            <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-              <CardHeader className="flex flex-row items-center justify-between">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+          <Card className="bg-card/50 backdrop-blur-sm border-border/50 h-full">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><Webhook className="w-5 h-5 text-indigo-500" /> Webhooks</CardTitle>
+              <CardDescription>Configure outgoing webhooks for external integrations.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex justify-between items-center p-3 border rounded-md">
                 <div>
-                  <CardTitle>Secrets Vault</CardTitle>
-                  <CardDescription>
-                    Securely inject environment variables into your executed jobs.
-                  </CardDescription>
+                  <div className="font-medium">Slack Pager</div>
+                  <div className="text-xs text-muted-foreground">Triggers on: Job Failure, SLA Violation</div>
                 </div>
-                <Dialog>
-                  <DialogTrigger 
-                    render={
-                      <Button className="bg-indigo-600 hover:bg-indigo-700 text-white" />
-                    }
-                  >
-                    <PlusCircle className="mr-2 h-4 w-4" /> Add Secret
-                  </DialogTrigger>
-                  <DialogContent className="sm:max-w-[425px]">
-                    <DialogHeader>
-                      <DialogTitle>Add Secret</DialogTitle>
-                      <DialogDescription>
-                        Key-value pair that will be encrypted at rest.
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className="grid gap-4 py-4">
-                      <div className="flex flex-col space-y-2">
-                        <label className="text-sm font-medium">Key Name</label>
-                        <input className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm uppercase font-mono" placeholder="DATABASE_URL" />
-                      </div>
-                      <div className="flex flex-col space-y-2">
-                        <label className="text-sm font-medium">Value</label>
-                        <input type="password" className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="••••••••••••" />
-                      </div>
-                    </div>
-                    <DialogFooter>
-                      <Button className="bg-indigo-600 text-white">Save Secret</Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              </CardHeader>
-              <CardContent>
-                <div className="rounded-md border border-border/50">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="hover:bg-transparent bg-muted/20">
-                        <TableHead>Key</TableHead>
-                        <TableHead>Value</TableHead>
-                        <TableHead>Updated</TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      <TableRow className="group">
-                        <TableCell className="font-mono text-sm font-medium">AWS_ACCESS_KEY_ID</TableCell>
-                        <TableCell className="font-mono text-muted-foreground text-xs">•••••••••••••••••</TableCell>
-                        <TableCell className="text-muted-foreground text-sm">Oct 2, 2026</TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity">
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                      <TableRow className="group">
-                        <TableCell className="font-mono text-sm font-medium">STRIPE_SECRET_KEY</TableCell>
-                        <TableCell className="font-mono text-muted-foreground text-xs">•••••••••••••••••</TableCell>
-                        <TableCell className="text-muted-foreground text-sm">Sep 28, 2026</TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity">
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
+                <Button variant="outline" size="sm">Edit</Button>
+              </div>
+              <Button className="w-full" variant="outline">Add Webhook</Button>
+            </CardContent>
+          </Card>
+        </motion.div>
 
-          {/* TEAM TAB */}
-          <TabsContent value="team">
-            <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
-              <CardHeader className="flex flex-row items-center justify-between">
-                <div>
-                  <CardTitle>Team Members</CardTitle>
-                  <CardDescription>
-                    Manage users and their permissions within this workspace.
-                  </CardDescription>
-                </div>
-                <Button className="bg-indigo-600 hover:bg-indigo-700 text-white">
-                  <PlusCircle className="mr-2 h-4 w-4" /> Invite Member
-                </Button>
-              </CardHeader>
-              <CardContent>
-                <div className="rounded-md border border-border/50">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="hover:bg-transparent bg-muted/20">
-                        <TableHead>User</TableHead>
-                        <TableHead>Email</TableHead>
-                        <TableHead>Role</TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      <TableRow className="group">
-                        <TableCell className="font-medium flex items-center gap-2">
-                          <div className="h-6 w-6 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-[10px] font-bold text-white shadow-inner">
-                            ND
-                          </div>
-                          Neel D.
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">neel@example.com</TableCell>
-                        <TableCell>
-                          <Badge className="bg-indigo-100 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400 border-none shadow-none">Owner</Badge>
-                        </TableCell>
-                        <TableCell className="text-right">
-                           <Button variant="ghost" size="icon" disabled>
-                            <MoreHorizontal className="h-4 w-4 text-muted-foreground/50" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
+          <Card className="bg-card/50 backdrop-blur-sm border-border/50 h-full">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><GitBranch className="w-5 h-5 text-teal-500" /> Git / IaC Integration</CardTitle>
+              <CardDescription>Sync jobs directly from your version control.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="p-4 bg-muted/20 border rounded-md text-sm">
+                Connected to GitHub repository <strong>acmecorp/forge-jobs</strong>. Main branch is currently synced.
+              </div>
+              <Button className="w-full" variant="outline"><RefreshCw className="w-4 h-4 mr-2" /> Force Sync Repository</Button>
+            </CardContent>
+          </Card>
+        </motion.div>
 
-        </Tabs>
-      </motion.div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
+          <Card className="bg-card/50 backdrop-blur-sm border-border/50 h-full">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><Database className="w-5 h-5 text-rose-500" /> System & Data</CardTitle>
+              <CardDescription>Database maintenance and data export.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-col gap-2">
+                <Button variant="outline" className="justify-start"><Download className="w-4 h-4 mr-2" /> Export All Jobs (JSON)</Button>
+                <Button variant="outline" className="justify-start"><Download className="w-4 h-4 mr-2" /> Export Audit Logs (CSV)</Button>
+                <Button variant="destructive" className="justify-start mt-4">Enable Maintenance Mode</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      </div>
     </main>
   );
 }

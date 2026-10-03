@@ -25,11 +25,9 @@ CREATE TABLE api_keys (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE tenants (
-    id UUID PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- NOTE: the `tenants` table is created in 001_initial_schema.sql. It is not
+-- repeated here: re-creating it made migration 003 fail on a clean database
+-- with `relation "tenants" already exists`, which aborted server startup.
 
 CREATE TABLE tenant_memberships (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

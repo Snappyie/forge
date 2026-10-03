@@ -595,7 +595,9 @@ name = "forge-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "forge-auth",
+ "forge-config",
  "forge-domain",
  "serde",
  "serde_json",
@@ -631,6 +633,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "forge-config"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -675,11 +685,11 @@ dependencies = [
  "chrono",
  "dotenvy",
  "forge-api",
+ "forge-config",
  "forge-domain",
  "forge-executor",
  "forge-scheduler",
  "forge-storage",
- "reqwest",
  "sqlx",
  "tokio",
  "tracing",
@@ -2764,6 +2774,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2857,6 +2868,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2866,12 +2887,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

@@ -71,20 +71,23 @@ impl Execution {
         }
         
         // Basic state machine validation
-        let valid = match (&self.status, &new_status) {
-            (ExecutionStatus::Queued, ExecutionStatus::Dispatched) => true,
-            (ExecutionStatus::Dispatched, ExecutionStatus::Running) => true,
-            (_, ExecutionStatus::CancelRequested) => true,
-            (ExecutionStatus::CancelRequested, ExecutionStatus::Cancelled) => true,
-            (ExecutionStatus::Running, ExecutionStatus::Succeeded) => true,
-            (ExecutionStatus::Running, ExecutionStatus::Failed) => true,
-            (ExecutionStatus::Running, ExecutionStatus::TimedOut) => true,
-            (ExecutionStatus::Failed, ExecutionStatus::RetryScheduled) => true,
-            (ExecutionStatus::Failed, ExecutionStatus::DeadLettered) => true,
-            (ExecutionStatus::RetryScheduled, ExecutionStatus::Queued) => true,
-            (ExecutionStatus::Dispatched | ExecutionStatus::Running, ExecutionStatus::Abandoned) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (&self.status, &new_status),
+            (ExecutionStatus::Queued, ExecutionStatus::Dispatched)
+                | (ExecutionStatus::Dispatched, ExecutionStatus::Running)
+                | (_, ExecutionStatus::CancelRequested)
+                | (ExecutionStatus::CancelRequested, ExecutionStatus::Cancelled)
+                | (ExecutionStatus::Running, ExecutionStatus::Succeeded)
+                | (ExecutionStatus::Running, ExecutionStatus::Failed)
+                | (ExecutionStatus::Running, ExecutionStatus::TimedOut)
+                | (ExecutionStatus::Failed, ExecutionStatus::RetryScheduled)
+                | (ExecutionStatus::Failed, ExecutionStatus::DeadLettered)
+                | (ExecutionStatus::RetryScheduled, ExecutionStatus::Queued)
+                | (
+                    ExecutionStatus::Dispatched | ExecutionStatus::Running,
+                    ExecutionStatus::Abandoned
+                )
+        );
 
         if !valid {
             return Err(DomainError::InvalidStateTransition {

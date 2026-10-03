@@ -18,21 +18,11 @@ pub enum ExecutionType {
     WorkerTask,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ResourceRequirements {
     pub cpu_units: Option<u32>,
     pub memory_mb: Option<u32>,
     pub worker_capabilities: Vec<String>,
-}
-
-impl Default for ResourceRequirements {
-    fn default() -> Self {
-        Self {
-            cpu_units: None,
-            memory_mb: None,
-            worker_capabilities: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,16 +1,22 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Play, RotateCcw, XCircle, Terminal, Activity, ArrowLeft, Check, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
 import ReactFlow, { Background, Controls, MarkerType } from "reactflow";
 import "reactflow/dist/style.css";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
+
+import { AiTroubleshootingPanel } from "@/components/ui/ai-troubleshooting";
+import { AnomalyDetectionWidget } from "@/components/ui/anomaly-detection";
+import { WhyIsThisRunning } from "@/components/ui/why-running";
+import { DiagnosticPanel } from "@/components/ui/diagnostic-panel";
+import { RetryReplayAction } from "@/components/ui/retry-replay";
+import { useToast } from "@/hooks/use-toast";
 
 const initialNodes = [
   { id: '1', position: { x: 250, y: 0 }, data: { label: 'Start Execution' }, style: { background: '#10b981', color: 'white', border: 'none', borderRadius: '8px' } },
@@ -25,7 +31,10 @@ const initialEdges = [
   { id: 'e3-4', source: '3', target: '4', animated: false, style: { strokeDasharray: '5 5' }, markerEnd: { type: MarkerType.ArrowClosed } },
 ];
 
-export default function ExecutionDetail({ params }: { params: { id: string } }) {
+export default function ExecutionDetail({ params }: { params: Promise<{ id: string }> }) {
+  const resolvedParams = React.use(params as any) as { id: string };
+  const { id } = resolvedParams;
+  const { toast } = useToast();
   const [logs, setLogs] = useState<string[]>([
     "[10:45:01.200] INF Execution started by system.",
     "[10:45:01.215] INF Running step: 'Start Execution'",
@@ -44,6 +53,7 @@ export default function ExecutionDetail({ params }: { params: { id: string } }) 
 
   const handleApprove = () => {
     setStatus("Running");
+    toast({ title: "Approved", description: "Execution resumed." });
     setLogs(prev => [
       ...prev,
       `[${new Date().toISOString().substring(11, 23)}] INF Manual approval granted.`,
@@ -53,12 +63,22 @@ export default function ExecutionDetail({ params }: { params: { id: string } }) 
     
     setTimeout(() => {
       setStatus("Completed");
+      toast({ title: "Completed", description: "Execution finished successfully." });
       setLogs(prev => [
         ...prev,
         `[${new Date().toISOString().substring(11, 23)}] INF Step complete. Dataset processed successfully.`,
         `[${new Date().toISOString().substring(11, 23)}] INF Execution finished successfully.`
       ]);
     }, 2000);
+  };
+
+  const handleCancel = () => {
+     setStatus("Failed");
+     toast({ title: "Cancelled", description: "Execution was cancelled.", variant: "destructive" });
+     setLogs(prev => [
+        ...prev,
+        `[${new Date().toISOString().substring(11, 23)}] ERR Execution cancelled by user.`
+     ]);
   };
 
   return (
@@ -74,7 +94,7 @@ export default function ExecutionDetail({ params }: { params: { id: string } }) 
               animate={{ y: 0, opacity: 1 }}
               className="text-3xl font-bold tracking-tight mb-2 flex items-center gap-4"
             >
-              Execution <span className="font-mono text-xl text-muted-foreground bg-muted/50 px-2 py-1 rounded-md">exec_{params.id}</span>
+              Execution <span className="font-mono text-xl text-muted-foreground bg-muted/50 px-2 py-1 rounded-md">exec_{id}</span>
             </motion.h1>
             <div className="flex items-center gap-3 text-sm mt-3">
               <Badge 
@@ -96,14 +116,12 @@ export default function ExecutionDetail({ params }: { params: { id: string } }) 
           </div>
           
           <div className="flex gap-2">
+            <RetryReplayAction executionId={id} status={status} hasRetriesLeft={status === "Failed"} />
+
             {status === "Paused" && (
               <Dialog>
-                <DialogTrigger 
-                  render={
-                    <Button className="bg-amber-500 hover:bg-amber-600 text-white shadow-md animate-pulse" />
-                  }
-                >
-                   <Check className="mr-2 h-4 w-4" /> Approve Step
+                <DialogTrigger className="bg-amber-500 hover:bg-amber-600 text-white shadow-md animate-pulse inline-flex shrink-0 items-center justify-center rounded-lg text-sm font-medium h-9 px-4 py-2">
+                     <Check className="mr-2 h-4 w-4" /> Approve Step
                 </DialogTrigger>
                 <DialogContent>
                   <DialogHeader>
@@ -113,20 +131,28 @@ export default function ExecutionDetail({ params }: { params: { id: string } }) 
                     </DialogDescription>
                   </DialogHeader>
                   <DialogFooter>
-                    <DialogTrigger render={<Button variant="outline" />}>Cancel</DialogTrigger>
-                    <DialogTrigger render={<Button className="bg-indigo-600 text-white" onClick={handleApprove} />}>Approve & Resume</DialogTrigger>
+                    <DialogTrigger className="inline-flex items-center justify-center rounded-lg text-sm font-medium h-9 px-4 py-2 border border-input bg-background hover:bg-accent hover:text-accent-foreground">Cancel</DialogTrigger>
+                    <DialogTrigger className="inline-flex items-center justify-center rounded-lg text-sm font-medium h-9 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white" onClick={handleApprove}>Approve & Resume</DialogTrigger>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
             )}
-            <Button variant="outline" className="border-border/50 bg-card/50 backdrop-blur-sm">
-              <XCircle className="mr-2 h-4 w-4 text-rose-500" /> Cancel
-            </Button>
+            {status !== "Completed" && status !== "Failed" && (
+              <Button variant="outline" onClick={handleCancel} className="border-border/50 bg-card/50 backdrop-blur-sm">
+                <XCircle className="mr-2 h-4 w-4 text-rose-500" /> Cancel
+              </Button>
+            )}
           </div>
         </div>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[70vh]">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+        <WhyIsThisRunning />
+        <AnomalyDetectionWidget />
+        {status === "Failed" && <DiagnosticPanel />}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[60vh] mb-6">
         {/* ReactFlow Visual Graph */}
         <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50 flex flex-col overflow-hidden h-full">
           <CardHeader className="py-4 border-b border-border/50">
@@ -190,6 +216,12 @@ export default function ExecutionDetail({ params }: { params: { id: string } }) 
           </div>
         </Card>
       </div>
+
+      {status === "Failed" && (
+         <div className="mb-6">
+           <AiTroubleshootingPanel executionId={id} />
+         </div>
+      )}
     </main>
   );
 }
