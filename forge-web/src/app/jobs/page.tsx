@@ -1,11 +1,20 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { PlusCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { PlusCircle, Search, Settings2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter
+} from "@/components/ui/dialog";
 
 export default function JobsPage() {
   return (
@@ -17,17 +26,38 @@ export default function JobsPage() {
             animate={{ y: 0, opacity: 1 }}
             className="text-4xl font-bold tracking-tight mb-2 text-foreground"
           >
-            Jobs
+            Job Definitions
           </motion.h1>
-          <p className="text-muted-foreground">Manage and orchestrate job definitions.</p>
+          <p className="text-muted-foreground">Manage templates and automation routines.</p>
         </div>
         
-        <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
-          <Button className="bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-500/25 transition-all">
-            <PlusCircle className="mr-2 h-4 w-4" />
-            Create Job
-          </Button>
-        </motion.div>
+        <Dialog>
+          <DialogTrigger 
+            render={
+              <Button className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5" />
+            }
+          >
+            <PlusCircle className="mr-2 h-4 w-4" /> Create Job
+          </DialogTrigger>
+          <DialogContent className="sm:max-w-[425px]">
+            <DialogHeader>
+              <DialogTitle>Create New Job</DialogTitle>
+              <DialogDescription>
+                Define a new automation routine in your tenant.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 py-4">
+              <div className="flex flex-col space-y-2">
+                <label htmlFor="name" className="text-sm font-medium leading-none">Job Name</label>
+                <input id="name" className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" placeholder="e.g. data-etl-pipeline" />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white">Save changes</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
       </header>
 
       <motion.div
@@ -35,43 +65,47 @@ export default function JobsPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
       >
-        <Card className="bg-card/50 backdrop-blur-sm shadow-sm">
+        <Card className="bg-card/50 backdrop-blur-sm shadow-sm border-border/50">
           <CardHeader>
-            <CardTitle className="text-foreground">All Jobs</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              A complete list of registered job definitions.
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-foreground">Configured Jobs</CardTitle>
+                <CardDescription className="text-muted-foreground">
+                  View and edit existing job definitions.
+                </CardDescription>
+              </div>
+              <div className="flex space-x-2">
+                <Button variant="outline" size="sm"><Search className="mr-2 h-4 w-4" />Filter</Button>
+                <Button variant="outline" size="sm"><Settings2 className="mr-2 h-4 w-4" />View</Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
             <Table>
               <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="text-muted-foreground font-medium">Job Name</TableHead>
-                  <TableHead className="text-muted-foreground font-medium">Version</TableHead>
-                  <TableHead className="text-muted-foreground font-medium">Status</TableHead>
-                  <TableHead className="text-muted-foreground font-medium text-right">Last Updated</TableHead>
+                <TableRow className="hover:bg-transparent bg-muted/20">
+                  <TableHead className="font-medium text-muted-foreground">ID</TableHead>
+                  <TableHead className="font-medium text-muted-foreground">Name</TableHead>
+                  <TableHead className="font-medium text-muted-foreground">Version</TableHead>
+                  <TableHead className="font-medium text-muted-foreground">Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 <TableRow className="transition-colors group hover:bg-muted/50 cursor-pointer">
-                  <TableCell className="font-medium text-foreground transition-colors">Daily Database Backup</TableCell>
-                  <TableCell className="font-mono text-muted-foreground group-hover:text-foreground transition-colors">v2</TableCell>
-                  <TableCell><Badge className="bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-500/10 dark:text-green-400 dark:hover:bg-green-500/20 shadow-none border-none">Active</Badge></TableCell>
-                  <TableCell className="text-right text-muted-foreground">2 hours ago</TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">job_123</TableCell>
+                  <TableCell className="font-medium">Data Pipeline Etl</TableCell>
+                  <TableCell className="text-muted-foreground">v2</TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-900/20">Draft</Badge>
+                  </TableCell>
                 </TableRow>
-                
                 <TableRow className="transition-colors group hover:bg-muted/50 cursor-pointer">
-                  <TableCell className="font-medium text-foreground transition-colors">Send Newsletter Campaign</TableCell>
-                  <TableCell className="font-mono text-muted-foreground group-hover:text-foreground transition-colors">v1</TableCell>
-                  <TableCell><Badge className="bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-500/10 dark:text-green-400 dark:hover:bg-green-500/20 shadow-none border-none">Active</Badge></TableCell>
-                  <TableCell className="text-right text-muted-foreground">3 days ago</TableCell>
-                </TableRow>
-                
-                <TableRow className="transition-colors group hover:bg-muted/50 cursor-pointer">
-                  <TableCell className="font-medium text-foreground transition-colors">Legacy Data Migration</TableCell>
-                  <TableCell className="font-mono text-muted-foreground group-hover:text-foreground transition-colors">v1</TableCell>
-                  <TableCell><Badge variant="outline" className="text-muted-foreground">Archived</Badge></TableCell>
-                  <TableCell className="text-right text-muted-foreground">1 year ago</TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors">job_456</TableCell>
+                  <TableCell className="font-medium">Weekly Report Gen</TableCell>
+                  <TableCell className="text-muted-foreground">v5</TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-900/20">Published</Badge>
+                  </TableCell>
                 </TableRow>
               </TableBody>
             </Table>
