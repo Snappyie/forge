@@ -4,18 +4,78 @@ use crate::error::DomainError;
 use crate::id::{JobId, JobVersionId, QueueId, TenantId};
 use crate::policy::{ConcurrencyPolicy, Priority, RetryPolicy};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum JobStatus {
+    #[default]
     Draft,
     Active,
     Archived,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl JobStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JobStatus::Draft => "DRAFT",
+            JobStatus::Active => "ACTIVE",
+            JobStatus::Archived => "ARCHIVED",
+        }
+    }
+}
+
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for JobStatus {
+    type Err = DomainError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "DRAFT" => Ok(JobStatus::Draft),
+            "ACTIVE" => Ok(JobStatus::Active),
+            "ARCHIVED" => Ok(JobStatus::Archived),
+            other => Err(DomainError::ValidationError(format!(
+                "unknown job status: {other}"
+            ))),
+        }
+    }
+}
+
+/// How a version's work is actually carried out (spec 01.4).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExecutionType {
     HttpRequest,
     ContainerCommand,
     WorkerTask,
+}
+
+impl ExecutionType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecutionType::HttpRequest => "HTTP_REQUEST",
+            ExecutionType::ContainerCommand => "CONTAINER_COMMAND",
+            ExecutionType::WorkerTask => "WORKER_TASK",
+        }
+    }
+}
+
+impl std::str::FromStr for ExecutionType {
+    type Err = DomainError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "HTTP_REQUEST" => Ok(ExecutionType::HttpRequest),
+            "CONTAINER_COMMAND" => Ok(ExecutionType::ContainerCommand),
+            "WORKER_TASK" => Ok(ExecutionType::WorkerTask),
+            other => Err(DomainError::ValidationError(format!(
+                "unknown execution type: {other}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

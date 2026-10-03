@@ -700,8 +700,11 @@ dependencies = [
 name = "forge-storage"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "forge-domain",
+ "serde",
+ "serde_json",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
