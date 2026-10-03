@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
+pub mod id;
+pub mod error;
+pub mod policy;
+pub mod job;
+pub mod execution;
+
+pub use id::*;
+pub use error::*;
+pub use policy::*;
+pub use job::*;
+pub use execution::*;
+
+// Kept for backward compatibility with your main.rs test
+pub fn add(left: usize, right: usize) -> usize {
     left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
 }
