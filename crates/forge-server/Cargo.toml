@@ -6,11 +6,14 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 chrono.workspace = true
 sqlx.workspace = true
 reqwest = { version = "0.12", features = ["json"] }
 axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
 forge-domain = { path = "../forge-domain" }
 forge-scheduler = { path = "../forge-scheduler" }
 forge-storage = { path = "../forge-storage" }
