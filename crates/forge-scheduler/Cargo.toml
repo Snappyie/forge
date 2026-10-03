@@ -1,0 +1,13 @@
+[package]
+name = "forge-scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+forge-domain = { path = "../forge-domain" }
+cron = "0.12"

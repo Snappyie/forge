@@ -1,0 +1,14 @@
+[package]
+name = "forge-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
+forge-domain = { path = "../forge-domain" }
+forge-scheduler = { path = "../forge-scheduler" }
+forge-storage = { path = "../forge-storage" }
