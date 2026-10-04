@@ -66,7 +66,7 @@ impl JobFilter {
     /// `QueryBuilder` is used instead of string concatenation because the
     /// filters are optional and heterogeneous; each predicate binds its own
     /// placeholder so no value is ever interpolated into SQL text.
-    fn apply<'a>(&'a self, qb: &mut QueryBuilder<'a, Postgres>) {
+    fn apply(&self, qb: &mut QueryBuilder<Postgres>) {
         if let Some(status) = self.status {
             qb.push(" AND status = ").push_bind(status.as_str());
         }
@@ -124,11 +124,11 @@ impl<'a> JobRepository<'a> {
         owner_id: Option<Uuid>,
     ) -> Result<JobRow> {
         let id = Uuid::new_v4();
-        sqlx::query_as::<_, JobRow>(&format!(
+        sqlx::query_as::<_, JobRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO jobs (id, tenant_id, key, name, description, status, priority, owner_id)
              VALUES ($1, $2, $3, $4, $5, 'DRAFT', $6, $7)
              RETURNING {JOB_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .bind(tenant_id.into_uuid())
         .bind(&key)
@@ -145,9 +145,9 @@ impl<'a> JobRepository<'a> {
     /// so a cross-tenant read finds nothing rather than returning another
     /// tenant's row (AT-TEN-001).
     pub async fn get(&self, tenant_id: TenantId, job_id: JobId) -> Result<JobRow> {
-        sqlx::query_as::<_, JobRow>(&format!(
+        sqlx::query_as::<_, JobRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE id = $1 AND tenant_id = $2"
-        ))
+        )))
         .bind(job_id.into_uuid())
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -227,7 +227,7 @@ impl<'a> JobRepository<'a> {
         expected_updated_at: DateTime<Utc>,
         patch: &JobPatch,
     ) -> Result<JobRow> {
-        sqlx::query_as::<_, JobRow>(&format!(
+        sqlx::query_as::<_, JobRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE jobs SET
                  name = COALESCE($3, name),
                  description = CASE WHEN $4::boolean THEN $5 ELSE description END,
@@ -236,7 +236,7 @@ impl<'a> JobRepository<'a> {
                  updated_at = NOW()
              WHERE id = $1 AND tenant_id = $2 AND updated_at = $8
              RETURNING {JOB_COLUMNS}"
-        ))
+        )))
         .bind(job_id.into_uuid())
         .bind(tenant_id.into_uuid())
         .bind(patch.name.as_deref())
@@ -285,9 +285,9 @@ impl<'a> JobRepository<'a> {
 
         let result = async {
             // Lock the row so two concurrent status changes serialise.
-            let current = sqlx::query_as::<_, JobRow>(&format!(
+            let current = sqlx::query_as::<_, JobRow>(sqlx::AssertSqlSafe(format!(
                 "SELECT {JOB_COLUMNS} FROM jobs WHERE id = $1 AND tenant_id = $2 FOR UPDATE"
-            ))
+            )))
             .bind(job_id.into_uuid())
             .bind(tenant_id.into_uuid())
             .fetch_optional(&mut *tx)
@@ -319,10 +319,10 @@ impl<'a> JobRepository<'a> {
             job.transition_to(new_status)
                 .map_err(|e| StorageError::Validation(e.to_string()))?;
 
-            sqlx::query_as::<_, JobRow>(&format!(
+            sqlx::query_as::<_, JobRow>(sqlx::AssertSqlSafe(format!(
                 "UPDATE jobs SET status = $3, updated_at = NOW()
                  WHERE id = $1 AND tenant_id = $2 RETURNING {JOB_COLUMNS}"
-            ))
+            )))
             .bind(job_id.into_uuid())
             .bind(tenant_id.into_uuid())
             .bind(new_status.as_str())
@@ -410,7 +410,7 @@ impl<'a> JobVersionRepository<'a> {
     ) -> Result<JobVersionRow> {
         // The next version number is derived inside the statement so two
         // concurrent creators cannot pick the same one.
-        sqlx::query_as::<_, JobVersionRow>(&format!(
+        sqlx::query_as::<_, JobVersionRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO job_versions
                  (id, tenant_id, job_id, version_number, execution_type, execution_config,
                   timeout_seconds, retry_policy, concurrency_policy, resource_requirements,
@@ -420,7 +420,7 @@ impl<'a> JobVersionRepository<'a> {
                     FROM job_versions WHERE job_id = $3),
                  $4, $5, $6, $7, $8, $9, $10, $11, $12)
              RETURNING {JOB_VERSION_COLUMNS}"
-        ))
+        )))
         .bind(Uuid::new_v4())
         .bind(tenant_id.into_uuid())
         .bind(job_id.into_uuid())
@@ -444,10 +444,10 @@ impl<'a> JobVersionRepository<'a> {
         job_id: JobId,
         version_id: JobVersionId,
     ) -> Result<JobVersionRow> {
-        sqlx::query_as::<_, JobVersionRow>(&format!(
+        sqlx::query_as::<_, JobVersionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {JOB_VERSION_COLUMNS} FROM job_versions
              WHERE id = $1 AND job_id = $2 AND tenant_id = $3"
-        ))
+        )))
         .bind(version_id.into_uuid())
         .bind(job_id.into_uuid())
         .bind(tenant_id.into_uuid())
@@ -458,10 +458,10 @@ impl<'a> JobVersionRepository<'a> {
     }
 
     pub async fn list(&self, tenant_id: TenantId, job_id: JobId) -> Result<Vec<JobVersionRow>> {
-        sqlx::query_as::<_, JobVersionRow>(&format!(
+        sqlx::query_as::<_, JobVersionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {JOB_VERSION_COLUMNS} FROM job_versions
              WHERE job_id = $1 AND tenant_id = $2 ORDER BY version_number DESC"
-        ))
+        )))
         .bind(job_id.into_uuid())
         .bind(tenant_id.into_uuid())
         .fetch_all(self.pool)
@@ -474,11 +474,11 @@ impl<'a> JobVersionRepository<'a> {
         tenant_id: TenantId,
         job_id: JobId,
     ) -> Result<Option<JobVersionRow>> {
-        sqlx::query_as::<_, JobVersionRow>(&format!(
+        sqlx::query_as::<_, JobVersionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {JOB_VERSION_COLUMNS} FROM job_versions
              WHERE job_id = $1 AND tenant_id = $2 AND published_at IS NOT NULL
              ORDER BY version_number DESC LIMIT 1"
-        ))
+        )))
         .bind(job_id.into_uuid())
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -498,11 +498,11 @@ impl<'a> JobVersionRepository<'a> {
         let mut tx = self.pool.begin().await.map_err(StorageError::from_sqlx)?;
 
         let result = async {
-            let updated = sqlx::query_as::<_, JobVersionRow>(&format!(
+            let updated = sqlx::query_as::<_, JobVersionRow>(sqlx::AssertSqlSafe(format!(
                 "UPDATE job_versions SET published_at = COALESCE(published_at, NOW())
                  WHERE id = $1 AND job_id = $2 AND tenant_id = $3
                  RETURNING {JOB_VERSION_COLUMNS}"
-            ))
+            )))
             .bind(version_id.into_uuid())
             .bind(job_id.into_uuid())
             .bind(tenant_id.into_uuid())
@@ -599,7 +599,7 @@ pub struct ExecutionFilter {
 
 impl ExecutionFilter {
     /// Appends this filter's predicates to a positional query builder.
-    fn apply<'a>(&'a self, qb: &mut QueryBuilder<'a, Postgres>) {
+    fn apply(&self, qb: &mut QueryBuilder<Postgres>) {
         if let Some(job) = self.job_id {
             qb.push(" AND job_id = ").push_bind(job);
         }
@@ -663,13 +663,13 @@ impl<'a> ExecutionRepository<'a> {
         let mut tx = self.pool.begin().await.map_err(StorageError::from_sqlx)?;
 
         let result = async {
-            let row = sqlx::query_as::<_, ExecutionRow>(&format!(
+            let row = sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO executions
                      (id, tenant_id, job_id, job_version_id, queue_id, status, priority,
                       trigger_source, schedule_id, scheduled_for, enqueued_at, correlation_id, input)
                  VALUES ($1, $2, $3, $4, $5, 'QUEUED', $6, $7, $8, $9, NOW(), $10, $11)
                  RETURNING {EXECUTION_COLUMNS}"
-            ))
+            )))
             .bind(Uuid::new_v4())
             .bind(new.tenant_id.into_uuid())
             .bind(new.job_id.into_uuid())
@@ -702,9 +702,9 @@ impl<'a> ExecutionRepository<'a> {
     }
 
     pub async fn get(&self, tenant_id: TenantId, execution_id: Uuid) -> Result<ExecutionRow> {
-        sqlx::query_as::<_, ExecutionRow>(&format!(
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {EXECUTION_COLUMNS} FROM executions WHERE id = $1 AND tenant_id = $2"
-        ))
+        )))
         .bind(execution_id)
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -719,9 +719,9 @@ impl<'a> ExecutionRepository<'a> {
     /// completion gate — that hold the execution's own id but not its tenant.
     /// Every API-facing path uses `get`, which is tenant-scoped.
     pub async fn get_unchecked(&self, execution_id: Uuid) -> Result<Option<ExecutionRow>> {
-        sqlx::query_as::<_, ExecutionRow>(&format!(
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {EXECUTION_COLUMNS} FROM executions WHERE id = $1"
-        ))
+        )))
         .bind(execution_id)
         .fetch_optional(self.pool)
         .await
@@ -739,10 +739,10 @@ impl<'a> ExecutionRepository<'a> {
         tenant_id: TenantId,
         execution_id: Uuid,
     ) -> Result<ExecutionRow> {
-        sqlx::query_as::<_, ExecutionRow>(&format!(
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE executions SET attempt_count = attempt_count + 1, updated_at = NOW()
              WHERE id = $1 AND tenant_id = $2 RETURNING {EXECUTION_COLUMNS}"
-        ))
+        )))
         .bind(execution_id)
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -806,10 +806,10 @@ impl<'a> ExecutionRepository<'a> {
         let mut tx = self.pool.begin().await.map_err(StorageError::from_sqlx)?;
 
         let result = async {
-            let current = sqlx::query_as::<_, ExecutionRow>(&format!(
+            let current = sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
                 "SELECT {EXECUTION_COLUMNS} FROM executions
                  WHERE id = $1 AND tenant_id = $2 FOR UPDATE"
-            ))
+            )))
             .bind(execution_id)
             .bind(tenant_id.into_uuid())
             .fetch_optional(&mut *tx)
@@ -823,7 +823,7 @@ impl<'a> ExecutionRepository<'a> {
             exec.transition_to(new_status)
                 .map_err(|e| StorageError::Validation(e.to_string()))?;
 
-            let row = sqlx::query_as::<_, ExecutionRow>(&format!(
+            let row = sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
                 "UPDATE executions SET
                      status = $3,
                      attempt_count = $4,
@@ -835,7 +835,7 @@ impl<'a> ExecutionRepository<'a> {
                      updated_at = NOW()
                  WHERE id = $1 AND tenant_id = $2
                  RETURNING {EXECUTION_COLUMNS}"
-            ))
+            )))
             .bind(execution_id)
             .bind(tenant_id.into_uuid())
             .bind(new_status.as_str())
@@ -890,24 +890,66 @@ impl<'a> ExecutionRepository<'a> {
                 WHEN 'BACKGROUND' THEN 100 \
                 ELSE 0 \
             END \
-            + FLOOR(EXTRACT(EPOCH FROM (NOW() - created_at)))::bigint";
+            + FLOOR(EXTRACT(EPOCH FROM (NOW() - e.created_at)))::bigint";
 
         let sql = format!(
             "UPDATE executions SET status = 'DISPATCHED', worker_id = $3, enqueued_at = NOW(),
                     updated_at = NOW()
              WHERE id = (
-                 SELECT id FROM executions
-                 WHERE status = 'QUEUED'
-                   AND tenant_id = $1
-                   AND ($2::uuid IS NULL OR queue_id = $2)
-                 ORDER BY ({priority_score}) DESC, created_at ASC
-                 FOR UPDATE SKIP LOCKED
+                 SELECT e.id
+                 FROM executions e
+                 -- The concurrency policy lives on the version an execution
+                 -- runs, not on the job itself.
+                 LEFT JOIN job_versions jv ON jv.id = e.job_version_id
+                 LEFT JOIN queues q ON q.id = e.queue_id
+                 JOIN workers w ON w.id = $3
+                 WHERE e.status = 'QUEUED'
+                   AND e.tenant_id = $1
+                   AND ($2::uuid IS NULL OR e.queue_id = $2)
+                   -- A paused queue must stop receiving work (spec 10.10).
+                   AND (e.queue_id IS NULL OR q.paused = FALSE)
+                   -- A revoked, offline, or draining worker takes no work.
+                   AND w.tenant_id = $1
+                   AND w.status IN ('READY','BUSY')
+                   AND w.draining = FALSE
+                   -- Concurrency is enforced here, not only in tests, so a
+                   -- bounded policy cannot be exceeded. The limit lives at
+                   -- `max_concurrent_executions`; `Unlimited` carries no `Bounded`
+                   -- key, and the NULL test treats that as unbounded.
+                   --
+                   -- The candidate row is excluded from the count: a limit of 1
+                   -- must admit the first dispatch, and counting the queued row
+                   -- against itself would reject it and starve the job forever.
+                   AND (
+                       (jv.concurrency_policy->'max_concurrent_executions'->>'Bounded')::int
+                         IS NULL
+                       OR (
+                           SELECT COUNT(*) FROM executions active
+                           WHERE active.id <> e.id
+                             AND active.tenant_id = e.tenant_id
+                             AND active.status IN ('SCHEDULED','DISPATCHED',
+                                                    'RUNNING','RETRY_SCHEDULED',
+                                                    'CANCEL_REQUESTED','ABANDONED')
+                             -- The scope decides which rows count against the
+                             -- limit, so a JOB-scoped policy ignores the rest of
+                             -- the tenant.
+                             AND CASE COALESCE(jv.concurrency_policy->>'scope','JOB')
+                                 WHEN 'JOB' THEN active.job_id = e.job_id
+                                 WHEN 'QUEUE' THEN active.queue_id IS NOT DISTINCT FROM e.queue_id
+                                 ELSE TRUE
+                             END
+                       ) < (jv.concurrency_policy->'max_concurrent_executions'->>'Bounded')::int
+                   )
+                 ORDER BY ({priority_score}) DESC, e.created_at ASC
+                 FOR UPDATE OF e SKIP LOCKED
                  LIMIT 1
              )
              RETURNING {EXECUTION_COLUMNS}"
         );
 
-        sqlx::query_as::<_, ExecutionRow>(&sql)
+        // `priority_score` is a string literal and `sql` interpolates only that
+        // plus a `const *_COLUMNS` list, so no user input reaches this string.
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(sql))
             .bind(tenant_id.into_uuid())
             .bind(queue_id)
             .bind(worker_id)

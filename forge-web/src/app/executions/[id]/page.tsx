@@ -41,6 +41,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ExecutionMetrics } from "@/components/ui/execution-metrics";
 import { LiveExecution } from "@/components/ui/live-execution";
 import { cn } from "cn";
+import { PageBreadcrumb } from "@/components/ui/page-breadcrumb";
 
 interface LogLine {
   stream: string;
@@ -163,13 +164,7 @@ export default function ExecutionDetailPage({
         <div className="flex flex-col gap-4 p-6">
           <header className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <Link
-                href="/executions"
-                className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-              >
-                <ArrowLeft className="size-3" aria-hidden />
-                All executions
-              </Link>
+              <PageBreadcrumb items={[{ label: "Forge", href: "/" }, { label: "Executions", href: "/executions" }, { label: "Detail" }]} />
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-lg font-semibold">Execution</h1>
                 <StatusBadge status={record.status} />

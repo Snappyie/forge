@@ -13,11 +13,18 @@ import { Archive, Loader2, Play, Plus, RefreshCw, Search } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { useList } from "@/lib/useQuery";
+import { usePaginatedQuery } from "@/lib/useQuery";
 import { cn } from "cn";
 import { BulkActions } from "@/components/ui/bulk-actions";
 import { ImportExport } from "@/components/ui/import-export";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Spinner } from "@/components/ui/spinner";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+} from "@/components/ui/pagination";
 import { compare, useTablePrefs } from "@/lib/tablePrefs";
 import {
   formatRelative,
@@ -63,9 +70,10 @@ export default function JobsPage() {
   const [selected, setSelected] = useState<string[]>([]);
   const { prefs, toggleSort, setDensity } = useTablePrefs("jobs");
 
-  const query = useList<Job>("/jobs");
+  const [pageSize, setPageSize] = useState(25);
+  const query = usePaginatedQuery<Job>("/jobs", pageSize);
   const jobs = useMemo(() => {
-    const rows = query.rows;
+    const rows = query.data ?? [];
     return rows.filter((job) => {
       if (status !== "ALL" && job.status !== status) return false;
       if (!search.trim()) return true;
@@ -142,6 +150,22 @@ export default function JobsPage() {
         </Select>
 
         {/* UI.md section 5: density is a persistent preference. */}
+        <label className="sr-only" htmlFor="page-size">
+          Rows per page
+        </label>
+        <select
+          id="page-size"
+          value={String(pageSize)}
+          onChange={(e) => setPageSize(Number(e.target.value))}
+          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+        >
+          {[10, 25, 50, 100].map((size) => (
+            <option key={size} value={size}>
+              {size} / page
+            </option>
+          ))}
+        </select>
+
         <div className="flex rounded-md border border-border">
           {(["compact", "comfortable"] as const).map((option) => (
             <button
@@ -161,6 +185,23 @@ export default function JobsPage() {
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+        <span>
+          {sorted.length} loaded{query.page?.has_more ? " (more available)" : ""}
+        </span>
+        {query.page?.has_more ? (
+          <button
+            type="button"
+            onClick={query.loadMore}
+            disabled={query.state === "loading"}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 disabled:opacity-50"
+          >
+            {query.state === "loading" ? <Spinner className="size-3" /> : null}
+            Load more
+          </button>
+        ) : null}
       </div>
 
       <ImportExport onImported={query.reload} />
@@ -307,7 +348,8 @@ function RowActions({
     setBusy(true);
     try {
       // A generated idempotency key makes a double-click harmless.
-      await api.post(`/jobs/${job.id}/trigger`, {}, crypto.randomUUID());
+      const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
+      await api.post(`/jobs/${job.id}/trigger`, {}, idempotencyKey);
       onDone();
     } catch (cause) {
       window.alert(cause instanceof ApiError ? cause.message : "the request failed");
@@ -379,10 +421,11 @@ function CreateJobDialog({ onCreated }: { onCreated: () => void }) {
     try {
       // A client-generated idempotency key means a retried submit creates one
       // job rather than two (spec 02.15).
+      const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
       await api.post(
         "/jobs",
         { name: name.trim(), key: key.trim() || undefined, priority },
-        crypto.randomUUID(),
+        idempotencyKey,
       );
       setOpen(false);
       setName("");

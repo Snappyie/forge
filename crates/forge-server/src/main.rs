@@ -77,6 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool.clone(),
         &config.server.auth_session_secret,
         &config.server.public_base_url,
+        config.server.allow_open_registration,
+        config.limits.max_request_body_bytes,
+        config.limits.max_log_bytes,
     );
 
     let addr = SocketAddr::from((parse_host(&config.server.host), config.server.port));
@@ -145,8 +148,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_tracing(config: &forge_config::Config) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.server.log_level));
+    // The HTTP trace spans come from `tower_http`, whose target the bare level
+    // would otherwise leave off — so request lines, and the request id on them,
+    // would never be logged. `RUST_LOG` still wins when set.
+    let directives = format!("{},tower_http=debug", config.server.log_level);
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(explicit) => tracing_subscriber::EnvFilter::new(explicit),
+        Err(_) => tracing_subscriber::EnvFilter::new(directives),
+    };
 
     match config.server.log_format {
         forge_config::LogFormat::Json => tracing_subscriber::registry()

@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 import {
   Activity,
   Bell,
+  BookOpen,
   CalendarClock,
   CircleDot,
   ClipboardList,
@@ -66,6 +67,7 @@ const NAV = [
   { href: "/webhooks", label: "Webhooks", icon: Webhook },
   { href: "/system-health", label: "System health", icon: Activity },
   { href: "/emergency", label: "Emergency", icon: ShieldAlert },
+  { href: "/docs", label: "Developers", icon: BookOpen },
   { href: "/admin", label: "Administration", icon: Shield },
 ];
 

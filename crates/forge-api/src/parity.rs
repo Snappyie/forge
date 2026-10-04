@@ -285,31 +285,24 @@ pub async fn create_webhook(
     ))
 }
 
-/// Rejects anything that is not an absolute HTTP(S) URL.
-///
-/// The SSRF guard from the auth crate is the defence in depth; this keeps the
-/// obvious mistakes out of storage entirely.
-fn validate_webhook_url(url: &str) -> Result<(), ApiError> {
-    let trimmed = url.trim();
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-        return Err(ApiError::validation("url must be an http or https URL")
-            .with_detail("url", "must start with http:// or https://"));
-    }
-    // Require a host: `https://` alone is not a webhook target.
-    let rest = trimmed
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or_default();
-    if rest.is_empty() || rest.starts_with('/') {
-        return Err(
-            ApiError::validation("url must include a host").with_detail("url", "missing host")
-        );
-    }
-    Ok(())
-}
-
 /// One row of the per-execution resource series.
 type MetricSampleRow = (i32, Option<f64>, Option<i64>, Option<i64>, Option<i64>);
+
+/// Validates an outbound URL against the SSRF rules in spec 11.
+///
+/// The prefix-and-host check that used to live here accepted
+/// `http://169.254.169.254/`, which is the cloud metadata endpoint. The real
+/// guard lives in `forge-auth` and was written and tested but never called, so
+/// this delegates to it rather than duplicating a weaker version.
+fn validate_webhook_url(url: &str) -> Result<(), ApiError> {
+    match forge_auth::check_outbound_url(url.trim()) {
+        forge_auth::UrlVerdict::Allowed => Ok(()),
+        forge_auth::UrlVerdict::Blocked(reason) => {
+            Err(ApiError::validation("url is not an acceptable destination")
+                .with_detail("url", reason))
+        }
+    }
+}
 
 /// One-way hash of a webhook secret; the plaintext is never stored.
 fn hash_secret(secret: &str) -> String {

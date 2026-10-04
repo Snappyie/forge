@@ -24,6 +24,119 @@ pub struct RegisterRequest {
     pub tenant_name: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Required unless the deployment allows open registration.
+    ///
+    /// `invites.token` is a UUID, so this is deserialized as one: a malformed
+    /// token is then a normal 400 rather than a database type error.
+    #[serde(default)]
+    pub invite_token: Option<Uuid>,
+}
+
+/// How a registration is authorised.
+struct Admission {
+    tenant_id: TenantId,
+    role: Role,
+}
+
+/// Decides who a registering caller may become, and in which tenant.
+///
+/// Registration is public, so without this every anonymous request would mint a
+/// tenant owner. Three cases, in order:
+///   1. A valid, unclaimed invite grants exactly the tenant and role it names.
+///   2. A bootstrap claim succeeds only while no tenant exists yet.
+///   3. Otherwise registration is refused, unless the deployment opted in.
+async fn admit(
+    state: &AppState,
+    email: &str,
+    tenant_name: Option<&str>,
+    invite_token: Option<Uuid>,
+) -> Result<Admission, ApiError> {
+    if let Some(token) = invite_token {
+        return redeem_invite(state, &token, email).await;
+    }
+
+    if state.allow_open_registration {
+        return Ok(Admission {
+            tenant_id: ensure_tenant(state, tenant_name).await?,
+            // An open deployment still must not hand every signup OWNER of a
+            // tenant that already has an owner.
+            role: Role::Viewer,
+        });
+    }
+
+    // Bootstrap: the very first tenant may be claimed once, by whoever gets
+    // there first. The unique primary key on `tenant_bootstrap` makes a second
+    // claim fail, so this cannot be raced.
+    let bootstrapped: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "INSERT INTO tenant_bootstrap (id, tenant_id)
+         VALUES (TRUE, NULL)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING tenant_id",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    if bootstrapped.is_some() {
+        let id = Uuid::new_v4();
+        let name = tenant_name.unwrap_or("default").trim();
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+            .bind(id)
+            .bind(if name.is_empty() { "default" } else { name })
+            .execute(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+
+        sqlx::query("UPDATE tenant_bootstrap SET tenant_id = $1 WHERE id = TRUE")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+
+        return Ok(Admission {
+            tenant_id: TenantId::from_uuid(id),
+            role: Role::Owner,
+        });
+    }
+
+    Err(ApiError::forbidden(
+        "registration is closed; an invitation is required",
+    ))
+}
+
+/// Consumes an invite, granting exactly the tenant and role it names.
+///
+/// `used_at` is set by the UPDATE's own row count, so two concurrent
+/// registrations with the same token cannot both succeed.
+async fn redeem_invite(state: &AppState, token: &Uuid, email: &str) -> Result<Admission, ApiError> {
+    let row: Option<(Uuid, String, String)> = sqlx::query_as(
+        "UPDATE invites SET used_at = NOW()
+         WHERE token = $1
+           AND used_at IS NULL
+           AND expires_at > NOW()
+           AND (email IS NULL OR lower(email) = $2)
+         RETURNING tenant_id, role, COALESCE(email, '')",
+    )
+    .bind(token)
+    .bind(email)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let Some((tenant_id, role, invited_email)) = row else {
+        return Err(ApiError::forbidden("that invitation is not valid"));
+    };
+
+    // A user row may already exist for this address (an invite to join a second
+    // tenant), so the email is informational here.
+    let _ = invited_email;
+
+    Ok(Admission {
+        tenant_id: TenantId::from_uuid(tenant_id),
+        // An unknown role here is stored data, not caller input, so this is a
+        // data-integrity fault rather than a validation error.
+        role: Role::parse(&role).ok_or_else(ApiError::internal)?,
+    })
 }
 
 /// `POST /auth/register` (spec 05 endpoint 57).
@@ -39,9 +152,16 @@ pub async fn register(
     }
     forge_auth::check_password_strength(&body.password)?;
 
-    // A user always belongs to a tenant; the first user of a named tenant also
-    // creates it and becomes its owner.
-    let tenant_id = ensure_tenant(&state, body.tenant_name.as_deref()).await?;
+    // Registration is public, so who the caller becomes is decided here rather
+    // than assumed.
+    let admission = admit(
+        &state,
+        &email,
+        body.tenant_name.as_deref(),
+        body.invite_token,
+    )
+    .await?;
+    let tenant_id = admission.tenant_id;
     let user_id = Uuid::new_v4();
     let password_hash = forge_auth::hash_password(&body.password)?;
 
@@ -68,16 +188,23 @@ pub async fn register(
         );
     }
 
-    sqlx::query(
-        "INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, 'OWNER')",
-    )
-    .bind(user_id)
-    .bind(tenant_id.into_uuid())
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::from)?;
+    sqlx::query("INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(tenant_id.into_uuid())
+        .bind(admission.role.as_str())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?;
 
-    let tokens = issue_session(&state, user_id, tenant_id, Role::Owner).await?;
+    if admission.role == Role::Owner {
+        sqlx::query("UPDATE tenant_bootstrap SET claimed_by = $1 WHERE id = TRUE")
+            .bind(user_id)
+            .execute(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+    }
+
+    let tokens = issue_session(&state, user_id, tenant_id, admission.role).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -85,7 +212,7 @@ pub async fn register(
             json!({
                 "user_id": user_id,
                 "tenant_id": tenant_id.into_uuid(),
-                "role": "OWNER",
+                "role": admission.role.as_str(),
                 "access_token": tokens.access_token,
                 "refresh_token": tokens.refresh_token,
                 "expires_in_secs": state.jwt.access_ttl().num_seconds(),
@@ -472,12 +599,26 @@ pub async fn update_user(
     auth.require("users:write")?;
 
     if let Some(name) = &body.display_name {
-        sqlx::query("UPDATE users SET display_name = $2 WHERE id = $1")
-            .bind(user_id)
-            .bind(name)
-            .execute(&state.pool)
-            .await
-            .map_err(ApiError::from)?;
+        let affected = sqlx::query(
+            "UPDATE users SET display_name = $2
+             WHERE id = $1
+               AND EXISTS (SELECT 1 FROM tenant_memberships m
+                           WHERE m.user_id = users.id AND m.tenant_id = $3)",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(auth.tenant_id.into_uuid())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?
+        .rows_affected();
+
+        if affected == 0 {
+            // Either the user does not exist or is not a member of this tenant;
+            // both are "not found" so the endpoint cannot confirm that an
+            // account exists elsewhere.
+            return Err(ApiError::not_found("user"));
+        }
     }
 
     if let Some(raw) = &body.role {
@@ -525,18 +666,39 @@ pub async fn disable_user(
             .with_detail("user", "refusing to disable the caller"));
     }
 
-    sqlx::query("UPDATE users SET disabled = TRUE WHERE id = $1")
+    // A user is only visible through a membership, so membership is the gate:
+    // otherwise a tenant-A admin could lock out a tenant-B owner. `users` carries
+    // no tenant column, so the EXISTS subquery is the only way to scope it.
+    let mut tx = state.pool.begin().await.map_err(ApiError::from)?;
+
+    let affected = sqlx::query(
+        "UPDATE users SET disabled = TRUE
+         WHERE id = $1
+           AND EXISTS (SELECT 1 FROM tenant_memberships m
+                       WHERE m.user_id = users.id AND m.tenant_id = $2)",
+    )
+    .bind(user_id)
+    .bind(auth.tenant_id.into_uuid())
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiError::from)?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::not_found("user"));
+    }
+
+    // A disabled account must not keep refreshing. Revoking every token for the
+    // user is correct across tenants: the account itself is disabled.
+    sqlx::query("UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1")
         .bind(user_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(ApiError::from)?;
 
-    // A disabled account must not keep refreshing.
-    sqlx::query("UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(ApiError::from)?;
+    // Both writes commit together, so a failure cannot leave a disabled account
+    // still holding live sessions.
+    tx.commit().await.map_err(ApiError::from)?;
 
     Ok(Json(ApiResponse::new(
         json!({ "id": user_id, "disabled": true }),

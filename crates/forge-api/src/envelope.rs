@@ -229,7 +229,9 @@ impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.to_body())).into_response()
+        // Fill in the ambient request id so an error envelope is always
+        // traceable back to a log line.
+        (self.status, Json(self.with_ambient_request_id().to_body())).into_response()
     }
 }
 
@@ -541,4 +543,69 @@ mod tests {
         assert_eq!(query.cursor.as_deref(), Some("abc"));
         assert_eq!(query.sort.as_deref(), Some("-created_at"));
     }
+}
+
+// The request id for the request currently being handled. The layer in
+// `router.rs` stamps `x-request-id` onto the request; this makes the same value
+// available to any handler that wants to report it, including the ones that
+// build an `ApiError` without an explicit id.
+tokio::task_local! {
+    static REQUEST_ID: String;
+}
+
+/// Sets the request id for the duration of one request's handling.
+pub fn with_request_id<F>(
+    request_id: String,
+    future: F,
+) -> impl std::future::Future<Output = F::Output>
+where
+    F: std::future::Future,
+{
+    REQUEST_ID.scope(request_id, future)
+}
+
+/// The current request id, if the request went through `with_request_id`.
+pub fn current_request_id() -> Option<String> {
+    REQUEST_ID.try_with(|id| id.clone()).ok()
+}
+
+impl ApiError {
+    /// Attaches the ambient request id when none was set explicitly.
+    ///
+    /// An error envelope whose `request_id` is empty is useless to whoever
+    /// receives it: there is nothing to search the logs for. This fills it in
+    /// from the request currently being handled.
+    pub fn with_ambient_request_id(mut self) -> Self {
+        if self.request_id.is_empty() {
+            if let Some(id) = current_request_id() {
+                self.request_id = id;
+            }
+        }
+        self
+    }
+}
+
+/// Publishes the request id for the duration of one request's handling.
+///
+/// Runs before the router so a handler that fails without an explicit id still
+/// produces an envelope a support engineer can search for.
+pub async fn request_id_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // `SetRequestIdLayer` has already stamped a header on the request, so this
+    // reads the same id the trace span carries rather than minting another.
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let mut response = with_request_id(request_id.clone(), next.run(request)).await;
+    // Echo it back so a client can quote it in a support request.
+    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
 }

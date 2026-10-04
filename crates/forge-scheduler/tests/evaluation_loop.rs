@@ -31,17 +31,17 @@ impl TestDb {
             .await
         {
             let _ = admin
-                .execute(
-                    format!(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                .execute(sqlx::AssertSqlSafe(format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
                          WHERE datname = '{}' AND pid <> pg_backend_pid()",
-                        self.db_name
-                    )
-                    .as_str(),
-                )
+                    self.db_name
+                )))
                 .await;
             let _ = admin
-                .execute(format!(r#"DROP DATABASE IF EXISTS "{}""#, self.db_name).as_str())
+                .execute(sqlx::AssertSqlSafe(format!(
+                    r#"DROP DATABASE IF EXISTS "{}""#,
+                    self.db_name
+                )))
                 .await;
             admin.close().await;
         }
@@ -66,7 +66,9 @@ impl TestDb {
             }
         };
         if admin
-            .execute(format!(r#"CREATE DATABASE "{db_name}""#).as_str())
+            .execute(sqlx::AssertSqlSafe(format!(
+                r#"CREATE DATABASE "{db_name}""#
+            )))
             .await
             .is_err()
         {

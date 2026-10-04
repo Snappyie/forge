@@ -44,21 +44,21 @@ impl TestDb {
         };
 
         if let Err(e) = admin
-            .execute(
-                format!(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            .execute(sqlx::AssertSqlSafe(format!(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
                      WHERE datname = '{}' AND pid <> pg_backend_pid()",
-                    self.db_name
-                )
-                .as_str(),
-            )
+                self.db_name
+            )))
             .await
         {
             eprintln!("could not release connections to {}: {e}", self.db_name);
         }
 
         if let Err(e) = admin
-            .execute(format!(r#"DROP DATABASE IF EXISTS "{}""#, self.db_name).as_str())
+            .execute(sqlx::AssertSqlSafe(format!(
+                r#"DROP DATABASE IF EXISTS "{}""#,
+                self.db_name
+            )))
             .await
         {
             eprintln!("could not drop {}: {e}", self.db_name);
@@ -85,7 +85,9 @@ impl TestDb {
             }
         };
         if admin
-            .execute(format!(r#"CREATE DATABASE "{db_name}""#).as_str())
+            .execute(sqlx::AssertSqlSafe(format!(
+                r#"CREATE DATABASE "{db_name}""#
+            )))
             .await
             .is_err()
         {
@@ -142,7 +144,14 @@ macro_rules! with_db {
 const SECRET: &str = "integration-test-secret-not-for-production";
 
 fn router(pool: PgPool) -> axum::Router {
-    create_router(pool, SECRET, "http://localhost:3000/api/v1")
+    create_router(
+        pool,
+        SECRET,
+        "http://localhost:3000/api/v1",
+        true,
+        1024 * 1024,
+        4 * 1024 * 1024,
+    )
 }
 
 /// Issues a request, attaching `ConnectInfo` so the rate limiter works.
@@ -278,7 +287,10 @@ async fn register_login_and_use_a_token() {
         )
         .await;
         assert_eq!(status, 201, "{body}");
-        assert_eq!(body["data"]["role"], "OWNER");
+        // This router sets `allow_open_registration`, which grants VIEWER rather
+        // than OWNER. Handing every self-service signup ownership of a tenant was
+        // a full-compromise path on any reachable instance.
+        assert_eq!(body["data"]["role"], "VIEWER");
         assert!(body["data"]["access_token"].is_string());
         assert!(body["data"]["refresh_token"].is_string());
         assert!(
@@ -1360,4 +1372,276 @@ async fn the_openapi_document_describes_the_api() {
         assert_eq!(doc["x-forge-scheduling"]["cronDialect"]["fields"], 5);
     })
     .await;
+}
+
+/// A user-mutation handler must not touch an account outside the caller's
+/// tenant. The scoping is an `EXISTS` over membership because `users` carries
+/// no tenant column of its own.
+#[tokio::test]
+async fn user_mutations_are_scoped_to_the_callers_tenant() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let pool = db.pool.clone();
+
+    // Two genuinely separate tenants. `register_user` seeds a single shared
+    // tenant, so tenant B is built explicitly here.
+    let (owner_a, tenant_a) =
+        register_user(&pool, "a-owner@example.com", "correct horse battery").await;
+
+    let tenant_b = Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'Second')")
+        .bind(tenant_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let user_b = Uuid::new_v4();
+    let hash_b = forge_auth::hash_password("correct horse battery").unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, 'b-owner@example.com', $2)",
+    )
+    .bind(user_b)
+    .bind(&hash_b)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, 'OWNER')",
+    )
+    .bind(user_b)
+    .bind(tenant_b)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_ne!(
+        tenant_a, tenant_b,
+        "the two owners are in different tenants"
+    );
+
+    let app = router(pool.clone());
+
+    // Tenant A's owner tries to rename and disable tenant B's owner.
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/v1/users/{user_b}"),
+        Some(&owner_a),
+        Some(json!({ "display_name": "owned-by-a" })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "a cross-tenant rename must not find the user: {body}"
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/users/{user_b}/disable"),
+        Some(&owner_a),
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "a cross-tenant disable must not find the user: {body}"
+    );
+
+    // And the victim is genuinely untouched.
+    let (name, disabled): (Option<String>, bool) =
+        sqlx::query_as("SELECT display_name, disabled FROM users WHERE id = $1")
+            .bind(user_b)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // The fixture set no display name, so the correct outcome is that it is
+    // still unset: the cross-tenant rename did not land.
+    assert_ne!(name.as_deref(), Some("owned-by-a"), "name unchanged");
+    assert!(!disabled, "the other tenant's owner is still enabled");
+
+    db.cleanup().await;
+}
+
+/// The dispatch preconditions spec 10.10 lists must actually gate `claim_next`:
+/// a revoked worker and a draining worker take no work, and a bounded
+/// concurrency policy is enforced rather than only asserted in tests.
+#[tokio::test]
+async fn dispatch_honours_worker_state_and_concurrency() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let pool = db.pool.clone();
+    let app = router(pool.clone());
+
+    let jwt = forge_auth::JwtService::new(SECRET.as_bytes());
+    let user_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let token = jwt
+        .issue(user_id, tenant_id, forge_auth::Role::Owner)
+        .unwrap();
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'Dispatch')")
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hash = forge_auth::hash_password("correct horse battery").unwrap();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, 'd@example.com', $2)")
+        .bind(user_id)
+        .bind(&hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, 'OWNER')",
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A job bounded to one concurrent execution.
+    let (job_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO jobs (id, tenant_id, name, status, priority)
+         VALUES (gen_random_uuid(), $1, 'bounded', 'ACTIVE', 'NORMAL') RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (version_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO job_versions (id, tenant_id, job_id, version_number,
+                                    execution_type, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 1, 'WORKER_TASK', NOW()) RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE job_versions SET concurrency_policy =
+            '{\"scope\":\"JOB\",\"queue_id\":null,\"max_concurrent_executions\":{\"Bounded\":1}}'
+         WHERE id = $1",
+    )
+    .bind(version_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE jobs SET current_version_id = $2 WHERE id = $1")
+        .bind(job_id)
+        .bind(version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Three executions waiting.
+    for _ in 0..3 {
+        sqlx::query(
+            "INSERT INTO executions (id, tenant_id, job_id, job_version_id, status,
+                                     priority, trigger_source, created_at)
+             VALUES (gen_random_uuid(), $1, $2, $3, 'QUEUED', 'NORMAL', 'MANUAL', NOW())",
+        )
+        .bind(tenant_id)
+        .bind(job_id)
+        .bind(version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let (worker_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO workers (id, tenant_id, hostname, status, draining,
+                              capabilities, labels, last_heartbeat_at)
+         VALUES (gen_random_uuid(), $1, 'w1', 'READY', FALSE, '[]', '{}', NOW())
+         RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // A revoked worker is handed nothing.
+    sqlx::query("UPDATE workers SET status = 'REVOKED' WHERE id = $1")
+        .bind(worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/workers/{worker_id}/claim"),
+        Some(&token),
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body["data"]["execution"].is_null(),
+        "a revoked worker must be given no work: {body}"
+    );
+
+    // A draining worker is handed nothing either.
+    sqlx::query("UPDATE workers SET status = 'READY', draining = TRUE WHERE id = $1")
+        .bind(worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/workers/{worker_id}/claim"),
+        Some(&token),
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body["data"]["execution"].is_null(),
+        "a draining worker must be given no work: {body}"
+    );
+
+    // A healthy worker takes exactly one, because the policy bounds it to one.
+    sqlx::query("UPDATE workers SET draining = FALSE WHERE id = $1")
+        .bind(worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/workers/{worker_id}/claim"),
+        Some(&token),
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["data"]["execution"].is_null(),
+        "a healthy worker should be given work: {body}"
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/workers/{worker_id}/claim"),
+        Some(&token),
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body["data"]["execution"].is_null(),
+        "the concurrency limit of 1 must block the second claim: {body}"
+    );
+
+    db.cleanup().await;
 }

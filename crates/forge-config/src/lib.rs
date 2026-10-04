@@ -109,6 +109,12 @@ pub struct ServerConfig {
     pub auth_session_secret: String,
     pub api_key_hashing_secret: String,
     pub default_timezone: String,
+    /// Whether an unauthenticated caller may register at all (spec 11).
+    ///
+    /// Off by default: open registration previously granted tenant OWNER to
+    /// whoever reached the endpoint first, which is a full compromise on any
+    /// reachable instance. With it off, registration requires an invite.
+    pub allow_open_registration: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +165,8 @@ impl ServerConfig {
             auth_session_secret,
             api_key_hashing_secret,
             default_timezone,
+            // Off by default: see the field's documentation.
+            allow_open_registration: parse_bool("FORGE_ALLOW_OPEN_REGISTRATION", "false"),
         })
     }
 }

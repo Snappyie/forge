@@ -14,6 +14,7 @@ use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
 };
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 /// Shared state, injected into every handler.
@@ -25,6 +26,12 @@ pub struct AppState {
     pub jwt: Arc<forge_auth::JwtService>,
     /// The public base URL, used in the OpenAPI document.
     pub base_url: String,
+    /// Whether an unauthenticated caller may register without an invite.
+    pub allow_open_registration: bool,
+    /// Documented, enforced request body ceiling (spec 17).
+    pub max_request_body_bytes: usize,
+    /// Ceiling on a single execution's log fetch (spec 17).
+    pub max_log_bytes: usize,
 }
 
 /// The conventional prefix for every endpoint.
@@ -34,12 +41,18 @@ pub fn create_router(
     pool: sqlx::PgPool,
     session_secret: &str,
     base_url: impl Into<String>,
+    allow_open_registration: bool,
+    max_request_body_bytes: usize,
+    max_log_bytes: usize,
 ) -> Router {
     let state = AppState {
         version: env!("CARGO_PKG_VERSION").to_string(),
         pool,
         jwt: Arc::new(forge_auth::JwtService::new(session_secret.as_bytes())),
         base_url: base_url.into(),
+        allow_open_registration,
+        max_request_body_bytes,
+        max_log_bytes,
     };
 
     // The limiter works with or without a ConnectInfo extension; the server
@@ -465,8 +478,47 @@ pub fn create_router(
         .merge(api)
         .layer(
             ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
-                .layer(cors),
+                // A client is handed a request id in the response envelope, so
+                // the same id has to appear in the server's log lines; without
+                // this, that id is not searchable and an operator cannot find
+                // the request they were given.
+                // Populate the ambient request id before anything else so an
+                // Order matters, because axum runs the outermost layer first.
+                // `SetRequestIdLayer` stamps the header, so the trace span below
+                // and the middleware above both read the same value; without it
+                // the envelope carries an id that appears in no log line.
+                .layer(PropagateRequestIdLayer::x_request_id())
+                .layer(SetRequestIdLayer::new(
+                    axum::http::HeaderName::from_static("x-request-id"),
+                    MakeRequestUuid,
+                ))
+                // Publishes the id so a handler that fails without an explicit
+                // id still produces a traceable envelope.
+                .layer(axum::middleware::from_fn(
+                    crate::envelope::request_id_middleware,
+                ))
+                .layer(TraceLayer::new_for_http().make_span_with(
+                    |request: &axum::http::Request<_>| {
+                        let request_id = request
+                            .headers()
+                            .get("x-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("-");
+                        tracing::info_span!(
+                            "http",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                            request_id = %request_id,
+                        )
+                    },
+                ))
+                .layer(cors)
+                // `FORGE_MAX_REQUEST_BODY_BYTES` was documented with a 1 MB
+                // default but never applied, so the effective limit was
+                // whatever axum happens to default to.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    state.max_request_body_bytes,
+                )),
         )
         .layer(GovernorLayer {
             config: Arc::new(*governor_conf),
@@ -509,6 +561,9 @@ mod tests {
             pool,
             "test-secret-not-for-production",
             "http://localhost:3000/api/v1",
+            false,
+            1024 * 1024,
+            4 * 1024 * 1024,
         )
     }
 
@@ -643,6 +698,9 @@ mod tests {
                 .unwrap(),
             jwt: Arc::new(forge_auth::JwtService::new(b"s")),
             base_url: "http://localhost".to_string(),
+            allow_open_registration: false,
+            max_request_body_bytes: 1024 * 1024,
+            max_log_bytes: 4 * 1024 * 1024,
         };
         assert!(!state.version.is_empty());
         assert!(state.base_url.starts_with("http"));

@@ -195,15 +195,19 @@ export function usePaginatedQuery<T>(
         const { api } = await import("@/lib/api");
         const separator = path.includes("?") ? "&" : "?";
         const query = `${path}${separator}limit=${pageSize}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-        const result = (await api.get<{ data: T[]; page?: PageInfo }>(query)) as {
-          data: T[];
-          page?: PageInfo;
-        };
+        // `api.get` unwraps the envelope, so a list endpoint yields the array
+        // itself rather than an object with a `data` property.
+        const result = await api.get<T[]>(query);
         if (cancelled) return;
 
-        const rows = Array.isArray(result.data) ? result.data : [];
+        const rows = Array.isArray(result) ? result : [];
         setItems((previous) => (cursor ? [...previous, ...rows] : rows));
-        setPage(result.page ?? { next_cursor: null, has_more: false });
+        // `has_more` cannot be read off the array, so it is inferred from
+        // whether a full page came back.
+        setPage({
+          next_cursor: null,
+          has_more: rows.length === pageSize,
+        });
         setState("ready");
       } catch (cause) {
         if (cancelled) return;

@@ -119,13 +119,15 @@ impl<'a> AuditRepository<'a> {
             .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
             .map(|ip| ip.to_string());
 
-        sqlx::query_as::<_, AuditEventRow>(&format!(
+        // The only interpolation is a `const *_COLUMNS` list; no user
+        // input reaches this string, which is what `AssertSqlSafe` asserts.
+        sqlx::query_as::<_, AuditEventRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO audit_events
                  (id, tenant_id, actor_type, actor_id, action, resource_type, resource_id,
                   result, source_ip, request_id, metadata)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::inet, $10, $11)
              RETURNING {AUDIT_COLUMNS}"
-        ))
+        )))
         .bind(Uuid::new_v4())
         .bind(tenant_uuid)
         .bind(&event.actor_type)

@@ -328,13 +328,15 @@ impl<'a> WorkerRepository<'a> {
         capabilities: serde_json::Value,
         labels: serde_json::Value,
     ) -> Result<WorkerRow> {
-        sqlx::query_as::<_, WorkerRow>(&format!(
+        // The only interpolation is a `const *_COLUMNS` list; no user
+        // input reaches this string, which is what `AssertSqlSafe` asserts.
+        sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO workers
                  (id, tenant_id, name, hostname, version, status, capabilities, labels,
                   last_heartbeat_at, registered_at)
              VALUES ($1, $2, $3, $4, $5, 'READY', $6, $7, NOW(), NOW())
              RETURNING {WORKER_COLUMNS}"
-        ))
+        )))
         .bind(Uuid::new_v4())
         .bind(tenant_id.into_uuid())
         .bind(name)
@@ -348,9 +350,9 @@ impl<'a> WorkerRepository<'a> {
     }
 
     pub async fn get(&self, tenant_id: TenantId, worker_id: Uuid) -> Result<WorkerRow> {
-        sqlx::query_as::<_, WorkerRow>(&format!(
+        sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {WORKER_COLUMNS} FROM workers WHERE id = $1 AND tenant_id = $2"
-        ))
+        )))
         .bind(worker_id)
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -362,11 +364,11 @@ impl<'a> WorkerRepository<'a> {
     /// Refreshes liveness. A heartbeat that names an unknown worker fails, so
     /// a revoked worker cannot silently keep reporting healthy.
     pub async fn heartbeat(&self, tenant_id: TenantId, worker_id: Uuid) -> Result<WorkerRow> {
-        sqlx::query_as::<_, WorkerRow>(&format!(
+        sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE workers SET last_heartbeat_at = NOW(), updated_at = NOW()
              WHERE id = $1 AND tenant_id = $2 AND status NOT IN ('OFFLINE', 'REVOKED')
              RETURNING {WORKER_COLUMNS}"
-        ))
+        )))
         .bind(worker_id)
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -378,10 +380,10 @@ impl<'a> WorkerRepository<'a> {
     /// Draining workers stop receiving new work but finish what they hold
     /// (spec 10.1).
     pub async fn drain(&self, tenant_id: TenantId, worker_id: Uuid) -> Result<WorkerRow> {
-        sqlx::query_as::<_, WorkerRow>(&format!(
+        sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE workers SET status = 'DRAINING', draining = TRUE, updated_at = NOW()
              WHERE id = $1 AND tenant_id = $2 RETURNING {WORKER_COLUMNS}"
-        ))
+        )))
         .bind(worker_id)
         .bind(tenant_id.into_uuid())
         .fetch_optional(self.pool)
@@ -450,12 +452,12 @@ impl<'a> WorkerRepository<'a> {
 
     /// Workers that are eligible to receive work (spec 10.10).
     pub async fn find_ready(&self, tenant_id: TenantId, limit: i64) -> Result<Vec<WorkerRow>> {
-        sqlx::query_as::<_, WorkerRow>(&format!(
+        sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {WORKER_COLUMNS} FROM workers
              WHERE tenant_id = $1 AND status = 'READY' AND draining = FALSE
                AND last_heartbeat_at > NOW() - INTERVAL '60 seconds'
              ORDER BY last_heartbeat_at DESC LIMIT $2"
-        ))
+        )))
         .bind(tenant_id.into_uuid())
         .bind(limit)
         .fetch_all(self.pool)

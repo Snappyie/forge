@@ -136,11 +136,40 @@ impl Runtime {
                 tokio::select! {
                     _ = ticker.tick() => {
                         let stats = reaper.reap(chrono::Utc::now(), 100).await;
-                        if stats.requeued > 0 || stats.dead_lettered > 0 {
+
+                        // Retries the operator requested are `RETRY_SCHEDULED`
+                        // until something moves them back to `QUEUED`; without
+                        // this they sat there holding a concurrency slot.
+                        // The reaper above is pool-wide, so the retry sweep
+                        // matches it: a single statement over every tenant,
+                        // which cannot straddle one by construction.
+                        let retried = match sqlx::query(
+                            "UPDATE executions SET status = 'QUEUED', updated_at = NOW()
+                             WHERE id IN (
+                                 SELECT id FROM executions
+                                 WHERE status = 'RETRY_SCHEDULED'
+                                   AND updated_at <= NOW() - INTERVAL '5 seconds'
+                                 ORDER BY updated_at ASC
+                                 FOR UPDATE SKIP LOCKED
+                                 LIMIT 100
+                             )",
+                        )
+                        .execute(&pool)
+                        .await
+                        {
+                            Ok(result) => result.rows_affected() as i64,
+                            Err(e) => {
+                                warn!(error = %e, "could not requeue due retries");
+                                0
+                            }
+                        };
+
+                        if stats.requeued > 0 || stats.dead_lettered > 0 || retried > 0 {
                             info!(
                                 examined = stats.leases_examined,
                                 requeued = stats.requeued,
                                 dead_lettered = stats.dead_lettered,
+                                retries_requeued = retried,
                                 "lease reaper pass"
                             );
                         }

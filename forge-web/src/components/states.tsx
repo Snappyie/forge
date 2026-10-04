@@ -11,6 +11,7 @@
 import { AlertTriangle, Inbox, Loader2, Lock, WifiOff } from "lucide-react";
 
 import { ApiError } from "@/lib/api";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 /** Shown while a request is in flight. */
 export function LoadingState({ label = "Loading" }: { label?: string }) {
@@ -63,33 +64,32 @@ export function ErrorState({
 }) {
   const offline = error instanceof ApiError && error.status === 0;
 
+  const message = offline
+    ? "Cannot reach the server"
+    : error instanceof Error
+      ? error.message
+      : "Something went wrong";
+
   return (
-    <div
-      role="alert"
-      className="flex flex-col items-center justify-center gap-2 py-12 text-center"
-    >
-      {offline ? (
-        <WifiOff className="size-6 text-muted-foreground" aria-hidden />
-      ) : (
-        <AlertTriangle className="size-6 text-destructive" aria-hidden />
-      )}
-      <p className="text-sm font-medium">
-        {offline
-          ? "Cannot reach the server"
-          : error instanceof Error
-            ? error.message
-            : "Something went wrong"}
-      </p>
-      {error instanceof ApiError && error.requestId ? (
-        <p className="text-xs text-muted-foreground">
-          Request id: <code>{error.requestId}</code>
-        </p>
-      ) : null}
+    <div role="alert" className="flex flex-col items-center gap-3 py-12">
+      <Alert variant={offline ? "default" : "destructive"} className="max-w-md">
+        {offline ? (
+          <WifiOff className="size-4" aria-hidden />
+        ) : (
+          <AlertTriangle className="size-4" aria-hidden />
+        )}
+        <AlertTitle>{message}</AlertTitle>
+        {error instanceof ApiError && error.requestId ? (
+          <AlertDescription>
+            Request id: <code>{error.requestId}</code>
+          </AlertDescription>
+        ) : null}
+      </Alert>
       {onRetry ? (
         <button
           type="button"
           onClick={onRetry}
-          className="mt-2 rounded-md border border-border px-3 py-1 text-xs font-medium hover:bg-muted"
+          className="rounded-md border border-border px-3 py-1 text-xs font-medium hover:bg-muted"
         >
           Try again
         </button>

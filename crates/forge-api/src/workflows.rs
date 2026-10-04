@@ -264,6 +264,10 @@ pub async fn put_definition(
     // the engine would reject. This includes the cycle check.
     validate_graph(&body.definition)?;
 
+    // One transaction for the version, its nodes and its edges: a failure part
+    // way through would otherwise leave a version row holding a partial graph.
+    let mut tx = state.pool.begin().await.map_err(ApiError::from)?;
+
     let version_id = Uuid::new_v4();
     let next_number: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(version_number), 0) + 1 FROM workflow_versions
@@ -283,7 +287,7 @@ pub async fn put_definition(
     .bind(id)
     .bind(auth.tenant_id.into_uuid())
     .bind(next_number)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(ApiError::from)?;
 
@@ -317,7 +321,7 @@ pub async fn put_definition(
         .bind(node.name.as_deref().unwrap_or(&node.key))
         .bind(&stored_type)
         .bind(&node.config)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(ApiError::from)?;
 
@@ -344,10 +348,13 @@ pub async fn put_definition(
         .bind(from_id)
         .bind(to_id)
         .bind(edge.condition.as_deref().unwrap_or("ALL_SUCCEEDED"))
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(ApiError::from)?;
     }
+
+    // Commit last: everything above either lands together or not at all.
+    tx.commit().await.map_err(ApiError::from)?;
 
     Ok(Json(ApiResponse::new(
         json!({

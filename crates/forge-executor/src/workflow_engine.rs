@@ -103,17 +103,7 @@ impl<'a> ExpressionEvaluator<'a> {
         // Walk the remaining segments, each either `.name` or `[index]`.
         let mut rest = &path[first.len()..];
         while !rest.is_empty() {
-            if let Some(stripped) = rest.strip_prefix('.') {
-                let (name, remainder) = match stripped.find(['.', '[']) {
-                    Some(i) => stripped.split_at(i),
-                    None => (stripped, ""),
-                };
-                current = match current {
-                    serde_json::Value::Object(map) => map.get(name)?,
-                    _ => return None,
-                };
-                rest = remainder;
-            } else if let Some(stripped) = rest.strip_prefix('[') {
+            if let Some(stripped) = rest.strip_prefix('[') {
                 let close = stripped.find(']')?;
                 let index: usize = stripped[..close].trim().parse().ok()?;
                 current = match current {
@@ -121,9 +111,19 @@ impl<'a> ExpressionEvaluator<'a> {
                     _ => return None,
                 };
                 rest = &stripped[close + 1..];
-            } else {
-                return None;
+                continue;
             }
+
+            let stripped = rest.strip_prefix('.')?;
+            let (name, remainder) = match stripped.find(['.', '[']) {
+                Some(i) => stripped.split_at(i),
+                None => (stripped, ""),
+            };
+            current = match current {
+                serde_json::Value::Object(map) => map.get(name)?,
+                _ => return None,
+            };
+            rest = remainder;
         }
 
         Some(current)

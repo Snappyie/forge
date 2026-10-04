@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "cn";
+import { PageBreadcrumb } from "@/components/ui/page-breadcrumb";
 
 /**
  * `/workers/{id}` returns `{ worker, active_lease }`, so the record is nested
@@ -91,13 +92,7 @@ export default function WorkerDetailPage({
         <div className="flex flex-col gap-4 p-6">
           <header className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <Link
-                href="/workers"
-                className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-              >
-                <ArrowLeft className="size-3" aria-hidden />
-                All workers
-              </Link>
+              <PageBreadcrumb items={[{ label: "Forge", href: "/" }, { label: "Workers", href: "/workers" }, { label: "Detail" }]} />
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-lg font-semibold">{record.name ?? record.hostname}</h1>
                 <StatusBadge status={record.status} />

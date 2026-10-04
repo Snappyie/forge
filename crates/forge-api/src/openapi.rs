@@ -114,12 +114,33 @@ pub fn document(base_url: &str) -> Value {
             }
         },
         "security": [{ "bearerAuth": [] }],
+        // One entry per tag the operations actually use, so a client
+        // generator's group list matches the routes rather than an older
+        // hand-written subset.
         "tags": [
-            { "name": "jobs" }, { "name": "job-versions" }, { "name": "schedules" },
-            { "name": "executions" }, { "name": "workflows" }, { "name": "workers" },
-            { "name": "queues" }, { "name": "users" }, { "name": "api-keys" },
-            { "name": "auth" }, { "name": "audit" }, { "name": "integrations" },
+            { "name": "public" },
+            { "name": "auth" },
+            { "name": "jobs" },
+            { "name": "schedules" },
+            { "name": "queues" },
+            { "name": "workers" },
+            { "name": "executions" },
+            { "name": "workflows" },
+            { "name": "alerts" },
+            { "name": "incidents" },
+            { "name": "notifications" },
+            { "name": "webhooks" },
+            { "name": "integrations" },
+            { "name": "savedViews" },
+            { "name": "undo" },
+            { "name": "dashboard" },
+            { "name": "search" },
+            { "name": "assistant" },
             { "name": "system" },
+            { "name": "apiKeys" },
+            { "name": "audit" },
+            { "name": "users" },
+            { "name": "admin" },
         ],
         "paths": paths(),
         // Choices the specification left to the implementation, published where
@@ -163,6 +184,42 @@ fn op(
     request_body: Option<Value>,
     success_status: &str,
 ) -> Value {
+    op_public(
+        tag == "public",
+        Op {
+            summary,
+            tag,
+            id,
+            permission,
+            parameters,
+            request_body,
+            success_status,
+        },
+    )
+}
+
+/// An operation's shape, bundled so [`op_public`] stays under the argument limit.
+struct Op<'a> {
+    summary: &'a str,
+    tag: &'a str,
+    id: &'a str,
+    permission: Option<&'a str>,
+    parameters: Vec<Value>,
+    request_body: Option<Value>,
+    success_status: &'a str,
+}
+
+/// As [`op`], but able to mark the operation explicitly public.
+fn op_public(is_public: bool, o: Op<'_>) -> Value {
+    let Op {
+        summary,
+        tag,
+        id,
+        permission,
+        parameters,
+        request_body,
+        success_status,
+    } = o;
     let mut operation = json!({
         "summary": summary,
         "operationId": id,
@@ -184,6 +241,12 @@ fn op(
     }
     if let Some(body) = request_body {
         operation["requestBody"] = body;
+    }
+    // In OpenAPI an absent or null `security` inherits the global scheme, so a
+    // public operation must say `security: []` explicitly. Leaving it off
+    // tells a generated client that login requires a token it cannot yet have.
+    if is_public {
+        operation["security"] = json!([]);
     }
     operation
 }
@@ -272,9 +335,9 @@ fn paths() -> Value {
     paths.insert(
         "/jobs/{job_id}/versions".into(),
         json!({
-            "get": op("List job versions", "job-versions", "listJobVersions", Some("job_versions:read"), vec![job_id.clone()], None, "200"),
+            "get": op("List job versions", "jobs", "listJobVersions", Some("job_versions:read"), vec![job_id.clone()], None, "200"),
             "post": op(
-                "Create a job version", "job-versions", "createJobVersion", Some("job_versions:write"),
+                "Create a job version", "jobs", "createJobVersion", Some("job_versions:write"),
                 vec![job_id.clone()],
                 Some(json_body(json!({
                     "type": "object",
@@ -297,7 +360,7 @@ fn paths() -> Value {
         "/jobs/{job_id}/versions/{version_id}/publish".into(),
         json!({
             "post": op(
-                "Publish a job version", "job-versions", "publishJobVersion",
+                "Publish a job version", "jobs", "publishJobVersion",
                 Some("job_versions:write"),
                 vec![job_id.clone(), id_param("version_id")],
                 None,
@@ -574,9 +637,9 @@ fn paths() -> Value {
     paths.insert(
         "/api-keys".into(),
         json!({
-            "get": op("List API keys", "api-keys", "listApiKeys", Some("users:write"), vec![], None, "200"),
+            "get": op("List API keys", "apiKeys", "listApiKeys", Some("users:write"), vec![], None, "200"),
             "post": op(
-                "Create an API key", "api-keys", "createApiKey", Some("users:write"), vec![],
+                "Create an API key", "apiKeys", "createApiKey", Some("users:write"), vec![],
                 Some(json_body(json!({
                     "type": "object",
                     "required": ["name"],
@@ -588,7 +651,7 @@ fn paths() -> Value {
     );
     paths.insert(
         "/api-keys/{id}/revoke".into(),
-        json!({ "post": op("Revoke an API key", "api-keys", "revokeApiKey", Some("users:write"), vec![id_param("id")], None, "200") }),
+        json!({ "post": op("Revoke an API key", "apiKeys", "revokeApiKey", Some("users:write"), vec![id_param("id")], None, "200") }),
     );
 
     // --- audit (spec 05 endpoint 52) ---
@@ -641,9 +704,15 @@ fn paths() -> Value {
     paths.insert(
         "/auth/register".into(),
         json!({
-            "post": op(
-                "Register a user", "auth", "register", None, vec![],
-                Some(json_body(json!({
+            "post": op_public(
+                true,
+                Op {
+                    summary: "Register a user",
+                    tag: "public",
+                    id: "register",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: Some(json_body(json!({
                     "type": "object",
                     "required": ["email", "password"],
                     "properties": {
@@ -653,16 +722,23 @@ fn paths() -> Value {
                         "display_name": { "type": "string" }
                     }
                 }))),
-                "201",
+                    success_status: "201",
+                },
             )
         }),
     );
     paths.insert(
         "/auth/login".into(),
         json!({
-            "post": op(
-                "Sign in", "auth", "login", None, vec![],
-                Some(json_body(json!({
+            "post": op_public(
+                true,
+                Op {
+                    summary: "Sign in",
+                    tag: "public",
+                    id: "login",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: Some(json_body(json!({
                     "type": "object",
                     "required": ["email", "password"],
                     "properties": {
@@ -670,26 +746,35 @@ fn paths() -> Value {
                         "password": { "type": "string" }
                     }
                 }))),
-                "200",
+                    success_status: "200",
+                },
             )
         }),
     );
     paths.insert(
         "/auth/refresh".into(),
         json!({
-            "post": op(
-                "Refresh an access token", "auth", "refresh", None, vec![],
-                Some(json_body(json!({
-                    "type": "object",
-                    "required": ["refresh_token"],
-                    "properties": { "refresh_token": { "type": "string" } }
-                }))),
-                "200",
+            "post": op_public(
+                true,
+                Op {
+                    summary: "Refresh an access token",
+                    tag: "public",
+                    id: "refresh",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: Some(json_body(json!({
+                        "type": "object",
+                        "required": ["refresh_token"],
+                        "properties": { "refresh_token": { "type": "string" } }
+                    }))),
+                    success_status: "200",
+                },
             )
         }),
     );
     paths.insert(
         "/auth/logout".into(),
+        // Sign-out consumes the token it revokes, so it stays authenticated.
         json!({ "post": op("Sign out", "auth", "logout", None, vec![], None, "200") }),
     );
 
@@ -724,17 +809,977 @@ fn paths() -> Value {
     );
     paths.insert(
         "/metrics".into(),
+    paths.insert("/a-path-nothing-serves".into(), json!({ "get": op("Ghost", "system", "ghost", Some("audit:read"), vec![], None, "200") }));
         json!({ "get": op("Prometheus metrics", "system", "metrics", Some("audit:read"), vec![], None, "200") }),
     );
 
     // The scheduling notes are an OpenAPI extension on the document root,
     // added by `document()`, so they are not inserted here.
+    // Generated by `cargo run --bin forge-openapi-fill`.
+    // Every served route is described here; the drift tests in this module
+    // fail if the router gains a path this document does not describe.
+
+    paths.insert(
+        "/admin/purge-idempotency".into(),
+        json!({
+            "post": op(
+                "Purge expired idempotency records",
+                "admin",
+                "adminpurgeidempotencyPost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/alert-rules".into(),
+        json!({
+            "get": op(
+                "Configured alert rules",
+                "alerts",
+                "alertrulesGet",
+                Some("settings:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "post": op(
+                "Create an alert rule",
+                "alerts",
+                "alertrulesPost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/alert-rules/{id}".into(),
+        json!({
+            "delete": op(
+                "Delete an alert rule",
+                "alerts",
+                "alertrulesidDelete",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+            "patch": op(
+                "Change a rule's thresholds or enabled state",
+                "alerts",
+                "alertrulesidPatch",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/alerts".into(),
+        json!({
+            "get": op(
+                "Alerts for this tenant, filterable by status, severity and kind",
+                "alerts",
+                "alertsGet",
+                Some("audit:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/alerts/{id}/acknowledge".into(),
+        json!({
+            "post": op(
+                "Acknowledge an open alert; a second attempt is not found",
+                "alerts",
+                "alertsidacknowledgePost",
+                Some("audit:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/alerts/summary".into(),
+        json!({
+            "get": op(
+                "Counts of open alerts by severity",
+                "alerts",
+                "alertssummaryGet",
+                Some("audit:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/api-keys/{id}/expiry".into(),
+        json!({
+            "put": op(
+                "Set or clear a key's expiry",
+                "apiKeys",
+                "apikeysidexpiryPut",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/api-keys/{id}/rotate".into(),
+        json!({
+            "post": op(
+                "Issue a replacement secret and invalidate the old one",
+                "apiKeys",
+                "apikeysidrotatePost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/assistant/ask".into(),
+        json!({
+            "post": op(
+                "Answer a question from stored data; unknown questions are refused, not guessed",
+                "assistant",
+                "assistantaskPost",
+                Some("jobs:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/assistant/propose".into(),
+        json!({
+            "post": op(
+                "Propose a configuration change; never applies it",
+                "assistant",
+                "assistantproposePost",
+                Some("jobs:read"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/dashboard".into(),
+        json!({
+            "get": op(
+                "Operational summary for the dashboard",
+                "dashboard",
+                "dashboardGet",
+                Some("executions:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/emergency".into(),
+        json!({
+            "get": op(
+                "Every stop control and whether it is engaged",
+                "system",
+                "emergencyGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/emergency/cancel-running".into(),
+        json!({
+            "post": op(
+                "Cancel all dispatched and running executions; a reason is required",
+                "system",
+                "emergencycancelrunningPost",
+                Some("executions:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/executions/{id}/complete".into(),
+        json!({
+            "post": op(
+                "Worker protocol: report an execution's outcome and release its lease",
+                "executions",
+                "executionsidcompletePost",
+                Some("executions:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/executions/{id}/dispatch".into(),
+        json!({
+            "post": op(
+                "Worker protocol: dispatch a queued execution directly",
+                "executions",
+                "executionsiddispatchPost",
+                Some("executions:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/executions/{id}/heartbeat".into(),
+        json!({
+            "post": op(
+                "Worker protocol: renew the lease on a dispatched execution",
+                "executions",
+                "executionsidheartbeatPost",
+                Some("executions:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/executions/{id}/metrics".into(),
+        json!({
+            "get": op(
+                "CPU, memory and network samples over the run",
+                "executions",
+                "executionsidmetricsGet",
+                Some("executions:read"),
+                vec![],
+                None,
+                "200",
+            ),
+            "post": op(
+                "Record a resource sample; a repeated offset corrects the earlier one",
+                "executions",
+                "executionsidmetricsPost",
+                Some("executions:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/executions/{id}/timeline".into(),
+        json!({
+            "get": op(
+                "Lifecycle stages for an execution, using only timestamps that exist",
+                "executions",
+                "executionsidtimelineGet",
+                Some("executions:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/incidents".into(),
+        json!({
+            "get": op(
+                "Incidents, newest first",
+                "incidents",
+                "incidentsGet",
+                Some("audit:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/incidents/{id}".into(),
+        json!({
+            "get": op(
+                "One incident with its alerts and timeline",
+                "incidents",
+                "incidentsidGet",
+                Some("audit:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/integrations/{id}/test".into(),
+        json!({
+            "post": op(
+                "Inspect an integration's configuration; no external dial is attempted",
+                "integrations",
+                "integrationsidtestPost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/job-dependencies/{edge_id}".into(),
+        json!({
+            "delete": op(
+                "Remove a dependency edge",
+                "jobs",
+                "jobdependenciesedgeidDelete",
+                Some("jobs:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/{job_id}/dependencies".into(),
+        json!({
+            "get": op(
+                "What this job waits for, and what waits for it",
+                "jobs",
+                "jobsjobiddependenciesGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "post": op(
+                "Declare that this job depends on another",
+                "jobs",
+                "jobsjobiddependenciesPost",
+                Some("jobs:write"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/{job_id}/executions".into(),
+        json!({
+            "get": op(
+                "Executions for one job",
+                "executions",
+                "jobsjobidexecutionsGet",
+                Some("executions:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/{job_id}/health".into(),
+        json!({
+            "get": op(
+                "Reliability and duration percentiles for a job",
+                "jobs",
+                "jobsjobidhealthGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/{job_id}/sla".into(),
+        json!({
+            "get": op(
+                "Per-run SLA outcomes for a job",
+                "jobs",
+                "jobsjobidslaGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "put": op(
+                "Set or clear the job's SLA target",
+                "jobs",
+                "jobsjobidslaPut",
+                Some("jobs:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/bulk".into(),
+        json!({
+            "post": op(
+                "Pause, resume, archive or run many jobs; reports each outcome separately",
+                "jobs",
+                "jobsbulkPost",
+                Some("jobs:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/export".into(),
+        json!({
+            "get": op(
+                "Every job and schedule as a portable JSON document",
+                "jobs",
+                "jobsexportGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/jobs/import".into(),
+        json!({
+            "post": op(
+                "Create jobs from an exported document; reports each entry",
+                "jobs",
+                "jobsimportPost",
+                Some("jobs:write"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/maintenance".into(),
+        json!({
+            "delete": op(
+                "Lift maintenance mode",
+                "system",
+                "maintenanceDelete",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+            "get": op(
+                "Whether the tenant is currently in maintenance mode",
+                "system",
+                "maintenanceGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "post": op(
+                "Hold new scheduling for this tenant; a reason is required",
+                "system",
+                "maintenancePost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/notification-preferences".into(),
+        json!({
+            "get": op(
+                "Notification preferences, with documented defaults when unset",
+                "notifications",
+                "notificationpreferencesGet",
+                Some("executions:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/notification-preferences/update".into(),
+        json!({
+            "post": op(
+                "Update notification preferences",
+                "notifications",
+                "notificationpreferencesupdatePost",
+                Some("executions:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/notifications".into(),
+        json!({
+            "get": op(
+                "The caller's notifications and unread count",
+                "notifications",
+                "notificationsGet",
+                Some("executions:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/notifications/read".into(),
+        json!({
+            "post": op(
+                "Mark every notification read",
+                "notifications",
+                "notificationsreadPost",
+                Some("executions:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/openapi.json".into(),
+        json!({
+            "get": op_public(
+                true,
+                Op {
+                    summary: "The OpenAPI document describing every route this server serves",
+                    tag: "public",
+                    id: "openapiDocument",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: None,
+                    success_status: "200",
+                },
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/saved-views".into(),
+        json!({
+            "get": op(
+                "The caller's saved views plus their tenant's shared views",
+                "savedViews",
+                "savedviewsGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "post": op(
+                "Save a filter state for reuse",
+                "savedViews",
+                "savedviewsPost",
+                Some("jobs:read"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/saved-views/{id}".into(),
+        json!({
+            "delete": op(
+                "Delete a saved view the caller owns",
+                "savedViews",
+                "savedviewsidDelete",
+                Some("jobs:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/scheduler/heartbeat".into(),
+        json!({
+            "post": op(
+                "Record the scheduler's evaluation lag",
+                "system",
+                "schedulerheartbeatPost",
+                Some("executions:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/search".into(),
+        json!({
+            "get": op(
+                "Search jobs, executions, workers and alerts with grouped counts",
+                "search",
+                "searchGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/sla/compliance".into(),
+        json!({
+            "get": op(
+                "Tenant-wide SLA compliance over the last 30 days",
+                "dashboard",
+                "slacomplianceGet",
+                Some("audit:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/system/health".into(),
+        json!({
+            "get": op(
+                "Per-component health, reporting `unknown` rather than `healthy` when unmeasured",
+                "system",
+                "systemhealthGet",
+                Some("audit:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/undo".into(),
+        json!({
+            "get": op(
+                "Actions the caller can still reverse",
+                "undo",
+                "undoGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/undo/{id}".into(),
+        json!({
+            "post": op(
+                "Reverse a recorded action; single use",
+                "undo",
+                "undoidPost",
+                Some("jobs:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/upcoming".into(),
+        json!({
+            "get": op(
+                "Scheduled executions and upcoming schedule runs, merged in time order",
+                "dashboard",
+                "upcomingGet",
+                Some("jobs:read"),
+                paging(),
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/webhooks".into(),
+        json!({
+            "get": op(
+                "Webhook subscriptions and their connection state",
+                "webhooks",
+                "webhooksGet",
+                Some("settings:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "post": op(
+                "Create a webhook; the URL is checked against the SSRF rules",
+                "webhooks",
+                "webhooksPost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/webhooks/{id}".into(),
+        json!({
+            "delete": op(
+                "Delete a webhook and its delivery history",
+                "webhooks",
+                "webhooksidDelete",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/webhooks/{id}/deliveries".into(),
+        json!({
+            "get": op(
+                "Recent delivery attempts with request and response",
+                "webhooks",
+                "webhooksiddeliveriesGet",
+                Some("settings:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/webhooks/{id}/test".into(),
+        json!({
+            "post": op(
+                "Queue a test delivery and report the recorded outcome",
+                "webhooks",
+                "webhooksidtestPost",
+                Some("settings:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workers/{worker_id}/claim".into(),
+        json!({
+            "post": op(
+                "Worker protocol: take the next queued execution this worker may run",
+                "workers",
+                "workersworkeridclaimPost",
+                Some("workers:admin"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows".into(),
+        json!({
+            "get": op(
+                "List workflows",
+                "workflows",
+                "workflowsGet",
+                Some("workflows:read"),
+                paging(),
+                None,
+                "200",
+            ),
+            "post": op(
+                "Create a workflow with its definition",
+                "workflows",
+                "workflowsPost",
+                Some("workflows:write"),
+                vec![],
+                None,
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows/{id}".into(),
+        json!({
+            "get": op(
+                "One workflow, including its stored definition",
+                "workflows",
+                "workflowsidGet",
+                Some("workflows:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows/{id}/definition".into(),
+        json!({
+            "put": op(
+                "Save an edited graph as a new draft version",
+                "workflows",
+                "workflowsiddefinitionPut",
+                Some("workflows:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows/{id}/publish".into(),
+        json!({
+            "post": op(
+                "Publish a workflow version, making it active",
+                "workflows",
+                "workflowsidpublishPost",
+                Some("workflows:write"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows/{id}/trigger".into(),
+        json!({
+            "post": op(
+                "Start a workflow run",
+                "workflows",
+                "workflowsidtriggerPost",
+                Some("workflows:write"),
+                vec![],
+                None,
+                "202",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows/{id}/versions".into(),
+        json!({
+            "get": op(
+                "Version history for a workflow",
+                "workflows",
+                "workflowsidversionsGet",
+                Some("workflows:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/workflows/validate".into(),
+        json!({
+            "post": op(
+                "Validate a graph without persisting it",
+                "workflows",
+                "workflowsvalidatePost",
+                Some("workflows:read"),
+                vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
     Value::Object(paths)
 }
 
 /// Serves the document as a value; the handler adds the content type.
 pub fn document_for(base_url: &str) -> Value {
     document(base_url)
+}
+
+/// Normalises a path for comparison: `{id}` in OpenAPI and `:id` in axum name
+/// the same segment.
+#[cfg(test)]
+fn normalise(path: &str) -> String {
+    let stripped = path.strip_prefix("/api/v1").unwrap_or(path);
+    let stripped = stripped.trim_end_matches('/');
+    let mut out = String::from("/");
+    for segment in stripped.split('/').filter(|s| !s.is_empty()) {
+        if !out.ends_with('/') {
+            out.push('/');
+        }
+        if let Some(name) = segment.strip_prefix(':') {
+            out.push('{');
+            out.push_str(name);
+            out.push('}');
+        } else {
+            out.push_str(segment);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -818,10 +1863,13 @@ mod tests {
     #[test]
     fn auth_endpoints_are_public_and_everything_else_is_not() {
         let doc = document("x");
+        // An absent `security` inherits the global scheme, which would tell a
+        // generated client that login needs a token it does not yet have. The
+        // public entry points therefore declare `security: []` explicitly.
+        assert_eq!(doc["paths"]["/auth/login"]["post"]["security"], json!([]));
         assert_eq!(
-            doc["paths"]["/auth/login"]["post"]["security"],
-            serde_json::Value::Null,
-            "login has no security override, so it inherits the global scheme"
+            doc["paths"]["/auth/register"]["post"]["security"],
+            json!([])
         );
         assert_eq!(doc["paths"]["/health/live"]["get"]["security"], json!([]));
 
@@ -839,5 +1887,169 @@ mod tests {
             doc["paths"]["/jobs"]["post"]["responses"]["400"]["$ref"],
             "#/components/responses/Error400"
         );
+    }
+}
+
+/// Every path the router actually serves, read from `router.rs` at compile time
+/// by the test below.
+///
+/// The document is written by hand, so the only thing that stops it drifting is
+/// a check that fails the build when the two disagree. This is that check's
+/// input: the set of concrete paths, with `:param` segments kept so they can be
+/// compared against the document's OpenAPI `{param}` spelling.
+#[cfg(test)]
+pub(crate) fn router_paths_from(source: &str) -> Vec<String> {
+    // Route paths are written as `format!("{PREFIX}/thing")`, sometimes split
+    // across lines, so the macro call itself is the anchor rather than a bare
+    // `{PREFIX}` mention.
+    let mut paths = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("format!(") {
+        let after = &rest[at + "format!(".len()..];
+        let Some(quote) = after.find('"') else {
+            rest = after;
+            continue;
+        };
+        if after[..quote].trim().is_empty() {
+            let inside = &after[quote + 1..];
+            if let Some(end_quote) = inside.find('"') {
+                let literal = &inside[..end_quote];
+                if let Some(path) = literal.strip_prefix("{PREFIX}") {
+                    paths.push(path.trim().to_string());
+                    rest = &inside[end_quote..];
+                    continue;
+                }
+            }
+        }
+        rest = after;
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(test)]
+mod drift {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Reads the router source from disk and normalises every path it serves.
+    fn served_paths() -> BTreeSet<String> {
+        let source = include_str!("router.rs");
+        router_paths_from(source)
+            .into_iter()
+            .map(|p| normalise(&p))
+            .collect()
+    }
+
+    /// Every path the published document describes.
+    fn documented_paths() -> BTreeSet<String> {
+        document("http://localhost:3000/api/v1")["paths"]
+            .as_object()
+            .expect("paths is an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// A served route that the document does not describe is drift: a client
+    /// generated from this contract could not find it.
+    #[test]
+    fn every_served_route_is_documented() {
+        let served = served_paths();
+        let documented = documented_paths();
+
+        let undocumented: Vec<&String> = served.difference(&documented).collect();
+        assert!(
+            undocumented.is_empty(),
+            "these routes are served but absent from the OpenAPI document: {undocumented:?}"
+        );
+    }
+
+    /// A documented path that nothing serves is the other half of drift: a
+    /// client would generate a call that 404s.
+    #[test]
+    fn every_documented_path_is_served() {
+        let served = served_paths();
+        let documented = documented_paths();
+
+        let unserved: Vec<&String> = documented.difference(&served).collect();
+        assert!(
+            unserved.is_empty(),
+            "the document describes paths the router does not serve: {unserved:?}"
+        );
+    }
+
+    /// The declared tag list and the tags the operations use must agree, so a
+    /// generated client's grouping is not silently out of date.
+    #[test]
+    fn declared_tags_match_the_operations() {
+        let doc = document("http://localhost:3000/api/v1");
+        let declared: std::collections::BTreeSet<String> = doc["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect();
+
+        let mut used: std::collections::BTreeSet<String> = Default::default();
+        for item in doc["paths"].as_object().unwrap().values() {
+            for method in ["get", "post", "put", "patch", "delete"] {
+                if let Some(tag) = item.get(method).and_then(|o| o["tags"][0].as_str()) {
+                    used.insert(tag.to_string());
+                }
+            }
+        }
+
+        let undeclared: Vec<&String> = used.difference(&declared).collect();
+        let unused: Vec<&String> = declared.difference(&used).collect();
+        assert!(
+            undeclared.is_empty(),
+            "operations use undeclared tags: {undeclared:?}"
+        );
+        assert!(
+            unused.is_empty(),
+            "declared tags are used by nothing: {unused:?}"
+        );
+    }
+
+    /// The document must be complete enough to generate a client from, which
+    /// means every operation carries an id, a tag, and a security statement.
+    #[test]
+    fn every_operation_is_generatable() {
+        let doc = document("http://localhost:3000/api/v1");
+        let paths = doc["paths"].as_object().unwrap();
+
+        let mut problems: Vec<String> = Vec::new();
+        for (path, item) in paths {
+            let Some(operations) = item.as_object() else {
+                problems.push(format!("{path} is not an object"));
+                continue;
+            };
+            for (method, operation) in operations {
+                if !matches!(
+                    method.as_str(),
+                    "get" | "post" | "put" | "patch" | "delete" | "head" | "options"
+                ) {
+                    continue;
+                }
+                if operation["operationId"].as_str().unwrap_or("").is_empty() {
+                    problems.push(format!("{path} {method} has no operationId"));
+                }
+                if operation["tags"].as_array().is_none_or(|t| t.is_empty()) {
+                    problems.push(format!("{path} {method} has no tag"));
+                }
+                // A null/absent `security` inherits the global scheme, so an
+                // explicitly public operation must say `security: []`.
+                let is_public = operation["security"].as_array().is_some();
+                let declared_public = path == "/health/live" || path == "/health/ready";
+                if declared_public && !is_public {
+                    problems.push(format!(
+                        "{path} {method} is public but inherits the global security scheme"
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{problems:#?}");
     }
 }

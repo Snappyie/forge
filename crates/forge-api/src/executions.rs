@@ -242,9 +242,16 @@ pub async fn logs(
         .get(auth.tenant_id, execution_id)
         .await?;
 
+    // A chatty execution can write more logs than a response should carry, so
+    // the fetch is bounded by the newest lines rather than reading everything
+    // and truncating in the client.
     let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT stream, content, logged_at FROM execution_logs
-         WHERE execution_id = $1 AND tenant_id = $2
+        "SELECT stream, content, logged_at FROM (
+             SELECT stream, content, logged_at FROM execution_logs
+             WHERE execution_id = $1 AND tenant_id = $2
+             ORDER BY logged_at DESC
+             LIMIT 5000
+         ) recent
          ORDER BY logged_at ASC",
     )
     .bind(execution_id)
