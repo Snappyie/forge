@@ -241,6 +241,61 @@ transaction in older server versions, which conflicts with the forward-only
 migration requirement in 08-storage-specification.md §8.1. CHECK constraints are
 dropped and recreated in place.
 
+## ADR-0019 Tenant slugs are addressable identifiers, derived by trigger
+
+Status: Accepted.
+
+Amends: 05-api-specification.md (no tenant addressing existed); 08-storage-specification.md §8.
+
+Decision:
+A tenant gains a `slug` that is unique, non-null, and stable for the life of the
+tenant. It is the HTTP-facing identifier (`/tenants/{slug}`). A `BEFORE INSERT`
+trigger fills it from the tenant id when the caller does not supply one.
+
+Reason:
+A tenant was previously reachable only through a bearer claim, with no route that
+addresses one. `redesign.md` §G requires per-tenant isolation to be an operable
+model, and an operator cannot administer, switch between, or audit a tenant that
+has no name they can type.
+
+The slug is derived rather than required at every call site because several code
+paths create a tenant without naming one; making the value mandatory in
+application code is a slug some caller will eventually forget, which would fail at
+runtime rather than at compile time.
+
+Implementation note:
+The value is set by a trigger, not a `DEFAULT`. Postgres rejects a column
+reference in a `DEFAULT` expression (`cannot use column reference in DEFAULT
+expression`) — including indirectly through a function call — so a slug derived
+from the row's own id is not expressible as a default. This was found by applying
+the migration to an empty database; it passes on a populated one only because no
+row is inserted while the column still allows null.
+
+## ADR-0020 An `ON CONFLICT` target must be backed by a unique index
+
+Status: Accepted.
+
+Amends: 06-event-and-queue-contracts.md; 10-execution-engine.md §10.2.
+
+Decision:
+Every `INSERT ... ON CONFLICT` in the storage layer names a column set that a
+unique index or constraint actually backs. Adding a conflict target and its
+index is one change, and a migration that adds an `ON CONFLICT`-dependent column
+set adds the index with it.
+
+Reason:
+`ExecutionRepository::create` provisions a tenant's `default` queue with
+`ON CONFLICT (tenant_id, name) DO NOTHING`, but no migration ever created that
+unique index. Postgres requires one to arbitrate the conflict, so every
+execution created for a tenant without a pre-existing `default` queue failed with
+`42P10`. The SELECT that runs first hid the defect on a seeded database and only
+surfaced on a fresh one — 35 integration tests across four suites failed while
+the same tests passed against a database that already had a `default` queue.
+
+Beyond the outage, the missing index also removed the guarantee the surrounding
+comment claimed: without it, two concurrent inserts can both succeed and the
+follow-up `fetch_one` becomes a race.
+
 ## Future ADR candidates
 
 - Queue implementation.
