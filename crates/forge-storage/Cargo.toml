@@ -18,3 +18,6 @@ forge-domain = { path = "../forge-domain" }
 
 [dev-dependencies]
 forge-executor = { path = "../forge-executor" }
+# The tenant-isolation suite runs its own runtime per test because the fixtures
+# build their database synchronously inside a `#[test]` fn.
+tokio = { workspace = true }

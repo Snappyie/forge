@@ -129,10 +129,24 @@ macro_rules! with_db {
             match TestDb::new().await {
                 Some(db) => {
                     let db = Arc::new(db);
-                    $body(db.pool.clone()).await;
+                    // Spawned so the body's panic arrives as a value rather than an
+                    // unwind: cleanup below has to run on the failure path too, or a
+                    // broken test leaves its database behind forever. Awaiting a
+                    // JoinHandle returns Err(JoinError) instead of propagating, so the
+                    // panic is resumed *after* cleanup and a real failure still fails.
+                    let outcome = tokio::spawn(std::panic::AssertUnwindSafe(
+                        $body(db.pool.clone()),
+                    ))
+                    .await;
                     match Arc::try_unwrap(db) {
                         Ok(db) => db.cleanup().await,
                         Err(_) => eprintln!("warning: test db handle still shared"),
+                    }
+                    if let Err(join_err) = outcome {
+                        if join_err.is_panic() {
+                            std::panic::resume_unwind(join_err.into_panic());
+                        }
+                        eprintln!("test body did not complete: {join_err}");
                     }
                 }
                 None => eprintln!("(skipped: no database available)"),
@@ -1747,7 +1761,14 @@ async fn worker_end_to_end_lifecycle_smoke_test() {
         .await;
         assert_eq!(status, 202, "{triggered}");
         assert_eq!(triggered["data"]["status"], "QUEUED");
-        let execution_id = triggered["data"]["id"].as_str().unwrap().to_string();
+        // The endpoint names this field `execution_id`, not `id`. Reading `id`
+        // here returned null, so this test had been unwrapping a None and
+        // failing at the exact step it exists to cover: the worker claiming the
+        // execution the trigger just created.
+        let execution_id = triggered["data"]["execution_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("trigger response had no execution_id: {triggered}"))
+            .to_string();
 
         // 5. Worker claims job using worker token
         let (status, claim_body) = send(

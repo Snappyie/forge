@@ -296,6 +296,71 @@ Beyond the outage, the missing index also removed the guarantee the surrounding
 comment claimed: without it, two concurrent inserts can both succeed and the
 follow-up `fetch_one` becomes a race.
 
+## ADR-0021 Tenant isolation is enforced by the database, not only by the query
+
+Status: Accepted.
+
+Amends: 11-security.md; 08-storage-specification.md §8.
+
+Decision:
+Every table holding tenant data has Postgres row-level security enabled with a
+policy `tenant_id = current_tenant_id()`, where `current_tenant_id()` reads
+`SET LOCAL app.current_tenant`. The existing application-level `WHERE tenant_id`
+predicates are kept.
+
+Reason:
+Until now isolation was a *convention*: every repository method took a
+`tenant_id` and put it in the query. That is a real boundary, but a single
+query that forgets the predicate reads another tenant's data, and no test would
+catch it unless that exact query ran with two tenants present.
+
+RLS holds for every writer — psql, a migration, a future service, and the
+queries in this codebase nobody has read yet — which is the property the
+convention cannot offer. Keeping both checks is what makes this defence in depth
+rather than a race to delete the now-redundant one.
+
+Implementation notes an operator needs:
+
+- The transaction sets the tenant once: `SET LOCAL app.current_tenant = '<uuid>'`.
+  `SET LOCAL` scopes it to the transaction, so it cannot leak to the next request
+  on a pooled connection. A bare `SET` would.
+- An unset variable **denies every row** rather than erroring, so a code path
+  that forgets to set it fails closed.
+- **RLS does not apply to the table owner.** An application connecting as the
+  owner gets no protection. Migration 020 creates a `forge_app` role for this,
+  but deliberately does not `GRANT`: which tables a given installation exposes
+  is its own decision, and a migration asserting a fixed set would silently
+  over-grant after a future table is added.
+
+  **This is an operator action.** Until the application connects as `forge_app`,
+  the policies are inert and isolation still depends on the query predicates.
+- `users` is intentionally not scoped: a user row is reachable through
+  `tenant_memberships`, so scoping `users` by tenant would make an operator
+  unable to see or disable a colleague who has not yet joined the tenant.
+
+## ADR-0022 An application and an environment are separate containers
+
+Status: Accepted.
+
+Amends: 02-domain-model.md §2.1-2.2; 11-security.md §11.
+
+Decision:
+A job belongs to an `application` (what the work is) and an `environment` (where
+it runs) as independent containers. Application slugs are unique per tenant;
+a tenant has at most one environment of kind `production`.
+
+Reason:
+A job's identity — name, key, schedule, payload shape — is the same in dev and
+prod. Its bindings — queue, worker pool, secret names — are not. Migration copies
+the former and re-points the latter, which is only expressible if the two sides
+are independently addressable. One generic "group" entity could not represent
+that split.
+
+At most one production environment per tenant is a correctness constraint rather
+than tidiness: two environments both marked production would mean a change
+guardrail protects one and silently skips the other — the "operator believes it
+is isolated and it is not" failure that `EnvironmentKind` exists to prevent.
+
 ## Future ADR candidates
 
 - Queue implementation.

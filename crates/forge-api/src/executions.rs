@@ -1,6 +1,7 @@
 //! Execution endpoints (spec 05 endpoints 17–23).
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
@@ -560,7 +561,7 @@ pub async fn add_log(
     Auth(auth): Auth,
     Path(execution_id): Path<Uuid>,
     Json(body): Json<AddLogRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), ApiError> {
     auth.require("executions:write")?;
 
     let stream = body.stream.as_deref().unwrap_or("stdout");
@@ -584,10 +585,17 @@ pub async fn add_log(
     .await
     .map_err(ApiError::from)?;
 
-    Ok(Json(ApiResponse::new(
-        json!({ "id": id, "logged": true }),
-        auth.request_id,
-    )))
+    // 201, not the bare 200 a `Json` response would give: this appends a
+    // resource. Every other create endpoint in this API answers 201, and a
+    // worker polling this endpoint could not tell an accepted write from a
+    // stray read.
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            json!({ "id": id, "logged": true }),
+            auth.request_id,
+        )),
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
