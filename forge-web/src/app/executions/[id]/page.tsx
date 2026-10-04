@@ -12,7 +12,7 @@
 import Link from "next/link";
 import { use, useMemo, useState } from "react";
 import {
-  ArrowLeft,
+  AlertCircle,
   Ban,
   Copy,
   Download,
@@ -27,20 +27,19 @@ import {
   formatDuration,
   formatRelative,
   formatTimestamp,
-  holdsSlot,
   isTerminal,
   type Execution,
   type ExecutionStatus,
 } from "@/lib/types";
 import { useToast } from "@/lib/useToast";
 import { AsyncBoundary, EmptyState } from "@/components/states";
-import { StatusBadge, PriorityBadge } from "@/components/status-badge";
+import { StatusBadge, PriorityBadge, ErrorClassBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ExecutionMetrics } from "@/components/ui/execution-metrics";
 import { LiveExecution } from "@/components/ui/live-execution";
-import { cn } from "cn";
+import { LogViewer } from "@/components/ui/log-viewer";
 import { PageBreadcrumb } from "@/components/ui/page-breadcrumb";
 
 interface LogLine {
@@ -81,11 +80,18 @@ export default function ExecutionDetailPage({
   const record = execution.data;
   const lines = logs.data?.lines ?? [];
 
+  // Hoisted out of the memo so the dependency list names plain locals. Reading
+  // `record?.started_at` in the deps made the inferred dependencies differ
+  // from the declared ones, which the compiler rejects: optional chaining hides
+  // which property is actually tracked.
+  const startedAt = record?.started_at ?? null;
+  const endedAt = record?.ended_at ?? null;
+
   const durationMs = useMemo(() => {
-    if (!record?.started_at) return null;
-    const end = record.ended_at ? Date.parse(record.ended_at) : Date.now();
-    return Math.max(0, end - Date.parse(record.started_at));
-  }, [record?.started_at, record?.ended_at]);
+    if (!startedAt) return null;
+    const end = endedAt ? Date.parse(endedAt) : Date.now();
+    return Math.max(0, end - Date.parse(startedAt));
+  }, [startedAt, endedAt]);
 
   async function cancel() {
     setBusy(true);
@@ -252,84 +258,54 @@ export default function ExecutionDetailPage({
             </CardContent>
           </Card>
 
-          {record.error_message ? (
-            <Card className="border-red-500/40">
-              <CardHeader>
-                <CardTitle className="text-sm text-red-600 dark:text-red-400">
-                  Failure
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="text-xs">
-                {record.error_class ? (
-                  <Badge variant="outline" className="mr-2 text-[10px]">
-                    {record.error_class}
-                  </Badge>
+          {record.error_message || record.error_class ? (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3"
+            >
+              <AlertCircle
+                className="mt-0.5 size-4 shrink-0 text-red-600 dark:text-red-400"
+                aria-hidden
+              />
+              <div className="min-w-0 flex-1 text-xs">
+                <p className="font-medium text-red-700 dark:text-red-300">
+                  {headline(record)}
+                </p>
+                {record.error_message ? (
+                  <p className="mt-1 break-words font-mono text-[11.5px] text-red-700/90 dark:text-red-300/90">
+                    {record.error_message}
+                  </p>
                 ) : null}
-                <span className="font-mono">{record.error_message}</span>
-              </CardContent>
-            </Card>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <ErrorClassBadge errorClass={record.error_class} />
+                  {record.attempt_count > 0 ? (
+                    <span className="text-[11px] text-red-700/80 dark:text-red-300/80">
+                      attempt {record.attempt_count} recorded
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              {isTerminal(record.status) && !busy ? (
+                <Button variant="outline" size="sm" onClick={retry}>
+                  Retry now
+                </Button>
+              ) : null}
+            </div>
           ) : null}
 
-          {/* UI.md section 16: log viewer with copy and download. */}
+          {/* UI.md section 16: log viewer with search, stream filtering, and
+              line numbers. */}
           <Card>
-            <CardHeader className="flex-row items-center justify-between">
+            <CardHeader>
               <CardTitle className="text-sm">Logs</CardTitle>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-muted-foreground">
-                  {lines.length} line{lines.length === 1 ? "" : "s"}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    copyText(
-                      lines
-                        .map((l) => `[${l.at}] ${l.stream.toUpperCase()} ${l.content}`)
-                        .join("\n"),
-                    )
-                  }
-                >
-                  Copy
-                </Button>
-              </div>
             </CardHeader>
             <CardContent>
-              {logs.state === "loading" ? (
-                <p className="py-4 text-center text-xs text-muted-foreground">
-                  Loading logs…
-                </p>
-              ) : lines.length === 0 ? (
-                <EmptyState
-                  title="No log lines"
-                  description="This execution has not written any output yet."
-                />
-              ) : (
-                <pre
-                  className={cn(
-                    "max-h-96 overflow-auto rounded-md bg-muted/40 p-3",
-                    "font-mono text-[11px] leading-relaxed",
-                  )}
-                >
-                  {lines.map((line, index) => (
-                    <div key={index} className="flex gap-2">
-                      <span className="shrink-0 text-muted-foreground">
-                        {formatTimestamp(line.at)}
-                      </span>
-                      <span
-                        className={cn(
-                          "shrink-0 uppercase",
-                          line.stream === "stderr"
-                            ? "text-red-600 dark:text-red-400"
-                            : "text-muted-foreground",
-                        )}
-                      >
-                        {line.stream}
-                      </span>
-                      <span className="min-w-0 break-words">{line.content}</span>
-                    </div>
-                  ))}
-                </pre>
-              )}
+              <LogViewer
+                lines={lines}
+                loading={logs.state === "loading"}
+                executionId={id}
+                onDownloaded={() => toast.success("Logs downloaded")}
+              />
             </CardContent>
           </Card>
 
@@ -416,6 +392,36 @@ function Metric({ label, value }: { label: string; value: string }) {
       <p className="text-sm font-medium">{value}</p>
     </div>
   );
+}
+
+/**
+ * A one-line summary of how an execution ended.
+ *
+ * The point is to state the consequence rather than restate the status. "Failed"
+ * tells an operator nothing they did not already see in the badge; "the retry
+ * budget is spent, so this will not run again on its own" tells them whether
+ * they have to intervene.
+ */
+function headline(record: Execution): string {
+  const attempts = record.attempt_count;
+  const plural = attempts === 1 ? "attempt" : "attempts";
+
+  switch (record.status) {
+    case "DEAD_LETTERED":
+      return `Dead lettered after ${attempts} ${plural}. This execution will not run again on its own.`;
+    case "TIMED_OUT":
+      return `Timed out after ${attempts} ${plural}. The worker exceeded the execution timeout.`;
+    case "ABANDONED":
+      return `Abandoned after ${attempts} ${plural}. The worker's lease expired, so the attempt was reaped.`;
+    case "FAILED":
+      return `Failed on attempt ${attempts}. Check the error class below before retrying — not every failure is safe to repeat.`;
+    case "CANCELLED":
+      return "Cancelled by an operator. The attempt history and logs are retained.";
+    case "CANCEL_REQUESTED":
+      return "Cancellation requested. The worker observes this cooperatively and will stop when it can.";
+    default:
+      return `Status: ${record.status.toLowerCase().replace(/_/g, " ")}.`;
+  }
 }
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {

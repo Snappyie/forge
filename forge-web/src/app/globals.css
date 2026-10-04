@@ -141,9 +141,12 @@
   }
 }
 
-/* UI.md section 64: a visible focus ring on keyboard focus, everywhere. */
+/* UI.md section 64: a visible focus ring on keyboard focus, everywhere.
+   The custom properties hold raw `oklch()` values, so they are used directly:
+   wrapping them in `hsl()` would produce the invalid `hsl(oklch(...))` and the
+   ring would silently not render. */
 :focus-visible {
-  outline: 2px solid hsl(var(--primary));
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -154,8 +157,8 @@
   top: 0;
   z-index: 100;
   padding: 0.5rem 1rem;
-  background: hsl(var(--background));
-  border: 1px solid hsl(var(--border));
+  background: var(--background);
+  border: 1px solid var(--border);
   border-radius: 0.25rem;
 }
 .skip-link:focus {

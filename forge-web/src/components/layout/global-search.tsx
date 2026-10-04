@@ -114,7 +114,7 @@ export function SearchOverlay({ onClose }: { onClose: () => void }) {
             onKeyDown={(e) => {
               if (e.key === "Enter" && term.length >= 2) remember(term);
             }}
-            placeholder="Search jobs, executions, workers, alerts"
+            placeholder="Search jobs, workflows, executions, workers, alerts..."
             aria-label="Search query"
             className="flex-1 bg-transparent text-sm outline-none"
           />
@@ -227,8 +227,14 @@ function hitUrl(kind: string, hit: Record<string, unknown>): string {
       return `/jobs/${String(hit.id)}`;
     case "executions":
       return `/executions/${String(hit.id)}`;
+    case "workflows":
+      return `/workflows/${String(hit.id)}`;
     case "workers":
       return `/workers/${String(hit.id)}`;
+    case "queues":
+      return `/queues/${String(hit.id)}`;
+    case "schedules":
+      return `/schedules/${String(hit.id)}`;
     case "alerts":
       // An alert has no page of its own; the inbox is the closest destination.
       return "/alerts";

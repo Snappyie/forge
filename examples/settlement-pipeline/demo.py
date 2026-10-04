@@ -57,6 +57,16 @@ class Demo:
         except ForgeError as error:
             if error.code != "AUTHORIZATION_DENIED":
                 raise
+            if invite_token is None and self._unknown_account(email):
+                raise SystemExit(
+                    f"\nThis tenant is already claimed, so {email} must be "
+                    "invited before it can register.\n"
+                    "Create an invitation as an owner:\n"
+                    "  INSERT INTO invites (token, tenant_id, email, role, expires_at)\n"
+                    "  VALUES (gen_random_uuid(), '<tenant-uuid>', "
+                    f"'{email}', 'DEVELOPER', NOW() + INTERVAL '7 days');\n"
+                    "then re-run with --invite <uuid>."
+                )
             note("registration is invitation-only, as it should be; signing in")
             session = self.client.login(email, password)
         self.client.token = session["access_token"]
@@ -67,6 +77,16 @@ class Demo:
         refreshed = self.client.refresh(session["refresh_token"])
         self.client.token = refreshed["access_token"]
         note("refreshed the session; the previous access token is now invalid")
+
+    def _unknown_account(self, email: str) -> bool:
+        """Whether the account simply does not exist yet, as opposed to a bad password."""
+        try:
+            self.client.login(email, "definitely-not-the-password")
+            return False
+        except ForgeError as error:
+            # The API deliberately answers identically for both cases, so this is
+            # a best-effort hint for the message, never a security decision.
+            return error.code == "AUTHENTICATION_REQUIRED"
 
     # -- jobs and versions ------------------------------------------------
 
@@ -87,11 +107,21 @@ class Demo:
         version = self.client.create_version(
             job["id"],
             config={"url": "https://example.invalid/extract", "timeout_seconds": 300},
-            # Two at a time is a real limit: the dispatcher honours it.
+            # Two at a time is a real limit: the dispatcher honours it, and
+            # QUEUED executions count against it too.
             concurrency={
                 "max_concurrent_executions": {"Bounded": 2},
                 "scope": "JOB",
                 "queue_id": None,
+            },
+            # Retry only what is worth retrying, and jitter so a failing job does
+            # not stampede on every tick.
+            retry={
+                "max_attempts": 3,
+                "backoff": self.client.exponential_backoff(1, 2, 300),
+                "retryable_error_classes": ["TRANSIENT", "TIMEOUT"],
+                "non_retryable_error_classes": ["VALIDATION"],
+                "jitter_ratio": 0.2,
             },
         )
         show("version", {"id": version["id"], "number": version["version_number"]})
@@ -309,10 +339,166 @@ class Demo:
         self.client.clear_maintenance()
         show("after lifting", self.client.get("/maintenance")["active"])
 
+
+    # -- queues -----------------------------------------------------------
+
+    def demonstrate_queues(self) -> None:
+        step(14, "Queues and their capacity")
+        queue = self.client.create_queue(f"settlement-{self.run_id}", max_concurrency=5)
+        self.queue_id = queue["id"]
+        show("queue", {"id": queue["id"], "name": queue.get("name")})
+
+        self.client.set_queue_paused(self.queue_id, True)
+        state = self.client.get("/emergency")
+        note(f"paused; paused queues now reported as "
+             f"{[q['name'] for q in state['queues'] if q['paused']]}")
+        self.client.set_queue_paused(self.queue_id, False)
+        note("resumed")
+
+    # -- workers ----------------------------------------------------------
+
+    def demonstrate_workers(self) -> None:
+        step(15, "The worker protocol")
+        worker = self.client.register_worker(
+            hostname=f"demo-worker-{self.run_id}",
+            capabilities=["http", "container"],
+            labels={"region": "local", "tier": "demo"},
+        )
+        self.worker_id = worker["id"]
+        show("worker", {"id": worker["id"], "status": worker.get("status")})
+
+        # The dispatch preconditions are enforced, not merely described: a
+        # drained worker is given nothing.
+        self.client.drain_worker(self.worker_id)
+        claim = self.client._request("POST", f"/workers/{self.worker_id}/claim", {})
+        note(f"draining; a claim returned {claim['data']['execution'] and 'work' or 'nothing'}")
+        self.client._request("POST", f"/workers/{self.worker_id}/drain", {})  # idempotent
+        self.client.worker_heartbeat(self.worker_id)
+        note("heartbeat sent")
+
+    # -- saved views ------------------------------------------------------
+
+    def demonstrate_saved_views(self) -> None:
+        step(16, "Saved views")
+        view = self.client.save_view(
+            name=f"Failed jobs ({self.run_id})",
+            filters={"status": "FAILED"},
+            resource="JOBS",
+        )
+        show("view", {"id": view["id"], "filters": view.get("filters")})
+        listed = self.client.list_saved_views("JOBS")
+        note(f"{len(listed)} saved view(s) for jobs")
+        self.client.delete_saved_view(view["id"])
+        note("deleted; a saved view is a filter state, not data")
+
+    # -- integrations -----------------------------------------------------
+
+    def demonstrate_integrations(self) -> None:
+        step(17, "Integrations")
+        listing = self.client.list_integrations()
+        supported = listing["data"]["supported"]
+        absent = listing["data"]["not_configured"]
+        note(f"{len(supported)} integration kinds supported, {len(absent)} not configured")
+
+        integration = self.client.create_integration("KAFKA", f"events-{self.run_id}")
+        show("created", {"id": integration["id"], "kind": integration["kind"]})
+        result = self.client.test_integration(integration["id"])
+        show("connection verified", result["connection_verified"])
+        note("Forge does not dial external endpoints on request, so it says so "
+             "rather than reporting a success it cannot confirm")
+
+    # -- API keys ---------------------------------------------------------
+
+    def demonstrate_api_keys(self) -> None:
+        step(18, "API keys for programmatic access")
+        key = self.client.create_api_key(f"demo-key-{self.run_id}")
+        show("created", {"id": key["id"], "prefix": key.get("prefix")})
+        note("the secret is returned exactly once and stored hashed")
+
+        rotated = self.client.rotate_api_key(key["id"])
+        show("rotated", {"new_prefix": rotated.get("prefix"),
+                          "previous_prefix": rotated.get("previous_prefix")})
+        note("rotation invalidates the old secret immediately")
+
+        self.client.revoke_api_key(key["id"])
+        note("revoked; a revoked key cannot be brought back")
+
+    # -- users and audit --------------------------------------------------
+
+    def demonstrate_users_and_audit(self) -> None:
+        step(19, "Users and the audit trail")
+        users = self.client.list_users()
+        note(f"{len(users)} user(s) in this tenant")
+
+        colleague_email = f"colleague-{self.run_id}@example.com"
+        try:
+            created = self.client.create_user(
+                colleague_email, "correct-horse-battery", "DEVELOPER"
+            )
+            show("invited", {"id": created["id"], "role": created["role"]})
+            note("a new user joins this tenant with the role given")
+        except ForgeError as error:
+            note(f"could not add a user: {error.code}")
+
+        events = self.client.list_audit_events(limit=10)
+        show("recent audit events", len(events))
+        if events:
+            latest = events[0]
+            note(f"most recent: {latest.get('action')} on "
+                 f"{latest.get('resource_type')} by {latest.get('actor_type')}")
+
+    # -- notifications and incidents --------------------------------------
+
+    def demonstrate_notifications_and_incidents(self) -> None:
+        step(20, "Notifications and incidents")
+        inbox = self.client.list_notifications()
+        show("unread", inbox.get("unread"))
+        show("delivered", len(inbox.get("data") or []))
+        if inbox.get("unread"):
+            self.client.mark_notifications_read()
+            show("after marking read", self.client.list_notifications().get("unread"))
+
+        self.client.update_notification_preferences(
+            kinds=["EXECUTION_FAILED", "SLA_VIOLATION"],
+            channels={"in_app": True, "email": False, "webhook": False},
+        )
+        note("preferences updated; unsaved defaults are returned by the API")
+
+        incidents = self.client.list_incidents()
+        show("incidents", len(incidents))
+        if incidents:
+            detail = self.client.incident_detail(incidents[0]["id"])
+            note(f"{incidents[0]['title']}: {len(detail.get('alerts') or [])} alert(s), "
+                 f"{len(detail.get('timeline') or [])} timeline entries")
+
+    # -- emergency and discovery -----------------------------------------
+
+    def demonstrate_emergency_and_contract(self) -> None:
+        step(21, "Emergency controls and the contract")
+        state = self.client.emergency_state()
+        show("running executions", state["running_executions"])
+        show("paused schedules", state["paused_schedules"])
+
+        if state["running_executions"] > 0:
+            result = self.client.cancel_all_running(f"Demo cancellation ({self.run_id})")
+            show("cancelled", result["cancelled"])
+            note("cancelling in-flight work demands a reason, which is recorded")
+        else:
+            note("nothing was running, so the cancellation path was not exercised")
+
+        contract = self.client.openapi_document()
+        operations = sum(
+            len([m for m in v if m in ("get", "post", "put", "patch", "delete")])
+            for v in contract["paths"].values()
+        )
+        show("contract", {"paths": len(contract["paths"]), "operations": operations})
+        note("this is the document a client generator reads; a test fails the "
+             "build if it stops matching the routes")
+
     # -- pagination -------------------------------------------------------
 
     def demonstrate_pagination(self) -> None:
-        step(14, "Paginate a collection")
+        step(22, "Paginate a collection")
         seen = 0
         for _ in self.client.paginate("/executions", limit=2):
             seen += 1
@@ -326,7 +512,14 @@ def main() -> int:
     parser.add_argument("--base-url", default=None, help="API base URL")
     parser.add_argument("--email", required=True, help="account to authenticate")
     parser.add_argument("--password", required=True, help="password for that account")
-    parser.add_argument("--invite", default=None, help="invitation token, if registration needs one")
+    parser.add_argument(
+        "--invite",
+        default=None,
+        help=(
+            "invitation token, required once the first account has claimed the "
+            "tenant. Create one as an owner, then pass it here."
+        ),
+    )
     args = parser.parse_args()
 
     client = ForgeClient(base_url=args.base_url)
@@ -348,6 +541,14 @@ def main() -> int:
         demo.demonstrate_operations()
         demo.demonstrate_search_and_assistant()
         demo.demonstrate_maintenance()
+        demo.demonstrate_queues()
+        demo.demonstrate_workers()
+        demo.demonstrate_saved_views()
+        demo.demonstrate_integrations()
+        demo.demonstrate_api_keys()
+        demo.demonstrate_users_and_audit()
+        demo.demonstrate_notifications_and_incidents()
+        demo.demonstrate_emergency_and_contract()
         demo.demonstrate_pagination()
     except ForgeError as error:
         print(f"\n\033[31m✗ {error.status} {error.code}\033[0m: {error.message}")

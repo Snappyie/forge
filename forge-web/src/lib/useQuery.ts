@@ -182,6 +182,10 @@ export function usePaginatedQuery<T>(
   const [page, setPage] = useState<PageInfo | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState<ApiError | null>(null);
+  // A reload has to change something the effect depends on. Resetting `cursor`
+  // to null is not enough: it is already null after a first page, so React
+  // bails out of the re-render and the list keeps showing the rows it had.
+  const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     if (!path) return;
@@ -192,22 +196,18 @@ export function usePaginatedQuery<T>(
 
     (async () => {
       try {
-        const { api } = await import("@/lib/api");
+        const { getList } = await import("@/lib/api");
         const separator = path.includes("?") ? "&" : "?";
         const query = `${path}${separator}limit=${pageSize}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-        // `api.get` unwraps the envelope, so a list endpoint yields the array
-        // itself rather than an object with a `data` property.
-        const result = await api.get<T[]>(query);
+        // `getList` reads the rows *and* the page envelope, so the cursor the
+        // server hands back is preserved. Reading the array alone would lose
+        // `next_cursor` and pagination could never advance.
+        const result = await getList<T>(query);
         if (cancelled) return;
 
-        const rows = Array.isArray(result) ? result : [];
+        const rows = Array.isArray(result.rows) ? result.rows : [];
         setItems((previous) => (cursor ? [...previous, ...rows] : rows));
-        // `has_more` cannot be read off the array, so it is inferred from
-        // whether a full page came back.
-        setPage({
-          next_cursor: null,
-          has_more: rows.length === pageSize,
-        });
+        setPage(result.page ?? { next_cursor: null, has_more: false });
         setState("ready");
       } catch (cause) {
         if (cancelled) return;
@@ -221,19 +221,21 @@ export function usePaginatedQuery<T>(
     return () => {
       cancelled = true;
     };
-  }, [path, cursor, pageSize]);
+  }, [path, cursor, pageSize, nonce]);
 
   const loadMore = useCallback(() => {
-    setCursor((current) => current);
-    setPage(null);
-    // Re-fetch from the stored next cursor.
-    setCursor(page?.next_cursor ?? "");
+    // Only meaningful once a cursor exists; otherwise there is nothing more to
+    // walk to and re-running the same query would just refetch page one.
+    if (!page?.has_more) return;
+    setCursor(page.next_cursor ?? "");
   }, [page]);
 
   const reload = useCallback(() => {
     setItems([]);
     setPage(null);
     setCursor(null);
+    // Drop any accumulated rows and force the effect to run again.
+    setNonce((n) => n + 1);
   }, []);
 
   return {

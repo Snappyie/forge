@@ -8,13 +8,14 @@
  */
 
 import Link from "next/link";
-import { RefreshCw } from "lucide-react";
-
 import { useList } from "@/lib/useQuery";
 import { formatTimestamp, type Workflow as WorkflowSummary } from "@/lib/types";
 import { AsyncBoundary } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
+import { Plus, RefreshCw } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
 import {
   Table,
   TableBody,
@@ -25,6 +26,7 @@ import {
 } from "@/components/ui/table";
 
 export default function WorkflowsPage() {
+  const router = useRouter();
   const query = useList<WorkflowSummary>("/workflows");
   const rows = query.rows;
 
@@ -37,11 +39,21 @@ export default function WorkflowsPage() {
             Directed acyclic graphs of jobs, approvals, and delays.
           </p>
         </div>
-
-        <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
-          <RefreshCw className="size-3.5" aria-hidden />
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
+            <RefreshCw className="size-3.5" aria-hidden />
+            Refresh
+          </Button>
+          <Button size="sm" onClick={async () => {
+            try {
+              const res = await api.post<{id: string}>("/workflows", { name: "Untitled Workflow" });
+              router.push(`/workflows/${res.id}`);
+            } catch (err) {}
+          }}>
+            <Plus className="mr-1 size-3.5" aria-hidden />
+            New Workflow
+          </Button>
+        </div>
       </header>
 
       <div className="rounded-lg border border-border">
@@ -54,6 +66,12 @@ export default function WorkflowsPage() {
           loadingLabel="Loading workflows"
           emptyTitle="No workflows yet"
           emptyDescription="A workflow runs several jobs as one graph."
+
+          emptyAction={
+            <Button size="sm" variant="outline" render={<Link href="/jobs" />}>
+              Go to jobs
+            </Button>
+          }
         >
           <Table>
             <TableHeader>

@@ -52,8 +52,16 @@ export function WorkflowDesigner({
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<{ id: string, name: string }[]>([]);
 
   useUnsavedChanges(dirty);
+
+  // Fetch jobs for autocomplete
+  useEffect(() => {
+    api.get<{ id: string, name: string }[]>("/jobs")
+      .then(res => setJobs(Array.isArray(res) ? res : []))
+      .catch(() => {});
+  }, []);
 
   // Seed the canvas from the stored definition once it arrives.
   useEffect(() => {
@@ -61,8 +69,9 @@ export function WorkflowDesigner({
       (initial.nodes ?? []).map((node) => ({
         id: node.key,
         position: { x: 80 + (initial.nodes ?? []).indexOf(node) * 200, y: 80 },
-        data: { label: `${node.name ?? node.key}\n${node.type}` },
+        data: { label: `${node.name ?? node.key}\n[${node.type}]`, type: node.type, config: node.config || {} },
         type: "default",
+        style: { borderRadius: '8px', padding: '12px', fontWeight: '500', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }
       })),
     );
     setEdges(
@@ -70,6 +79,8 @@ export function WorkflowDesigner({
         id: `${edge.from}-${edge.to}`,
         source: edge.from,
         target: edge.to,
+        animated: true,
+        style: { strokeWidth: 2, stroke: '#94a3b8' }
       })),
     );
     setDirty(false);
@@ -90,7 +101,7 @@ export function WorkflowDesigner({
     // cycle detection, and this is its cheapest form.
     if (connection.source === connection.target) return;
     setEdges((current) =>
-      addEdge({ ...connection, id: `${connection.source}-${connection.target}` }, current),
+      addEdge({ ...connection, id: `${connection.source}-${connection.target}`, animated: true, style: { strokeWidth: 2, stroke: '#94a3b8' } }, current),
     );
     setDirty(true);
   }, []);
@@ -106,6 +117,7 @@ export function WorkflowDesigner({
           key: node.id,
           name: String(node.data.label ?? node.id).split("\n")[0],
           type: String(node.data.type ?? "JOB"),
+          config: node.data.config || {},
         })),
         edges: edges.map((edge) => ({ from: edge.source, to: edge.target })),
       };
@@ -129,7 +141,8 @@ export function WorkflowDesigner({
       {
         id: key,
         position: { x: 80 + current.length * 60, y: 260 },
-        data: { label: key, type: "JOB" },
+        data: { label: key, type: "JOB", config: {} },
+        style: { borderRadius: '8px', padding: '12px', fontWeight: '500', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }
       },
     ]);
     setSelected(key);
@@ -157,7 +170,7 @@ export function WorkflowDesigner({
         ) : null}
       </div>
 
-      <div className="h-96 rounded-lg border border-border">
+      <div className="h-[600px] rounded-lg border border-border bg-slate-50/50 dark:bg-slate-900/50">
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -231,6 +244,60 @@ export function WorkflowDesigner({
               </SelectContent>
             </Select>
           </div>
+          {current.data.type === "JOB" && (
+            <div className="flex flex-col gap-1 relative">
+              <Label htmlFor="node-job">Linked Job</Label>
+              <Input
+                id="node-job"
+                list="wf-jobs-list"
+                value={jobs.find(j => j.id === current.data.config?.job_id)?.name || current.data.config?.job_id || ""}
+                onChange={(e) => {
+                  const match = jobs.find(j => j.name === e.target.value);
+                  const jobId = match ? match.id : e.target.value;
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, job_id: jobId } } } : n));
+                  setDirty(true);
+                }}
+                placeholder="Search thousands of jobs..."
+                autoComplete="off"
+                className="w-56"
+              />
+              <datalist id="wf-jobs-list">
+                {jobs.map(j => (
+                  <option key={j.id} value={j.name} />
+                ))}
+              </datalist>
+            </div>
+          )}
+          {current.data.type === "DELAY" && (
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="node-delay">Delay (seconds)</Label>
+              <Input
+                id="node-delay"
+                type="number"
+                value={current.data.config?.seconds || ""}
+                onChange={(e) => {
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, seconds: parseInt(e.target.value) || 0 } } } : n));
+                  setDirty(true);
+                }}
+                className="w-32"
+              />
+            </div>
+          )}
+          {current.data.type === "WEBHOOK" && (
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="node-webhook">Webhook URL</Label>
+              <Input
+                id="node-webhook"
+                value={current.data.config?.url || ""}
+                onChange={(e) => {
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, url: e.target.value } } } : n));
+                  setDirty(true);
+                }}
+                className="w-64"
+                placeholder="https://..."
+              />
+            </div>
+          )}
           <Button
             variant="outline"
             size="sm"

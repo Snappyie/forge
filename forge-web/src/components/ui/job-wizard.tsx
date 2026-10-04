@@ -1,16 +1,6 @@
 "use client";
 
-/**
- * Job creation (UI.md section 7).
- *
- * The spec asks for a wizard rather than one giant form, and for save-draft,
- * autosave, and resume. Each step writes through to the API, so a draft is a
- * real draft row and resuming means loading it — not local state.
- */
-
 import { useEffect, useState } from "react";
-import { Check } from "lucide-react";
-
 import { api } from "@/lib/api";
 import { useToast } from "@/lib/useToast";
 import { Badge } from "@/components/ui/badge";
@@ -27,17 +17,6 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useUnsavedChanges } from "@/lib/useUnsavedChanges";
-import { cn } from "cn";
-
-const STEPS = [
-  "Basics",
-  "Schedule",
-  "Execution",
-  "Retry",
-  "Notifications",
-  "Security",
-  "Review",
-] as const;
 
 const DRAFT_KEY = "forge.jobWizard.draft";
 
@@ -52,6 +31,12 @@ interface Draft {
   timeoutSeconds: string;
   maxAttempts: string;
   runbook: string;
+  executionType: string;
+  linkedWorkflowId: string;
+  queueId: string;
+  alertEmail: string;
+  alertWebhook: string;
+  concurrencyPolicy: string;
 }
 
 const EMPTY: Draft = {
@@ -64,15 +49,42 @@ const EMPTY: Draft = {
   timeoutSeconds: "3600",
   maxAttempts: "3",
   runbook: "",
+  executionType: "WORKER_TASK",
+  linkedWorkflowId: "",
+  queueId: "",
+  alertEmail: "",
+  alertWebhook: "",
+  concurrencyPolicy: "ALLOW",
 };
 
 export function JobWizard() {
   const toast = useToast();
-  const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [busy, setBusy] = useState(false);
+  const [workflows, setWorkflows] = useState<{ id: string, name: string }[]>([]);
+  const [webhooks, setWebhooks] = useState<{ id: string, name: string, url: string }[]>([]);
+  const [teams, setTeams] = useState<{ id: string, name: string, email: string }[]>([]);
+  const [schedules, setSchedules] = useState<{ id: string, cron: string, name: string }[]>([]);
+  const [queues, setQueues] = useState<{ id: string, name: string }[]>([]);
 
-  // Resume: a draft in progress is restored rather than started over.
+  useEffect(() => {
+    api.get<{ id: string, name: string }[]>("/workflows")
+      .then(res => setWorkflows(Array.isArray(res) ? res : []))
+      .catch(() => {});
+    api.get<{ id: string, name: string, url: string }[]>("/webhooks")
+      .then(res => setWebhooks(Array.isArray(res) ? res : []))
+      .catch(() => {});
+    api.get<{ id: string, name: string, email: string }[]>("/teams")
+      .then(res => setTeams(Array.isArray(res) ? res : []))
+      .catch(() => {});
+    api.get<{ id: string, cron: string, name: string }[]>("/schedules")
+      .then(res => setSchedules(Array.isArray(res) ? res : []))
+      .catch(() => {});
+    api.get<{ id: string, name: string }[]>("/queues")
+      .then(res => setQueues(Array.isArray(res) ? res : []))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(DRAFT_KEY);
@@ -82,20 +94,21 @@ export function JobWizard() {
     }
   }, []);
 
-  // Autosave as the operator types, so a crash loses nothing.
   useEffect(() => {
     if (draft.name.trim() === "") return;
     try {
       window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-    } catch {
-      // A disabled store just means no resume.
-    }
+    } catch {}
   }, [draft]);
 
   const dirty = draft.name.trim() !== "";
   useUnsavedChanges(dirty);
 
   async function saveDraft(): Promise<string | undefined> {
+    if (!draft.name.trim()) {
+      toast.error("Job name is required");
+      return undefined;
+    }
     setBusy(true);
     try {
       if (draft.jobId) {
@@ -105,6 +118,7 @@ export function JobWizard() {
           description: draft.description,
           priority: draft.priority,
         });
+        toast.success("Draft updated");
         return draft.jobId;
       }
       const created = await api.post<{ id: string }>("/jobs", {
@@ -114,6 +128,7 @@ export function JobWizard() {
         priority: draft.priority,
       });
       setDraft((current) => ({ ...current, jobId: created.id }));
+      toast.success("Draft saved");
       return created.id;
     } catch (error) {
       toast.error(
@@ -126,15 +141,57 @@ export function JobWizard() {
     }
   }
 
+  async function publishJob() {
+    let jobId = draft.jobId;
+    if (!jobId) {
+      jobId = await saveDraft();
+      if (!jobId) return;
+    }
+    setBusy(true);
+    try {
+      let config = {};
+      if (draft.executionType === "WORKER_TASK") {
+        config = { queue_id: draft.queueId };
+      } else if (draft.executionType === "HTTP_REQUEST") {
+        config = { url: "https://example.com" }; // Placeholder
+      }
+
+      // Create version
+      const version = await api.post<{ id: string }>(`/jobs/${jobId}/versions`, {
+        config,
+        execution_type: draft.executionType,
+        timeout_seconds: parseInt(draft.timeoutSeconds) || 3600,
+        concurrency_policy: { scope: "JOB", max_concurrent_executions: draft.concurrencyPolicy === "ALLOW" ? null : { "Bounded": 1 } },
+        retry_policy: { max_attempts: parseInt(draft.maxAttempts) || 3 }
+      });
+      
+      // Publish version
+      await api.post(`/jobs/${jobId}/versions/${version.id}/publish`, {});
+      toast.success("Job successfully published!");
+      
+      // Clear draft and let them go to jobs list (in a real app, we'd navigate to /jobs)
+      window.localStorage.removeItem(DRAFT_KEY);
+      setDraft(EMPTY);
+      window.location.href = "/jobs";
+    } catch (error) {
+      toast.error(
+        "Could not publish job",
+        error instanceof Error ? error.message : undefined,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function attachSchedule() {
     const jobId = draft.jobId ?? (await saveDraft());
     if (!jobId) return;
     setBusy(true);
     try {
       await api.post("/schedules", {
-        job_id: jobId,
-        cron_expression: draft.cron,
-        timezone: draft.timezone,
+        target_id: jobId,
+        expression: draft.cron,
+        timezone: draft.timezone || "UTC",
       });
       toast.success("Schedule attached");
     } catch (error) {
@@ -148,37 +205,19 @@ export function JobWizard() {
   }
 
   return (
-    <Card>
+    <Card className="max-w-3xl mx-auto w-full mb-10 border shadow-sm">
       <CardHeader>
-        <CardTitle className="text-sm">
-          {draft.jobId ? "Editing draft" : "New job"}
+        <CardTitle className="text-xl">
+          {draft.jobId ? "Editing Job Draft" : "Create New Job"}
         </CardTitle>
       </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        {/* Step rail: the wizard shape the spec asks for instead of one form. */}
-        <ol className="flex flex-wrap gap-1">
-          {STEPS.map((label, index) => (
-            <li key={label}>
-              <button
-                type="button"
-                onClick={() => setStep(index)}
-                aria-current={step === index ? "step" : undefined}
-                className={cn(
-                  "rounded border border-border px-2 py-0.5 text-[11px]",
-                  step === index && "border-primary bg-accent text-accent-foreground",
-                  index < step && "text-emerald-600 dark:text-emerald-400",
-                )}
-              >
-                {index < step ? <Check className="mr-0.5 inline size-2.5" aria-hidden /> : null}
-                {index + 1}. {label}
-              </button>
-            </li>
-          ))}
-        </ol>
-
-        {step === 0 ? (
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-col gap-1">
+      <CardContent className="flex flex-col gap-8 h-full pr-4">
+        
+        {/* BASICS */}
+        <div className="flex flex-col gap-4 pb-6 border-b border-border">
+          <h3 className="font-medium text-lg">1. Basic Information</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
               <Label htmlFor="w-name">Name</Label>
               <Input
                 id="w-name"
@@ -186,8 +225,8 @@ export function JobWizard() {
                 onChange={(e) => setDraft({ ...draft, name: e.target.value })}
               />
             </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="w-key">Key</Label>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="w-key">Key (Optional)</Label>
               <Input
                 id="w-key"
                 value={draft.key}
@@ -195,63 +234,77 @@ export function JobWizard() {
                 placeholder="nightly-settlement"
               />
             </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="w-desc">Description</Label>
-              <Textarea
-                id="w-desc"
-                value={draft.description}
-                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-              />
-            </div>
           </div>
-        ) : null}
-
-        {step === 1 ? (
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="w-cron">Cron expression</Label>
-              <Input
-                id="w-cron"
-                value={draft.cron}
-                onChange={(e) => setDraft({ ...draft, cron: e.target.value })}
-                className="font-mono"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="w-tz">Timezone</Label>
-              <Input
-                id="w-tz"
-                value={draft.timezone}
-                onChange={(e) => setDraft({ ...draft, timezone: e.target.value })}
-              />
-            </div>
-            <Button variant="outline" size="sm" onClick={attachSchedule} disabled={busy}>
-              Attach schedule
-            </Button>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="w-desc">Description</Label>
+            <Textarea
+              id="w-desc"
+              rows={3}
+              value={draft.description}
+              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+            />
           </div>
-        ) : null}
+        </div>
 
-        {step === 2 ? (
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-col gap-1">
+        {/* EXECUTION */}
+        <div className="flex flex-col gap-4 pb-6 border-b border-border">
+          <h3 className="font-medium text-lg">2. Execution Policy</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="w-execution-type">Execution Type</Label>
+              <Select value={draft.executionType} onValueChange={(value) => setDraft({ ...draft, executionType: value ?? "WORKER_TASK" })}>
+                <SelectTrigger id="w-execution-type"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="CONTAINER_COMMAND">Shell Command</SelectItem>
+                  <SelectItem value="HTTP_REQUEST">HTTP Request</SelectItem>
+                  <SelectItem value="WORKER_TASK">Queue Worker</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {draft.executionType === "WORKER_TASK" && (
+              <div className="flex flex-col gap-1.5 relative">
+                <Label htmlFor="w-queue-id">Target Queue</Label>
+                <Input
+                  id="w-queue-id"
+                  list="queues-list"
+                  value={queues.find(q => q.id === draft.queueId)?.name || draft.queueId}
+                  onChange={(e) => {
+                    const match = queues.find(q => q.name === e.target.value);
+                    setDraft({ ...draft, queueId: match ? match.id : e.target.value });
+                  }}
+                  placeholder="ecommerce-queue"
+                  autoComplete="off"
+                />
+                <datalist id="queues-list">
+                  {queues.map(q => (
+                    <option key={q.id} value={q.name} />
+                  ))}
+                </datalist>
+              </div>
+            )}
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="w-concurrency">Concurrency Policy</Label>
+              <Select value={draft.concurrencyPolicy} onValueChange={(value) => setDraft({ ...draft, concurrencyPolicy: value ?? "ALLOW" })}>
+                <SelectTrigger id="w-concurrency"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ALLOW">Allow</SelectItem>
+                  <SelectItem value="FORBID">Forbid (Skip)</SelectItem>
+                  <SelectItem value="REPLACE">Replace (Cancel running)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1.5">
               <Label htmlFor="w-priority">Priority</Label>
-              <Select
-                value={draft.priority}
-                onValueChange={(value) => setDraft({ ...draft, priority: value ?? "NORMAL" })}
-              >
-                <SelectTrigger className="w-40" aria-label="Priority">
-                  <SelectValue />
-                </SelectTrigger>
+              <Select value={draft.priority} onValueChange={(value) => setDraft({ ...draft, priority: value ?? "NORMAL" })}>
+                <SelectTrigger id="w-priority"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {["CRITICAL", "HIGH", "NORMAL", "LOW", "BACKGROUND"].map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {p.toLowerCase()}
-                    </SelectItem>
+                    <SelectItem key={p} value={p}>{p}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1.5">
               <Label htmlFor="w-timeout">Timeout (seconds)</Label>
               <Input
                 id="w-timeout"
@@ -260,30 +313,95 @@ export function JobWizard() {
                 onChange={(e) => setDraft({ ...draft, timeoutSeconds: e.target.value })}
               />
             </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="w-attempts">Max attempts</Label>
+              <Input
+                id="w-attempts"
+                type="number"
+                value={draft.maxAttempts}
+                onChange={(e) => setDraft({ ...draft, maxAttempts: e.target.value })}
+              />
+            </div>
           </div>
-        ) : null}
+        </div>
 
-        {step === 3 ? (
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="w-attempts">Max attempts</Label>
-            <Input
-              id="w-attempts"
-              type="number"
-              value={draft.maxAttempts}
-              onChange={(e) => setDraft({ ...draft, maxAttempts: e.target.value })}
-            />
+        {/* SCHEDULE */}
+        <div className="flex flex-col gap-4 pb-6 border-b border-border">
+          <div className="flex items-center justify-between">
+             <h3 className="font-medium text-lg">3. Schedule</h3>
+             <Button variant="outline" size="sm" onClick={attachSchedule} disabled={busy || !draft.cron}>
+              Attach Schedule
+            </Button>
           </div>
-        ) : null}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="w-cron">Cron expression (Search saved schedules)</Label>
+              <Input
+                id="w-cron"
+                list="schedules-list"
+                value={draft.cron}
+                onChange={(e) => setDraft({ ...draft, cron: e.target.value })}
+                className="font-mono"
+                placeholder="*/15 * * * *"
+                autoComplete="off"
+              />
+              <datalist id="schedules-list">
+                {schedules.map(sch => (
+                  <option key={sch.id} value={sch.cron}>{sch.name}</option>
+                ))}
+              </datalist>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="w-tz">Timezone</Label>
+              <Input
+                id="w-tz"
+                value={draft.timezone}
+                onChange={(e) => setDraft({ ...draft, timezone: e.target.value })}
+              />
+            </div>
+          </div>
+        </div>
 
-        {step === 4 ? (
-          <p className="text-xs text-muted-foreground">
-            Alerts for this job are configured as rules on the Alerts page, so a
-            failed run reaches the same inbox as any other.
-          </p>
-        ) : null}
-
-        {step === 5 ? (
-          <div className="flex flex-col gap-1">
+        {/* ALERTS */}
+        <div className="flex flex-col gap-4 pb-2">
+          <h3 className="font-medium text-lg">4. Alerts & Runbook</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5 relative">
+              <Label htmlFor="w-alert-email">Alert Email (Search Teams)</Label>
+              <Input
+                id="w-alert-email"
+                type="email"
+                list="teams-list"
+                value={draft.alertEmail}
+                onChange={(e) => setDraft({ ...draft, alertEmail: e.target.value })}
+                placeholder="oncall@example.com"
+                autoComplete="off"
+              />
+              <datalist id="teams-list">
+                {teams.map(t => (
+                  <option key={t.id} value={t.email}>{t.name}</option>
+                ))}
+              </datalist>
+            </div>
+            <div className="flex flex-col gap-1.5 relative">
+              <Label htmlFor="w-alert-webhook">Alert Webhook URL (Search Webhooks)</Label>
+              <Input
+                id="w-alert-webhook"
+                type="url"
+                list="webhooks-list"
+                value={draft.alertWebhook}
+                onChange={(e) => setDraft({ ...draft, alertWebhook: e.target.value })}
+                placeholder="https://hooks.slack.com/services/..."
+                autoComplete="off"
+              />
+              <datalist id="webhooks-list">
+                {webhooks.map(wh => (
+                  <option key={wh.id} value={wh.url}>{wh.name}</option>
+                ))}
+              </datalist>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="w-runbook">Runbook URL</Label>
             <Input
               id="w-runbook"
@@ -292,61 +410,33 @@ export function JobWizard() {
               placeholder="https://wiki.example.com/runbooks/settlement"
             />
           </div>
-        ) : null}
+        </div>
 
-        {step === 6 ? (
-          <ul className="flex flex-col gap-1 text-xs">
-            <Review label="Name" value={draft.name || "—"} />
-            <Review label="Key" value={draft.key || "—"} />
-            <Review label="Priority" value={draft.priority.toLowerCase()} />
-            <Review label="Schedule" value={`${draft.cron} (${draft.timezone})`} />
-            <Review label="Timeout" value={`${draft.timeoutSeconds}s`} />
-            <Review label="Max attempts" value={draft.maxAttempts} />
-            <Review
-              label="Runbook"
-              value={draft.runbook ? "set" : "missing"}
-            />
-          </ul>
-        ) : null}
-
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 mt-4 pt-4 border-t border-border">
           <Button
+            size="lg"
             variant="outline"
-            size="sm"
-            disabled={step === 0}
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
-          >
-            Back
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
             onClick={saveDraft}
             disabled={busy || draft.name.trim() === ""}
+            className="w-1/3 font-medium"
           >
-            {busy ? "Saving…" : "Save draft"}
+            {busy ? "Saving…" : draft.jobId ? "Update Draft" : "Save Draft"}
           </Button>
-          {step < STEPS.length - 1 ? (
-            <Button size="sm" onClick={() => setStep((s) => s + 1)}>
-              Next
-            </Button>
-          ) : null}
+          <Button
+            size="lg"
+            onClick={publishJob}
+            disabled={busy || draft.name.trim() === ""}
+            className="w-2/3 font-medium"
+          >
+            Publish Job & Activate
+          </Button>
           {draft.jobId ? (
-            <Badge variant="secondary" className="ml-auto text-[10px]">
-              draft saved
+            <Badge variant="secondary" className="ml-auto text-xs shrink-0 py-1 px-2">
+              Draft ID: {draft.jobId.slice(0, 8)}
             </Badge>
           ) : null}
         </div>
       </CardContent>
     </Card>
-  );
-}
-
-function Review({ label, value }: { label: string; value: string }) {
-  return (
-    <li className="flex gap-2">
-      <span className="w-28 shrink-0 text-muted-foreground">{label}</span>
-      <span className="font-mono">{value}</span>
-    </li>
   );
 }

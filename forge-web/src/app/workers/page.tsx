@@ -85,6 +85,12 @@ export default function WorkersPage() {
           loadingLabel="Loading workers"
           emptyTitle="No workers registered"
           emptyDescription="Register a worker to begin executing queued work."
+
+          emptyAction={
+            <Button size="sm" variant="outline" render={<Link href="/docs" />}>
+              How workers connect
+            </Button>
+          }
         >
           <Table>
             <TableHeader>

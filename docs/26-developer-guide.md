@@ -366,12 +366,83 @@ Attached to a version:
 An execution's `attempt_count` is what the retry budget and the concurrency
 policy are both measured against.
 
+### Retry policy fields
+
+```json
+{"retry_policy":{
+   "max_attempts":3,
+   "backoff":{"Exponential":{"initial_delay":{"secs":1,"nanos":0},
+                             "multiplier":2,
+                             "max_delay":{"secs":300,"nanos":0}}},
+   "retryable_error_classes":["TRANSIENT","TIMEOUT"],
+   "non_retryable_error_classes":["VALIDATION"],
+   "jitter_ratio":0.2}}
+```
+
+| Field | Effect |
+| --- | --- |
+| `max_attempts` | Total attempts, not retries after the first |
+| `backoff` | A tagged object; see below |
+| `retryable_error_classes` | Classes eligible for retry; empty means the class defaults |
+| `non_retryable_error_classes` | Explicit exclusions, overriding the allow-list |
+| `jitter_ratio` | Fraction of the delay jitter may add, `0.0`–`1.0` |
+
+### Backoff strategies
+
+Each variant is a **struct variant with its own fields**, so it is nested rather
+than a bare string.
+
+| Variant | Fields |
+| --- | --- |
+| `{"Fixed": {"delay": {...}}}` | One constant delay |
+| `{"Linear": {"initial_delay": {...}, "increment": {...}}}` | Grows by a fixed step |
+| `{"Exponential": {"initial_delay": {...}, "multiplier": N, "max_delay": {...}}}` | Multiplies, capped |
+
+### Durations are objects, not strings
+
+A duration is `{"secs": 1, "nanos": 0}` — **not** `"PT1S"`. An ISO-8601 string is
+rejected with `expected struct Duration`.
+
+| Seconds | Encoding |
+| --- | --- |
+| 1 second | `{"secs": 1, "nanos": 0}` |
+| 30 seconds | `{"secs": 30, "nanos": 0}` |
+| 5 minutes | `{"secs": 300, "nanos": 0}` |
+
+A bare `"Exponential"` without its fields is likewise rejected, with
+`expected struct variant`. Both are validation errors that name what was
+expected, so a mistake is reported rather than silently defaulted.
+
+The exclusion list wins over the allow-list. That ordering matters: it lets you
+say "retry anything transient" and then carve out one case without restating the
+whole list.
+
+### Jitter
+
+Without jitter, every execution that failed at the same instant retries at the
+same instant, which turns a partial outage into a synchronised stampede.
+`jitter_ratio` randomises each delay by up to that fraction of its computed
+value. Anything above `0` is worth setting in production.
+
 ### Retrying by hand
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/executions/$EXEC_ID/retry \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}'
 ```
+
+The execution moves to `RETRY_SCHEDULED` and a background pass requeues it.
+It is not dispatched inline, so a retry follows the same scheduling rules as any
+other work.
+
+### Attempt history
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/executions/$EXEC_ID/attempts"
+```
+
+Every attempt with its status, timestamps, and error — so an operator can see
+that attempt 1 timed out and attempt 2 was rejected for a different reason.
 
 ### Error classes
 
@@ -391,7 +462,8 @@ retrying a malformed request just wastes attempts.
 
 ## 9. Concurrency
 
-An optional bound, set on the version:
+An optional bound, set on the **version** rather than the job, so two versions
+of the same job can be constrained differently.
 
 ```json
 {"concurrency_policy":{
@@ -400,19 +472,64 @@ An optional bound, set on the version:
    "queue_id":null}}
 ```
 
-- `{"Bounded": N}` limits to N; `{"Unlimited"}` is the default.
-- `scope` is `JOB`, `QUEUE`, `TENANT`, or `GLOBAL`.
-- `queue_id` is only meaningful for `QUEUE` scope.
+### Fields
 
-This is **enforced when work is dispatched**, not merely recorded. A job bounded
-to 2 will not take a third execution while two are active, whatever the
-scheduler's queue depth looks like.
+| Field | Values | Meaning |
+| --- | --- | --- |
+| `max_concurrent_executions` | `{"Bounded": N}` or `{"Unlimited"}` | The cap. `Unlimited` is the default |
+| `scope` | `JOB`, `QUEUE`, `TENANT`, `GLOBAL`, `WORKFLOW` | Which executions count against the cap |
+| `queue_id` | UUID or `null` | Only meaningful for `QUEUE` scope |
+
+`{"Bounded": N}` is the **only** accepted encoding. `{"max": N}` is rejected
+with a validation error, as is a bare number.
+
+### What counts as active
+
+An execution counts against the limit while it is in any of:
+
+```
+SCHEDULED, QUEUED, DISPATCHED, RUNNING, RETRY_SCHEDULED,
+CANCEL_REQUESTED, ABANDONED
+```
+
+That includes `QUEUED`. A job bounded to 1 that has one execution waiting will
+**not** start a second — which is the point: the bound is on how much work is in
+flight for that scope, not merely on how much is running.
+
+It also includes `ABANDONED`, which is a recovery state and not terminal, so a
+crashed worker's execution keeps occupying its slot until recovery requeues or
+finishes it.
+
+### Where it is enforced
+
+At dispatch. When a worker claims work, the candidate execution is only
+selected if its scope is under the limit. A job bounded to 2 will not take a
+third execution whatever the queue depth looks like.
+
+This is enforced in the same query that selects work, so it cannot be bypassed
+by adding more schedulers or more workers.
+
+### Choosing a scope
+
+- **`JOB`** — the common case. One job at a time, regardless of how many
+  others run.
+- **`TENANT`** — a ceiling on the whole tenant, useful as a safety valve.
+- **`QUEUE`** — per-queue capacity. Pair it with `queue_id`; without it the
+  scope cannot be evaluated.
+- **`WORKFLOW`** and **`GLOBAL`** — reserved; the workflow engine and the
+  process-wide counter apply them.
+
+### Seeing the effect
+
+`GET /jobs/{id}/health` reports `executions` alongside the success rate, so a
+job sitting at its ceiling looks like a backlog rather than a mystery.
 
 ---
 
 ## 10. SLA targets
 
-Set an expected duration and Forge measures completed runs against it:
+An SLA is an **expected duration**. Forge measures completed runs against it and
+reports what actually happened.
 
 ```bash
 curl -X PUT http://localhost:3000/api/v1/jobs/$JOB_ID/sla \
@@ -420,8 +537,48 @@ curl -X PUT http://localhost:3000/api/v1/jobs/$JOB_ID/sla \
   -H 'Content-Type: application/json' -d '{"target_duration_seconds":1800}'
 ```
 
-Until runs have been measured, compliance is absent rather than 100%. Treat "no
-evaluation yet" as unknown, not as a pass.
+| Field | Type | Notes |
+| --- | --- | --- |
+| `target_duration_seconds` | integer > 0 | Seconds a completed run is expected to take |
+| `enabled` | boolean | Defaults to true; disable without deleting |
+
+`0` or a negative value is a `400`, not a stored nonsense target.
+
+### Reading compliance
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/jobs/$JOB_ID/health"
+```
+
+```json
+{"sla":{"target_seconds":1800,"met":4,"evaluated":6,"compliance_percent":66.7}}
+```
+
+- `compliance_percent` is `null` until something has been evaluated. Treat "no
+  evaluation yet" as unknown, **not** as a pass.
+- The target is measured from `started_at` to `ended_at`. Queue wait is not
+  counted against the SLA; a job that waited an hour for a worker and then ran
+  quickly has met its target.
+- Only completed runs are evaluated. An execution still running is not a miss.
+
+### Per-run detail
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/jobs/$JOB_ID/sla"
+```
+
+Returns each evaluated execution with its duration and whether it met the
+target, so you can show an operator *which* runs were late rather than only a
+percentage.
+
+### Tenant-wide
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/sla/compliance"
+```
+
+Counts evaluations from the last 30 days, which is what the dashboard's SLA
+card reads.
 
 ---
 
@@ -494,32 +651,104 @@ one, so a running workflow is never changed underneath itself.
 
 ## 14. Maintenance mode
 
-Hold scheduling tenant-wide while you work:
+Hold scheduling tenant-wide while you do work that new runs would interfere
+with — a migration, a fleet upgrade, a noisy neighbour.
 
 ```bash
+# enter
 curl -X POST http://localhost:3000/api/v1/maintenance \
   -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"reason":"Upgrading the scheduler fleet"}'
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Upgrading the scheduler fleet"}'
 
+# read the current state
+curl -H "Authorization: Bearer $TOKEN" "$BASE/maintenance"
+```
+
+```json
+{"data":{"active":true,
+         "window":{"id":"…","reason":"Upgrading the scheduler fleet",
+                   "started_at":"2026-10-04T05:00:00Z","started_by":"…"}}}
+```
+
+```bash
+# lift
 curl -X DELETE http://localhost:3000/api/v1/maintenance \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Nothing new is dispatched while it is set. Work already in flight is **not**
-interrupted. A reason is required.
+### What it does and does not stop
+
+| Effect | Behaviour |
+| --- | --- |
+| New scheduled occurrences | Not created while maintenance is active |
+| Queued executions | **Still dispatch** when a worker claims them |
+| Running executions | **Not interrupted**; they finish normally |
+| Manual triggers | Still work |
+| Lifting | `DELETE` closes the window; scheduling resumes |
+
+That boundary is deliberate. Maintenance is a scheduling brake, not a kill
+switch. To stop work that is already in flight, cancel it explicitly — see
+`POST /emergency/cancel-running` in section 22.
+
+### Why a reason is required
+
+An empty or whitespace reason is a `400`. The reason is shown on the dashboard
+banner, so anyone looking at a stalled system can see why it was paused without
+asking.
+
+### Lifting a window that is not open
+
+`DELETE` on a tenant with no open window returns `404`, rather than succeeding
+silently. That makes it safe to call unconditionally in a shutdown script.
+
+### If maintenance is left on
+
+The window stays open until lifted. There is no automatic expiry, because a
+maintenance window that silently closed mid-upgrade would be worse than one that
+stays. The dashboard banner is deliberately unmissable for exactly this reason.
 
 ---
 
 ## 15. Undo
 
-A job status change records its prior state and stays reversible for 24 hours:
+A job status change records its prior state, so a mistaken pause or archive is one
+click to reverse rather than a second hand-edited request.
 
 ```bash
+# what can be reversed
 curl -H "Authorization: Bearer $TOKEN" "$BASE/undo"
+
+# reverse it
 curl -X POST "$BASE/undo/$ENTRY_ID" -H "Authorization: Bearer $TOKEN" -d '{}'
 ```
 
-Single use: a second attempt returns 404.
+```json
+{"data":{"undone":true,"action":"JOB_STATUS",
+         "resource_id":"…","restored_status":"ACTIVE"}}
+```
+
+### The rules
+
+| Rule | Consequence |
+| --- | --- |
+| 24-hour window | An entry past `expires_at` is no longer listed |
+| Single use | A second attempt returns `404`; the entry is consumed |
+| Per user | You only see and reverse your own changes |
+| Per tenant | An entry cannot be undone from a different tenant |
+| Job status only | Other actions are refused explicitly, not silently ignored |
+
+### What is reversible
+
+Currently `JOB_STATUS` changes — whether made through `PATCH /jobs/{id}` or a
+bulk pause, resume, or archive. Everything else returns a validation error
+naming the action, rather than pretending to reverse something it did not.
+
+### When no entry appears
+
+The change was a no-op. Pausing a job that is already `DRAFT` records nothing,
+because nothing changed — so an empty undo list after a bulk call usually means
+the jobs were already in the requested state, not that undo is broken.
 
 ---
 
@@ -642,3 +871,68 @@ intended, and understand that open signups receive `VIEWER`, not `OWNER`.
     end to end as a smoke test of the whole surface.
 
 If step 10 passes, your integration understands everything Forge does.
+
+## 6. Worker SDKs
+
+Forge provides official SDKs to simplify distributed job execution in your favorite language. 
+The SDKs automatically manage queue polling, execution context parsing, long-running heartbeats, and log streaming so that you can focus entirely on business logic.
+
+### Python
+
+```python
+from forge_sdk import ForgeWorker, JobContext
+
+worker = ForgeWorker(base_url="http://localhost:3000/api/v1", tenant_id="tenant", api_key="key")
+
+@worker.job("process-data")
+def handle_process(ctx: JobContext):
+    ctx.log("Processing...")
+    return {"status": "SUCCESS"}
+
+worker.start(queue="data-queue")
+```
+
+### Node.js (TypeScript)
+
+```typescript
+import { ForgeWorker, JobContext } from '@forge/sdk';
+
+const worker = new ForgeWorker("http://localhost:3000/api/v1", "tenant", "key");
+
+worker.job("process-data", async (ctx: JobContext) => {
+    await ctx.log("Processing...");
+    return { status: "SUCCESS" };
+});
+
+worker.start("data-queue");
+```
+
+### Go
+
+```go
+import "github.com/forge/sdk-go"
+
+worker := forge.NewWorker("http://localhost:3000/api/v1", "tenant", "key")
+
+worker.Register("process-data", func(ctx *forge.JobContext) (interface{}, error) {
+    ctx.Log("Processing...")
+    return map[string]string{"status": "SUCCESS"}, nil
+})
+
+worker.Start("data-queue", 2 * time.Second)
+```
+
+### Java
+
+```java
+import io.forge.sdk.*;
+
+ForgeWorker worker = new ForgeWorker("http://localhost:3000/api/v1", "tenant", "key");
+
+worker.registerJob("process-data", ctx -> {
+    ctx.log("Processing...");
+    return Map.of("status", "SUCCESS");
+});
+
+worker.start("data-queue", 2000);
+```

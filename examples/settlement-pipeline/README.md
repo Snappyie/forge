@@ -28,7 +28,15 @@ readable transcript of the API.
 | 11 | Health, dashboard, and upcoming aggregates |
 | 12 | Search and the assistant, which proposes but never applies |
 | 13 | Maintenance mode, and lifting it |
-| 14 | Cursor pagination |
+| 14 | Queues: creating, pausing, and resuming |
+| 15 | The worker protocol: registration, draining, heartbeat |
+| 16 | Saved views |
+| 17 | Integrations, and an honest connection test |
+| 18 | API keys: create, rotate, revoke |
+| 19 | Users and the audit trail |
+| 20 | Notifications, preferences, and incidents |
+| 21 | Emergency controls, and reading the OpenAPI contract |
+| 22 | Cursor pagination |
 
 ## Running it
 
@@ -51,7 +59,13 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 # later accounts need an invite created by an owner
 ```
 
-Pass `--invite <uuid>` to the demo when registering a new account.
+Pass `--invite <uuid>` to the demo when registering a new account. If you omit it
+on a tenant that is already claimed, the demo tells you the exact SQL to create
+the invitation rather than failing opaquely.
+
+Every endpoint group in the API has a step above. The tour is deliberately
+idempotent: each run uses a fresh suffix on job keys, so re-running it never
+collides with the last one.
 
 ## Layout
 

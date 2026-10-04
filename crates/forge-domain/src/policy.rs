@@ -39,6 +39,7 @@ impl JitterSource for NoJitter {
 
 /// `Eq` is intentionally not derived: `jitter_ratio` is an `f64`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
     pub backoff: BackoffStrategy,
@@ -225,6 +226,7 @@ pub enum ConcurrencyScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ConcurrencyPolicy {
     pub max_concurrent_executions: ConcurrencyLimit,
     pub scope: ConcurrencyScope,

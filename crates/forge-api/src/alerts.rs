@@ -538,6 +538,20 @@ pub async fn get_notification_preferences(
     Ok(Json(ApiResponse::new(preferences, auth.request_id)))
 }
 
+/// Parses an `HH:MM` string into a `time`, rejecting anything else up front so
+/// a typo is a validation error rather than a database failure.
+fn parse_time(value: Option<&str>, field: &str) -> Result<Option<chrono::NaiveTime>, ApiError> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    chrono::NaiveTime::parse_from_str(raw, "%H:%M")
+        .map(Some)
+        .map_err(|_| {
+            ApiError::validation(format!("`{raw}` is not a valid time for {field}"))
+                .with_detail(field, "expected HH:MM")
+        })
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateNotificationPreferences {
     #[serde(default)]
@@ -589,8 +603,16 @@ pub async fn update_notification_preferences(
     .bind(auth.user_id)
     .bind(body.enabled_kinds)
     .bind(&body.channels)
-    .bind(body.quiet_hours_start.as_deref())
-    .bind(body.quiet_hours_end.as_deref())
+    // The columns are `time`, so the strings are parsed rather than bound as
+    // text; Postgres will not coerce text into `time` implicitly.
+    .bind(parse_time(
+        body.quiet_hours_start.as_deref(),
+        "quiet_hours_start",
+    )?)
+    .bind(parse_time(
+        body.quiet_hours_end.as_deref(),
+        "quiet_hours_end",
+    )?)
     .fetch_one(&state.pool)
     .await
     .map_err(ApiError::from)?;

@@ -124,6 +124,7 @@ export function AsyncBoundary({
   loadingLabel,
   emptyTitle,
   emptyDescription,
+  emptyAction,
   children,
 }: {
   state: "loading" | "ready" | "error";
@@ -134,12 +135,22 @@ export function AsyncBoundary({
   loadingLabel?: string;
   emptyTitle?: string;
   emptyDescription?: string;
+  /** Offered on the empty state, so it is a dead end with somewhere to go. */
+  emptyAction?: React.ReactNode;
   children: React.ReactNode;
 }) {
   if (state === "loading") return <LoadingState label={loadingLabel} />;
   if (state === "error") {
     return forbidden ? <ForbiddenState /> : <ErrorState error={error} onRetry={onRetry} />;
   }
-  if (empty) return <EmptyState title={emptyTitle} description={emptyDescription} />;
+  if (empty) {
+    return (
+      <EmptyState
+        title={emptyTitle}
+        description={emptyDescription}
+        action={emptyAction}
+      />
+    );
+  }
   return <>{children}</>;
 }

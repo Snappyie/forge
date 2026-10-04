@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useUnsavedChanges } from "@/lib/useUnsavedChanges";
+import Link from "next/link";
 
 interface Hook {
   id: string;
@@ -141,6 +142,12 @@ export default function WebhooksPage() {
         loadingLabel="Loading webhooks"
         emptyTitle="No webhooks configured"
         emptyDescription="Create a subscription to receive events on your own endpoint."
+
+        emptyAction={
+          <Button size="sm" variant="outline" render={<Link href="/docs" />}>
+            How webhooks work
+          </Button>
+        }
       >
         <div className="flex flex-col gap-3">
           {webhooks.rows.map((hook) => (

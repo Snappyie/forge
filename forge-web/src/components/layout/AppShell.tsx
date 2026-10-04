@@ -13,28 +13,15 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Activity,
   Bell,
   BookOpen,
-  CalendarClock,
-  CircleDot,
-  ClipboardList,
-  Gauge,
-  Layers,
-  LifeBuoy,
   Monitor,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Plug,
   Search,
-  Shield,
-  ShieldAlert,
   Sparkles,
   Sun,
-  Users,
-  Webhook,
-  Workflow,
 } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
@@ -42,34 +29,11 @@ import { useShell, type Theme } from "@/lib/shell";
 import { useQuery } from "@/lib/useQuery";
 import { LoadingState } from "@/components/states";
 import { SearchOverlay } from "@/components/layout/global-search";
+import { buildNav, buildPaletteNav, type NavCounts } from "@/components/layout/nav";
 import { UndoBar } from "@/components/ui/undo-bar";
 import { LiveIndicator } from "@/components/ui/live-indicator";
 import { HelpDialog } from "@/components/ui/help-dialog";
 import { cn } from "cn";
-
-/** UI.md §1 global navigation. */
-const NAV = [
-  { href: "/", label: "Dashboard", icon: Gauge },
-  { href: "/jobs", label: "Jobs", icon: ClipboardList },
-  { href: "/executions", label: "Executions", icon: Activity },
-  { href: "/workflows", label: "Workflows", icon: Workflow },
-  { href: "/calendar", label: "Calendar", icon: CalendarClock },
-  { href: "/workers", label: "Workers", icon: Users },
-  { href: "/queues", label: "Queues", icon: Layers },
-  { href: "/schedules", label: "Schedules", icon: CalendarClock },
-  { href: "/running", label: "Running now", icon: CircleDot },
-  { href: "/upcoming", label: "Upcoming", icon: CalendarClock },
-  { href: "/assistant", label: "Assistant", icon: Sparkles },
-  { href: "/alerts", label: "Alerts", icon: LifeBuoy },
-  { href: "/incidents", label: "Incidents", icon: Shield },
-  { href: "/audit", label: "Audit", icon: ClipboardList },
-  { href: "/integrations", label: "Integrations", icon: Plug },
-  { href: "/webhooks", label: "Webhooks", icon: Webhook },
-  { href: "/system-health", label: "System health", icon: Activity },
-  { href: "/emergency", label: "Emergency", icon: ShieldAlert },
-  { href: "/docs", label: "Developers", icon: BookOpen },
-  { href: "/admin", label: "Administration", icon: Shield },
-];
 
 /** Routes that render without the shell. */
 const BARE_ROUTES = ["/login", "/register"];
@@ -113,7 +77,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           role={session.role}
           onSignOut={signOut}
         />
-        <main id="main-content" tabIndex={-1} className="flex-1 overflow-y-auto">
+        {/* `min-h-0` is required: a flex item's default `min-height: auto`
+            refuses to shrink below its content, so without it the page grows
+            past the viewport and the window itself never scrolls. */}
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           <div className="p-4 pb-0">
             <UndoBar />
           </div>
@@ -124,14 +95,52 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * The counts behind the Monitor group's badges.
+ *
+ * Read from the dashboard aggregate, which the shell already has a request for
+ * on most pages, so a badge can never disagree with the dashboard. A failed
+ * request leaves the count undefined and the badge is simply omitted: an unknown
+ * count is not zero, and showing "0" would be a confident wrong answer.
+ */
+function useNavCounts(): NavCounts {
+  const dashboard = useQuery<{
+    executions?: { running?: number };
+    alerts?: { critical?: number; warning?: number };
+    needs_attention?: unknown[];
+  }>("/dashboard");
+
+  if (dashboard.state !== "ready" || !dashboard.data) return {};
+
+  const running = dashboard.data.executions?.running;
+  const alerts = dashboard.data.alerts;
+  const critical = alerts?.critical ?? 0;
+  const warning = alerts?.warning ?? 0;
+
+  return {
+    running,
+    // Only badge Alerts when something needs a human, otherwise every tenant
+    // that is simply healthy shows a permanent red "0".
+    alerts: critical + warning > 0 ? critical + warning : undefined,
+    incidents: dashboard.data.needs_attention?.length
+      ? dashboard.data.needs_attention.length
+      : undefined,
+  };
+}
+
 function Sidebar({ pathname }: { pathname: string }) {
   const { sidebarCollapsed, toggleSidebar, recent, markVisited } = useShell();
+  const counts = useNavCounts();
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
 
+  const groups = buildNav(counts);
+
   // Record the visit so "recently visited" (UI.md §1) stays accurate.
-  const active = NAV.find((n) => isActive(n.href));
+  const active = groups
+    .flatMap((group) => group.items)
+    .find((n) => isActive(n.href));
   useEffect(() => {
     if (active) markVisited(active.href, active.label);
     // Only on a route change; re-running each render would loop.
@@ -142,7 +151,10 @@ function Sidebar({ pathname }: { pathname: string }) {
     <nav
       aria-label="Main"
       className={cn(
-        "hidden shrink-0 flex-col gap-1 border-r border-border p-3 transition-[width] md:flex",
+        // The navigation is taller than a short viewport, so it scrolls
+        // independently; `min-h-0` stops it being stretched by the shell
+        // instead of shrinking to fit.
+        "hidden min-h-0 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border p-3 transition-[width] md:flex",
         sidebarCollapsed ? "w-14" : "w-56",
       )}
     >
@@ -168,31 +180,78 @@ function Sidebar({ pathname }: { pathname: string }) {
         </button>
       </div>
 
-      {NAV.map((item) => {
-        const Icon = item.icon;
-        const current = isActive(item.href);
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            aria-current={current ? "page" : undefined}
-            title={sidebarCollapsed ? item.label : undefined}
+      {groups.map((group) => (
+        <div key={group.label} className="mb-1">
+          {/* The group labels are hidden when collapsed, but they are kept in
+              the accessibility tree so the grouping is still announced. */}
+          <p
             className={cn(
-              "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-              current
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+              "px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground",
+              sidebarCollapsed && "sr-only",
             )}
           >
-            <Icon className="size-4 shrink-0" aria-hidden />
-            {!sidebarCollapsed ? <span className="truncate">{item.label}</span> : null}
-          </Link>
-        );
-      })}
+            {group.label}
+          </p>
+          {group.items.map((item) => {
+            const Icon = item.icon;
+            const current = isActive(item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={current ? "page" : undefined}
+                title={sidebarCollapsed ? item.label : undefined}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                  current
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                )}
+              >
+                <Icon className="size-4 shrink-0" aria-hidden />
+                {!sidebarCollapsed ? <span className="truncate">{item.label}</span> : null}
+                {!sidebarCollapsed && item.count !== undefined ? (
+                  <span
+                    className={cn(
+                      "ml-auto rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground",
+                      item.tone === "bad" && "bg-red-500/15 text-red-600 dark:text-red-400",
+                      item.tone === "wait" &&
+                        "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+                    )}
+                  >
+                    {item.count}
+                  </span>
+                ) : null}
+              </Link>
+            );
+          })}
+        </div>
+      ))}
+
+      {/* Destinations that do not belong to a work group but are still global:
+          the assistant and the developer reference. */}
+      <div className="mt-auto border-t border-border pt-2">
+        <Link
+          href="/assistant"
+          title={sidebarCollapsed ? "Assistant" : undefined}
+          className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+        >
+          <Sparkles className="size-4 shrink-0" aria-hidden />
+          {!sidebarCollapsed ? <span className="truncate">Assistant</span> : null}
+        </Link>
+        <Link
+          href="/docs"
+          title={sidebarCollapsed ? "Developers" : undefined}
+          className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+        >
+          <BookOpen className="size-4 shrink-0" aria-hidden />
+          {!sidebarCollapsed ? <span className="truncate">Developers</span> : null}
+        </Link>
+      </div>
 
       {/* UI.md §1: recently visited items. */}
       {!sidebarCollapsed && recent.length > 1 ? (
-        <div className="mt-auto border-t border-border pt-3">
+        <div className="border-t border-border pt-2">
           <p className="px-2 pb-1 text-[11px] uppercase tracking-wide text-muted-foreground">
             Recent
           </p>
@@ -570,7 +629,7 @@ function CommandPaletteOverlay({ onClose }: { onClose: () => void }) {
           Go to
         </p>
         <ul className="max-h-48 overflow-y-auto">
-          {NAV.map((command) => {
+          {buildPaletteNav().map((command) => {
             const Icon = command.icon;
             return (
               <li key={command.href}>

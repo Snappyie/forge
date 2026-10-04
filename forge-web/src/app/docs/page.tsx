@@ -95,6 +95,7 @@ export default function DocsPage() {
           <TabsTrigger value="start">Getting started</TabsTrigger>
           <TabsTrigger value="concepts">Concepts</TabsTrigger>
           <TabsTrigger value="recipes">Recipes</TabsTrigger>
+          <TabsTrigger value="sdks">Worker SDKs</TabsTrigger>
           <TabsTrigger value="reference">API reference</TabsTrigger>
         </TabsList>
 
@@ -108,6 +109,10 @@ export default function DocsPage() {
 
         <TabsContent value="recipes" className="mt-4">
           <Recipes baseUrl={API_URL} />
+        </TabsContent>
+
+        <TabsContent value="sdks" className="mt-4">
+          <WorkerSdks />
         </TabsContent>
 
         <TabsContent value="reference" className="mt-4 flex flex-col gap-3">
@@ -485,6 +490,83 @@ openapi-python-client generate --path "${API_URL}/openapi.json"`,
           </CardHeader>
           <CardContent className="pt-0">
             <CopyBlock text={recipe.code.replaceAll("$BASE", baseUrl)} />
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function WorkerSdks() {
+  const sdks = [
+    {
+      language: "Python",
+      description: "A lightweight SDK with auto-heartbeating and declarative @worker.job() decorators.",
+      code: `from forge_sdk import ForgeWorker, JobContext
+
+worker = ForgeWorker(base_url="http://localhost:3000/api/v1", tenant_id="tenant", api_key="key")
+
+@worker.job("process-data")
+def handle_process(ctx: JobContext):
+    ctx.log("Processing...")
+    return {"status": "SUCCESS"}
+
+worker.start(queue="data-queue")`
+    },
+    {
+      language: "Node.js (TypeScript)",
+      description: "An Axios-based SDK for asynchronous execution.",
+      code: `import { ForgeWorker, JobContext } from '@forge/sdk';
+
+const worker = new ForgeWorker("http://localhost:3000/api/v1", "tenant", "key");
+
+worker.job("process-data", async (ctx: JobContext) => {
+    await ctx.log("Processing...");
+    return { status: "SUCCESS" };
+});
+
+worker.start("data-queue");`
+    },
+    {
+      language: "Go",
+      description: "A highly concurrent implementation using goroutines.",
+      code: `import "github.com/forge/sdk-go"
+
+worker := forge.NewWorker("http://localhost:3000/api/v1", "tenant", "key")
+
+worker.Register("process-data", func(ctx *forge.JobContext) (interface{}, error) {
+    ctx.Log("Processing...")
+    return map[string]string{"status": "SUCCESS"}, nil
+})
+
+worker.Start("data-queue", 2 * time.Second)`
+    },
+    {
+      language: "Java",
+      description: "A robust SDK leveraging Java 17 HttpClient and ExecutorService.",
+      code: `import io.forge.sdk.*;
+
+ForgeWorker worker = new ForgeWorker("http://localhost:3000/api/v1", "tenant", "key");
+
+worker.registerJob("process-data", ctx -> {
+    ctx.log("Processing...");
+    return Map.of("status", "SUCCESS");
+});
+
+worker.start("data-queue", 2000);`
+    }
+  ];
+
+  return (
+    <div className="flex flex-col gap-4">
+      {sdks.map((sdk) => (
+        <Card key={sdk.language}>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">{sdk.language}</CardTitle>
+            <p className="text-xs text-muted-foreground">{sdk.description}</p>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <CopyBlock text={sdk.code} />
           </CardContent>
         </Card>
       ))}

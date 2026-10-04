@@ -190,11 +190,35 @@ class ForgeClient:
             self._request("POST", "/jobs", body, idempotency_key=idempotency_key)
         )
 
-    def create_version(self, job_id: str, config: dict, concurrency: dict | None = None) -> Any:
+    def create_version(self, job_id: str, config: dict, concurrency: dict | None = None,
+                       retry: dict | None = None) -> Any:
+        """Creates a version.
+
+        `concurrency` and `retry` are the policies that shape how the job runs;
+        see the integration guide for the exact encodings, which the server
+        validates strictly.
+        """
         body: dict[str, Any] = {"config": config}
         if concurrency:
             body["concurrency_policy"] = concurrency
+        if retry:
+            body["retry_policy"] = retry
         return self._envelope(self._request("POST", f"/jobs/{job_id}/versions", body))
+
+    @staticmethod
+    def exponential_backoff(initial_secs: int, multiplier: int, max_secs: int) -> dict:
+        """Builds the backoff object the API expects.
+
+        Durations are ``{"secs": N, "nanos": 0}`` objects, not ISO-8601 strings,
+        and each strategy is a struct variant carrying its own fields.
+        """
+        return {
+            "Exponential": {
+                "initial_delay": {"secs": initial_secs, "nanos": 0},
+                "multiplier": multiplier,
+                "max_delay": {"secs": max_secs, "nanos": 0},
+            }
+        }
 
     def publish_version(self, job_id: str, version_id: str) -> Any:
         return self._envelope(
@@ -308,3 +332,150 @@ class ForgeClient:
 
     def export_jobs(self) -> Any:
         return self.get("/jobs/export")
+
+    # -- queues -----------------------------------------------------------
+
+    def create_queue(self, name: str, max_concurrency: int | None = None) -> Any:
+        body: dict[str, Any] = {"name": name}
+        if max_concurrency is not None:
+            body["max_concurrency"] = max_concurrency
+        return self._envelope(self._request("POST", "/queues", body))
+
+    def set_queue_paused(self, queue_id: str, paused: bool) -> Any:
+        """Pausing stops new dispatch without cancelling what a queue holds."""
+        return self._envelope(
+            self._request("POST", f"/queues/{queue_id}/{'pause' if paused else 'resume'}", {})
+        )
+
+    # -- workers ----------------------------------------------------------
+
+    def register_worker(self, hostname: str, capabilities: list[str] | None = None,
+                        labels: dict | None = None) -> Any:
+        return self._envelope(
+            self._request(
+                "POST", "/workers/register",
+                {"hostname": hostname, "version": "demo-1.0",
+                 "capabilities": capabilities or [], "labels": labels or {}},
+            )
+        )
+
+    def worker_heartbeat(self, worker_id: str) -> Any:
+        return self._envelope(
+            self._request("POST", f"/workers/{worker_id}/heartbeat", {})
+        )
+
+    def drain_worker(self, worker_id: str) -> Any:
+        return self._envelope(
+            self._request("POST", f"/workers/{worker_id}/drain", {})
+        )
+
+    # -- incidents --------------------------------------------------------
+
+    def list_incidents(self) -> list[Any]:
+        return self.get("/incidents") or []
+
+    def incident_detail(self, incident_id: str) -> Any:
+        """One incident with the alerts folded into it and its timeline."""
+        return self.get(f"/incidents/{incident_id}")
+
+    # -- notifications ---------------------------------------------------
+
+    def list_notifications(self) -> dict[str, Any]:
+        """Notifications plus the unread count the header badge reads."""
+        return self._request("GET", "/notifications")
+
+    def mark_notifications_read(self) -> Any:
+        return self._envelope(self._request("POST", "/notifications/read", {}))
+
+    def update_notification_preferences(self, kinds: list[str],
+                                        channels: dict[str, bool]) -> Any:
+        return self._envelope(
+            self._request(
+                "POST", "/notification-preferences/update",
+                {"enabled_kinds": kinds, "channels": channels},
+            )
+        )
+
+    # -- saved views ------------------------------------------------------
+
+    def save_view(self, name: str, filters: dict, resource: str = "JOBS",
+                  shared: bool = False) -> Any:
+        return self._envelope(
+            self._request(
+                "POST", "/saved-views",
+                {"resource": resource, "name": name, "filters": filters, "shared": shared},
+            )
+        )
+
+    def list_saved_views(self, resource: str = "JOBS") -> list[Any]:
+        return self.get("/saved-views", resource=resource) or []
+
+    def delete_saved_view(self, view_id: str) -> Any:
+        return self._envelope(self._request("DELETE", f"/saved-views/{view_id}"))
+
+    # -- integrations -----------------------------------------------------
+
+    def list_integrations(self) -> dict[str, Any]:
+        """Configured integrations plus which of the supported kinds are absent."""
+        return self._request("GET", "/integrations")
+
+    def create_integration(self, kind: str, name: str) -> Any:
+        return self._envelope(
+            self._request("POST", "/integrations", {"kind": kind, "name": name})
+        )
+
+    def test_integration(self, integration_id: str) -> Any:
+        """Inspects configuration; reports honestly that no dial was attempted."""
+        return self._envelope(
+            self._request("POST", f"/integrations/{integration_id}/test", {})
+        )
+
+    # -- API keys ---------------------------------------------------------
+
+    def create_api_key(self, name: str) -> Any:
+        """Returns the raw key once; it is hashed and never retrievable again."""
+        return self._envelope(self._request("POST", "/api-keys", {"name": name}))
+
+    def rotate_api_key(self, key_id: str) -> Any:
+        return self._envelope(self._request("POST", f"/api-keys/{key_id}/rotate", {}))
+
+    def revoke_api_key(self, key_id: str) -> Any:
+        return self._envelope(self._request("POST", f"/api-keys/{key_id}/revoke", {}))
+
+    # -- users and audit --------------------------------------------------
+
+    def list_users(self) -> list[Any]:
+        return self.get("/users") or []
+
+    def create_user(self, email: str, password: str, role: str) -> Any:
+        return self._envelope(
+            self._request(
+                "POST", "/users",
+                {"email": email, "password": password, "role": role},
+            )
+        )
+
+    def list_audit_events(self, limit: int = 50) -> list[Any]:
+        return self.get("/audit-events", limit=limit) or []
+
+    # -- admin and discovery ---------------------------------------------
+
+    def purge_idempotency(self) -> Any:
+        return self._envelope(
+            self._request("POST", "/admin/purge-idempotency", {})
+        )
+
+    def openapi_document(self) -> Any:
+        """The contract itself; no token required."""
+        return self._request("GET", "/openapi.json", authenticated=False)
+
+    # -- operational ------------------------------------------------------
+
+    def emergency_state(self) -> Any:
+        return self.get("/emergency")
+
+    def cancel_all_running(self, reason: str) -> Any:
+        """Destructive, so it demands a reason and records why."""
+        return self._envelope(
+            self._request("POST", "/emergency/cancel-running", {"reason": reason})
+        )

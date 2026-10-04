@@ -62,8 +62,8 @@ pub fn create_router(
     // rate limiting to actually apply. The values come from the environment so
     // a deployment behind a shared proxy — where every client shares one source
     // IP — can be tuned without a rebuild.
-    let per_second = env_u64("FORGE_RATE_LIMIT_PER_SECOND", 100) as u64;
-    let burst = env_u64("FORGE_RATE_LIMIT_BURST", 200) as u32;
+    let per_second = env_u64("FORGE_RATE_LIMIT_PER_SECOND", 1000) as u64;
+    let burst = env_u64("FORGE_RATE_LIMIT_BURST", 5000) as u32;
 
     let governor_conf = Box::new(
         GovernorConfigBuilder::default()
@@ -513,6 +513,9 @@ pub fn create_router(
                     },
                 ))
                 .layer(cors)
+                .layer(GovernorLayer {
+                    config: Arc::new(*governor_conf),
+                })
                 // `FORGE_MAX_REQUEST_BODY_BYTES` was documented with a 1 MB
                 // default but never applied, so the effective limit was
                 // whatever axum happens to default to.
@@ -520,9 +523,6 @@ pub fn create_router(
                     state.max_request_body_bytes,
                 )),
         )
-        .layer(GovernorLayer {
-            config: Arc::new(*governor_conf),
-        })
         .with_state(state)
 }
 

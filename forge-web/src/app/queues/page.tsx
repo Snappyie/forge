@@ -26,6 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import Link from "next/link";
 
 export default function QueuesPage() {
   const { session } = useAuth();
@@ -118,6 +119,12 @@ export default function QueuesPage() {
           loadingLabel="Loading queues"
           emptyTitle="No queues yet"
           emptyDescription="A queue bounds how much work runs at once."
+
+          emptyAction={
+            <Button size="sm" variant="outline" render={<Link href="/docs" />}>
+              About queues
+            </Button>
+          }
         >
           <Table>
             <TableHeader>

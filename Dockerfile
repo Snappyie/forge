@@ -4,7 +4,7 @@
 # the binaries and the shared libraries they need. Migrations are embedded in
 # the binary (via sqlx::migrate!), so no .sql files are needed at runtime.
 
-FROM rust:1.92-slim AS builder
+FROM rust:1.94-slim AS builder
 
 # `openssl-sys` (via sqlx's TLS backend) compiles vendored OpenSSL when no system
 # copy is present; the build-essential and pkg-config packages let it link
@@ -23,7 +23,7 @@ COPY forge-web ./forge-web
 
 # Build the server, worker-capable CLI, and the tooling the scripts call.
 RUN cargo build --release --bin forge-server --bin forge && \
-    strip target/release/forge-server target/release/forge || true
+    strip target/release/forge-server target/release/forge
 
 FROM debian:bookworm-slim AS runtime
 

@@ -79,6 +79,7 @@ impl std::str::FromStr for ExecutionType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
 pub struct ResourceRequirements {
     pub cpu_units: Option<u32>,
     pub memory_mb: Option<u32>,

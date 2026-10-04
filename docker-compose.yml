@@ -55,5 +55,17 @@ services:
       - "3001:3000"
     restart: unless-stopped
 
+  ecommerce-worker:
+    build:
+      context: .
+      dockerfile: examples/ecommerce-worker/Dockerfile
+    depends_on:
+      - server
+    environment:
+      FORGE_API_URL: http://server:3000/api/v1
+      FORGE_TENANT_ID: ${FORGE_TENANT_ID:-default-tenant}
+      FORGE_API_KEY: ${FORGE_API_KEY:-dummy-key}
+    restart: unless-stopped
+
 volumes:
   postgres_data:

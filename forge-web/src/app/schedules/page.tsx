@@ -37,6 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import Link from "next/link";
 
 export default function SchedulesPage() {
   const { session } = useAuth();
@@ -72,6 +73,12 @@ export default function SchedulesPage() {
           loadingLabel="Loading schedules"
           emptyTitle="No schedules yet"
           emptyDescription="Create one on a job to run it on a calendar."
+
+          emptyAction={
+            <Button size="sm" variant="outline" render={<Link href="/jobs" />}>
+              Go to jobs
+            </Button>
+          }
         >
           <Table>
             <TableHeader>

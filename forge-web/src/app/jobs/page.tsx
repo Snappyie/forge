@@ -20,10 +20,6 @@ import { ImportExport } from "@/components/ui/import-export";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
 } from "@/components/ui/pagination";
 import { compare, useTablePrefs } from "@/lib/tablePrefs";
 import {
@@ -72,6 +68,9 @@ export default function JobsPage() {
 
   const [pageSize, setPageSize] = useState(25);
   const query = usePaginatedQuery<Job>("/jobs", pageSize);
+  // Controlled so the empty state can offer "New job" itself, rather than only
+  // describing what the user could do.
+  const [createOpen, setCreateOpen] = useState(false);
   const jobs = useMemo(() => {
     const rows = query.data ?? [];
     return rows.filter((job) => {
@@ -116,7 +115,11 @@ export default function JobsPage() {
             Refresh
           </Button>
           {roleCan(session?.role, "jobs:write") ? (
-            <CreateJobDialog onCreated={query.reload} />
+            <CreateJobDialog
+              onCreated={query.reload}
+              open={createOpen}
+              onOpenChange={setCreateOpen}
+            />
           ) : null}
         </div>
       </header>
@@ -227,6 +230,14 @@ export default function JobsPage() {
             filtering
               ? "Try a different search or clear the status filter."
               : "Create a job to describe the work this tenant runs."
+          }
+          emptyAction={
+            filtering ? null : (
+              <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
+                <Plus className="size-3.5" aria-hidden />
+                New job
+              </Button>
+            )
           }
         >
           <Table>
@@ -406,17 +417,52 @@ function RowActions({
   );
 }
 
-function CreateJobDialog({ onCreated }: { onCreated: () => void }) {
-  const [open, setOpen] = useState(false);
+function CreateJobDialog({
+  onCreated,
+  open: controlledOpen,
+  onOpenChange,
+}: {
+  onCreated: () => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  // Controlled when a parent supplies the state (so the empty state can open
+  // this), otherwise the trigger manages it internally.
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    if (!isControlled) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  };
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
   const [priority, setPriority] = useState("NORMAL");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Checked while typing so the reason a field is rejected appears where the
+  // user is looking, rather than only as a native tooltip on submit.
+  const trimmedName = name.trim();
+  const trimmedKey = key.trim();
+  const nameProblem =
+    trimmedName.length === 0
+      ? "Give the job a name."
+      : trimmedName.length > 200
+        ? "Keep the name under 200 characters."
+        : null;
+  const keyProblem =
+    trimmedKey.length > 0 && !/^[a-zA-Z0-9._-]+$/.test(trimmedKey)
+      ? "Use letters, digits, dots, dashes, or underscores."
+      : null;
+  const formProblem = nameProblem ?? keyProblem;
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
+    // Guard here as well as on the button, so the form cannot be submitted by
+    // pressing Enter with an invalid field.
+    if (formProblem) return;
     setBusy(true);
     try {
       // A client-generated idempotency key means a retried submit creates one
@@ -467,7 +513,14 @@ function CreateJobDialog({ onCreated }: { onCreated: () => void }) {
               onChange={(e) => setName(e.target.value)}
               required
               autoFocus
+              aria-invalid={nameProblem ? true : undefined}
+              aria-describedby={nameProblem ? "job-name-problem" : undefined}
             />
+            {nameProblem && name.length > 0 ? (
+              <p id="job-name-problem" className="text-xs text-destructive">
+                {nameProblem}
+              </p>
+            ) : null}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -477,8 +530,18 @@ function CreateJobDialog({ onCreated }: { onCreated: () => void }) {
               value={key}
               onChange={(e) => setKey(e.target.value)}
               placeholder="stable-identifier"
+              aria-invalid={keyProblem ? true : undefined}
+              aria-describedby={keyProblem ? "job-key-problem" : undefined}
             />
-            <p className="text-xs text-muted-foreground">Unique within this tenant.</p>
+            {keyProblem ? (
+              <p id="job-key-problem" className="text-xs text-destructive">
+                {keyProblem}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Unique within this tenant.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -507,7 +570,7 @@ function CreateJobDialog({ onCreated }: { onCreated: () => void }) {
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button type="submit" disabled={busy || formProblem !== null}>
               {busy ? "Creating…" : "Create"}
             </Button>
           </DialogFooter>

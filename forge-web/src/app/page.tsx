@@ -18,12 +18,10 @@ import {
   Database,
   Gauge,
   Layers,
-  ListChecks,
   PauseCircle,
   RefreshCw,
   Send,
   Users,
-  Wrench,
 } from "lucide-react";
 
 import { useQuery } from "@/lib/useQuery";
@@ -32,6 +30,7 @@ import { AsyncBoundary, EmptyState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { GettingStarted } from "@/components/ui/getting-started";
 import { cn } from "cn";
 import { DashboardWidgetPicker, useWidgetVisibility } from "@/components/ui/dashboard-widgets";
 
@@ -117,7 +116,13 @@ export default function DashboardPage() {
   );
 }
 
-function DashboardBody({ data, show }: { data: Dashboard; show: (key: string) => boolean }) {
+function DashboardBody({
+  data,
+  show,
+}: {
+  data: Dashboard;
+  show: (key: string) => boolean;
+}) {
   const totalExecutions =
     data.executions.queued +
     data.executions.running +
@@ -153,6 +158,12 @@ function DashboardBody({ data, show }: { data: Dashboard; show: (key: string) =>
           </Link>
         </div>
       ) : null}
+
+      {/* A tenant that has never run anything gets the ordered checklist rather
+          than a wall of zeroes. It decides for itself whether to render, so
+          there is no `isNewTenant` guess here — a hand-maintained condition can
+          disagree with the data and strand a working tenant on a setup screen. */}
+      <GettingStarted />
 
       {/* Executive status. Every number links to the filtered list behind it. */}
       <section aria-label="Executive status">
@@ -354,6 +365,11 @@ function DashboardBody({ data, show }: { data: Dashboard; show: (key: string) =>
               <EmptyState
                 title="Nothing scheduled"
                 description="Create a schedule and it will appear here."
+                action={
+                  <Button size="sm" variant="outline" render={<Link href="/schedules" />}>
+                    Go to schedules
+                  </Button>
+                }
               />
             ) : (
               <ul className="flex flex-col divide-y divide-border/50">
@@ -422,6 +438,11 @@ function DashboardBody({ data, show }: { data: Dashboard; show: (key: string) =>
             <EmptyState
               title="No queues"
               description="Queues appear here once they are defined."
+              action={
+                <Button size="sm" variant="outline" render={<Link href="/queues" />}>
+                  Go to queues
+                </Button>
+              }
             />
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

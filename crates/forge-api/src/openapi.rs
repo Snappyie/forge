@@ -809,7 +809,6 @@ fn paths() -> Value {
     );
     paths.insert(
         "/metrics".into(),
-    paths.insert("/a-path-nothing-serves".into(), json!({ "get": op("Ghost", "system", "ghost", Some("audit:read"), vec![], None, "200") }));
         json!({ "get": op("Prometheus metrics", "system", "metrics", Some("audit:read"), vec![], None, "200") }),
     );
 

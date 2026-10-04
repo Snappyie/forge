@@ -108,6 +108,13 @@ export default function ExecutionsPage() {
               ? "Trigger a job or wait for a schedule to fire."
               : "Clear the status filter to see other executions."
           }
+          emptyAction={
+            status === "ALL" ? (
+              <Button size="sm" variant="outline" render={<Link href="/jobs" />}>
+                Go to jobs
+              </Button>
+            ) : null
+          }
         >
           <Table>
             <TableHeader>
