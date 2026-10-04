@@ -87,11 +87,20 @@ export default function ExecutionDetailPage({
   const startedAt = record?.started_at ?? null;
   const endedAt = record?.ended_at ?? null;
 
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    if (!endedAt) {
+      const interval = setInterval(() => setNow(Date.now()), 1000);
+      return () => clearInterval(interval);
+    }
+  }, [endedAt]);
+
   const durationMs = useMemo(() => {
     if (!startedAt) return null;
-    const end = endedAt ? Date.parse(endedAt) : Date.now();
+    const end = endedAt ? Date.parse(endedAt) : (now ?? Date.parse(startedAt));
     return Math.max(0, end - Date.parse(startedAt));
-  }, [startedAt, endedAt]);
+  }, [startedAt, endedAt, now]);
 
   async function cancel() {
     setBusy(true);

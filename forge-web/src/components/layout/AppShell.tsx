@@ -156,7 +156,7 @@ function Sidebar({ pathname }: { pathname: string }) {
   useEffect(() => {
     if (active) markVisited(active.href, active.label);
     // Only on a route change; re-running each render would loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [pathname]);
 
   return (

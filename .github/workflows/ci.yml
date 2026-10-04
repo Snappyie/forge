@@ -63,8 +63,6 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
     - name: Check dependency licences
       uses: EmbarkStudios/cargo-deny-action@v2
-      with:
-        manifest-path: deny.toml
 
   web:
     name: Web console

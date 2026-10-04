@@ -72,7 +72,7 @@ export function useList<T>(
     })();
 
     return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [path, nonce, ...deps]);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
@@ -137,7 +137,7 @@ export function useQuery<T>(
     })();
 
     return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [path, nonce, ...deps]);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
