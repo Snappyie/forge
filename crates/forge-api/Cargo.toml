@@ -22,6 +22,8 @@ tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "cors", "request-id"] }
 
 forge-domain = { path = "../forge-domain" }
+# OIDC discovery and the token exchange are HTTP calls to the provider.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 forge-auth = { path = "../forge-auth" }
 forge-config = { path = "../forge-config" }
 forge-storage = { path = "../forge-storage" }

@@ -465,6 +465,106 @@ Defaulting an empty list to "everything" is the failure this avoids: an account
 created without scopes would otherwise be maximally privileged, which is the
 opposite of the intent.
 
+## ADR-0027 The OIDC client secret is encrypted, not hashed
+
+Status: Accepted.
+
+Amends: 08-storage-specification.md §8.2; 11-security.md §11.
+
+Decision:
+`identity_providers.client_secret_ciphertext` holds an AES-256-GCM
+ciphertext. The key is derived from the existing
+`FORGE_API_KEY_HASHING_SECRET` with SHA-256, and a fresh 96-bit nonce is drawn
+per encryption. The plaintext is never stored and never returned by any
+endpoint.
+
+Reason:
+The first implementation hashed the secret, mirroring the `api_keys` pattern —
+which is correct for a credential the server only ever *compares*. An OIDC
+client secret is the opposite case: the server must present it verbatim to the
+provider's token endpoint on every login, so a one-way hash makes the flow
+impossible while still leaving the column populated. A plaintext column would
+put a credential in every database dump, so the value is encrypted instead.
+
+GCM rather than a bare cipher because the plaintext is a credential that goes
+straight into an outbound HTTPS request: a tampered ciphertext must fail to
+decrypt rather than decrypt into a different secret. `forge-auth/src/crypto.rs`
+tests that a modified nonce and a modified ciphertext are both rejected.
+
+Reusing the API-key pepper avoids introducing a second secret that an operator
+has to remember to configure, and matches how the deployment already treats
+that value.
+
+## ADR-0028 An OIDC callback can only be reached with a server-issued state token
+
+Status: Accepted.
+
+Amends: ADR-0023; ADR-0024; 05-api-specification.md.
+
+Decision:
+`GET /auth/oidc/callback` accepts `code` and `state`. The `state` token is
+consumed by a single `DELETE ... RETURNING` on `oidc_pending_logins`, which is
+what makes it both validated and single-use. The callback is `GET` only. The
+identity comes exclusively from the JWKS-verified ID token. An unlinked
+identity may join an existing account whose email matches the verified claim
+exactly, and may never create one.
+
+Reason:
+The first implementation of these endpoints issued a session from a
+`POST /auth/oidc/callback` body, reading `subject` and `email` straight out of
+it. Verified live against a running server: an unauthenticated request minted a
+working session (`GET /jobs` → 200), and posting an existing administrator's
+email returned **that account's `user_id` with role `ADMIN`** — account takeover
+from an anonymous POST. It also contradicted three committed decisions:
+`state` was generated and never checked, so it was not a CSRF defence; the PKCE
+verifier was returned to the browser, which is the secret PKCE protects; and no
+ID token was ever verified, so the committed `verify_id_token` was dead code.
+
+The `DELETE ... RETURNING` matters specifically: a token that merely persisted
+would let a second callback replay it, so a stolen login URL would not be
+single-use.
+
+An unlinked identity may not create an account, because with open registration
+that is indistinguishable from self-service signup — and an enterprise
+deployment should be inviting users, not accepting whatever claims arrive. The
+email must match the *verified* claim exactly; a matching address is a claim to
+be confirmed by the identity link, never proof by itself.
+
+The integration test that previously certified the bypass as correct is
+replaced with tests of these properties, because a test asserting that an
+unauthenticated POST returns a session is worse than no test: it tells the next
+reader that SSO is verified.
+
+## ADR-0029 SSO identity providers are global; service accounts are tenant-scoped
+
+Status: Accepted.
+
+Amends: 11-security.md §11.4.
+
+Decision:
+`identity_providers` has no `tenant_id` and is administered with
+`users:write`. `service_accounts` is tenant-scoped, protected by the same
+row-level-security policy as every other tenant table, and administered with
+`users:write` inside its own tenant.
+
+Reason:
+An identity provider is a property of the *deployment*, not of a tenant: the
+same Okta tenant signs in to several Forge tenants, and making the row
+tenant-scoped would mean registering the same issuer once per tenant and
+leaving the uniqueness of `issuer` unenforced across them.
+
+That is exactly why provider administration needs a stronger gate than a
+tenant-scoped permission, and why the audit trail on it matters more than for an
+ordinary CRUD endpoint — deleting the deployment's SSO provider locks every
+tenant out at once.
+
+Service accounts are the opposite: they belong to one tenant's automation and
+must never be reachable from another.
+
+Migration 023 closes the gap migration 021 opened — `service_accounts` was
+created after migration 020 had already built its policy list, so it shipped
+tenant-scoped and unprotected, and the isolation guard test did not name it.
+
 ## Future ADR candidates
 
 - Queue implementation.

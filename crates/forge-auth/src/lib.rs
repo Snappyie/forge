@@ -9,6 +9,7 @@
 //! * OIDC single sign-on ([`oidc`]), which `redesign.md` §G requires and which
 //!   the `user_identities` table has been carrying unused since migration 005.
 
+pub mod crypto;
 pub mod oidc;
 
 use argon2::password_hash::{

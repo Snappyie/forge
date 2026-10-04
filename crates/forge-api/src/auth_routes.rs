@@ -1,11 +1,12 @@
 //! Authentication endpoints (spec 05 endpoints 57–59) and user administration
 //! (spec 05 endpoints 45–48).
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use chrono::Utc;
 use uuid::Uuid;
 
 use forge_auth::Role;
@@ -1013,18 +1014,23 @@ pub async fn create_oidc_provider(
     let scopes = body
         .scopes
         .unwrap_or_else(|| vec!["openid".into(), "profile".into(), "email".into()]);
-    let client_secret_encrypted =
-        forge_auth::hash_api_key(&state.api_key_pepper, &body.client_secret).into_bytes();
+    // Encrypted, not hashed. The server must present this secret to the
+    // provider's token endpoint on every login, so a one-way hash makes the
+    // flow impossible; plaintext would put a credential in a database dump.
+    let client_secret_ciphertext = forge_auth::crypto::encrypt(
+        body.client_secret.trim(),
+        &state.api_key_pepper,
+    )?;
 
     sqlx::query(
-        "INSERT INTO identity_providers (id, name, issuer, client_id, client_secret_encrypted, scopes, allowed_email_domains)
+        "INSERT INTO identity_providers (id, name, issuer, client_id, client_secret_ciphertext, scopes, allowed_email_domains)
          VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )
     .bind(id)
     .bind(name)
     .bind(body.issuer.trim())
     .bind(body.client_id.trim())
-    .bind(&client_secret_encrypted)
+    .bind(&client_secret_ciphertext)
     .bind(&scopes)
     .bind(&body.allowed_email_domains)
     .execute(&state.pool)
@@ -1087,8 +1093,8 @@ pub async fn get_oidc_login_url(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let row: Option<(Uuid, String, String, String, Vec<String>)> = sqlx::query_as(
-        "SELECT id, name, issuer, client_id, scopes
+    let row: Option<OidcLoginRow> = sqlx::query_as(
+        "SELECT id, name, issuer, client_id, scopes, client_secret_ciphertext
          FROM identity_providers WHERE name = $1 AND enabled = TRUE",
     )
     .bind(&name)
@@ -1096,162 +1102,324 @@ pub async fn get_oidc_login_url(
     .await
     .map_err(ApiError::from)?;
 
-    let Some((_id, provider_name, issuer, client_id, scopes)) = row else {
+    let Some(row) = row else {
         return Err(ApiError::not_found("identity provider"));
     };
+    let client_secret = forge_auth::crypto::decrypt(&row.secret, &state.api_key_pepper)?;
+
+    // Endpoints come from the provider's own discovery document, not from
+    // string concatenation. The previous version built
+    // `{issuer}/oauth2/v1/authorize`, which is Google's layout and wrong for
+    // every other provider — and a wrong endpoint means either a broken login or,
+    // worse, a redirect somewhere an attacker chose.
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| ApiError::unavailable(format!("cannot build an HTTP client: {e}")))?;
+
+    let metadata =
+        forge_auth::oidc::ProviderMetadata::discover(&http, row.issuer.trim_end_matches('/')).await?;
 
     let verifier = forge_auth::oidc::PkceVerifier::generate();
-    let challenge = verifier.challenge();
     let state_token = forge_auth::oidc::StateToken::generate();
 
-    let auth_endpoint = format!("{}/oauth2/v1/authorize", issuer.trim_end_matches('/'));
     let redirect_uri = format!(
         "{}/auth/oidc/callback",
         state.base_url.trim_end_matches('/')
     );
-    let scopes_param = scopes.join("%20");
-    let auth_url = format!(
-        "{auth_endpoint}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scopes_param}&state={}&code_challenge={}&code_challenge_method=S256",
-        state_token.0, challenge.challenge
-    );
+
+    let provider = forge_auth::oidc::OidcProvider {
+        issuer: row.issuer.clone(),
+        client_id: row.client_id.clone(),
+        client_secret,
+        metadata,
+        scopes: row.scopes.clone(),
+    };
+    let auth_url =
+        provider.authorization_url(&redirect_uri, &state_token.0, &verifier.challenge())?;
+
+    /*
+     * The state token and the PKCE verifier are stored server-side and keyed by
+     * the state token, with a short expiry.
+     *
+     * Returning the verifier to the browser (as the previous version did) hands
+     * the attacker the very secret PKCE exists to protect, and a `state` that
+     * is never checked is not a CSRF defence at all — it is a parameter.
+     */
+    let record = PendingOidcLogin {
+        provider_name: row.name.clone(),
+        issuer: row.issuer.clone(),
+        client_id: row.client_id.clone(),
+        code_verifier: verifier.verifier.clone(),
+        redirect_uri: redirect_uri.clone(),
+        expires_at: Utc::now() + chrono::Duration::minutes(10),
+    };
+    store_pending_login(&state, &state_token.0, &record).await?;
 
     Ok(Json(ApiResponse::new(
         json!({
-            "provider": provider_name,
-            "authorization_url": auth_url.to_string(),
+            "provider": row.name,
+            "authorization_url": auth_url,
+            // Echoed so the browser can send it back; the value is checked
+            // against the stored record on the callback.
             "state": state_token.0,
-            "code_verifier": verifier.verifier,
         }),
         Uuid::new_v4().to_string(),
     )))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct OidcCallbackRequest {
-    pub provider_name: String,
-    pub code: String,
-    #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub redirect_uri: Option<String>,
-    #[serde(default)]
-    pub code_verifier: Option<String>,
-}
-
+/// A configured provider, as the login-initiation handler needs it.
 #[derive(sqlx::FromRow)]
-struct OidcProviderCallbackRow {
+struct OidcLoginRow {
     #[allow(dead_code)]
     id: Uuid,
     name: String,
     issuer: String,
-    #[allow(dead_code)]
     client_id: String,
-    allowed_email_domains: Option<Vec<String>>,
+    scopes: Vec<String>,
+    secret: Vec<u8>,
 }
 
-/// `POST /auth/oidc/callback` — redeem SSO code and link or provision user account.
+/// A login that has been started but not yet completed.
+///
+/// Server-side only: both fields here are secrets that must never reach the
+/// browser.
+/// `FromRow` because the callback reads it back with a `DELETE ... RETURNING`,
+/// which is what makes the state token single-use.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
+struct PendingOidcLogin {
+    provider_name: String,
+    issuer: String,
+    client_id: String,
+    code_verifier: String,
+    redirect_uri: String,
+    #[allow(dead_code)]
+    expires_at: chrono::DateTime<Utc>,
+}
+
+/// Stores a pending login for the length of one authorization round trip.
+async fn store_pending_login(
+    state: &AppState,
+    state_token: &str,
+    record: &PendingOidcLogin,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO oidc_pending_logins
+             (state_token, provider_name, issuer, client_id, code_verifier, redirect_uri, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(state_token)
+    .bind(&record.provider_name)
+    .bind(&record.issuer)
+    .bind(&record.client_id)
+    .bind(&record.code_verifier)
+    .bind(&record.redirect_uri)
+    .bind(record.expires_at)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+    Ok(())
+}
+
+/// `GET /auth/oidc/callback` — the identity provider redirects the browser here.
+///
+/// A `GET`, because that is how an OIDC redirect arrives; the previous version
+/// registered only `POST`, so the SSO button returned 405 and could never
+/// complete.
+#[derive(Debug, Deserialize)]
+pub struct OidcCallbackParams {
+    pub code: String,
+    pub state: String,
+    /// Present when the provider reports an error instead of a code.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 pub async fn oidc_callback(
     State(state): State<AppState>,
-    Json(body): Json<OidcCallbackRequest>,
+    Query(params): Query<OidcCallbackParams>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let row: Option<OidcProviderCallbackRow> = sqlx::query_as(
-        "SELECT id, name, issuer, client_id, allowed_email_domains
-         FROM identity_providers WHERE name = $1 AND enabled = TRUE",
-    )
-    .bind(&body.provider_name)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(ApiError::from)?;
-
-    let Some(prov) = row else {
-        return Err(ApiError::not_found("identity provider"));
-    };
-
-    let provider_name = prov.name;
-    let issuer = prov.issuer;
-    let allowed_domains = prov.allowed_email_domains;
-
-    let subject = body.subject.unwrap_or_else(|| body.code.clone());
-    let email = body
-        .email
-        .unwrap_or_else(|| format!("{subject}@{provider_name}.local"));
-
-    // Enforce email domain restriction if configured
-    if let Some(domains) = &allowed_domains {
-        if !forge_auth::oidc::may_provision(domains, Some(&email)) {
-            return Err(ApiError::forbidden(
-                "email domain not permitted by this identity provider",
-            ));
-        }
+    if let Some(error) = params.error.as_deref() {
+        return Err(ApiError::unauthenticated(format!(
+            "the identity provider refused the login ({error})"
+        )));
     }
 
-    // 1. Check if identity already linked in user_identities
-    let linked: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT user_id FROM user_identities
-         WHERE issuer = $1 AND provider = $2 AND provider_subject = $3",
+    /*
+     * Consume the state token.
+     *
+     * This is the CSRF defence and it is only effective because the row is
+     * *deleted* on use: a token that survived would let a second callback
+     * replay it. An unknown, already-used or expired token is refused here,
+     * before any network call.
+     */
+    let pending: Option<PendingOidcLogin> = sqlx::query_as(
+        "DELETE FROM oidc_pending_logins
+          WHERE state_token = $1 AND expires_at > NOW()
+          RETURNING provider_name, issuer, client_id, code_verifier, redirect_uri, expires_at",
     )
-    .bind(&issuer)
-    .bind(&provider_name)
-    .bind(&subject)
+    .bind(&params.state)
     .fetch_optional(&state.pool)
     .await
     .map_err(ApiError::from)?;
 
-    let user_id = if let Some((uid,)) = linked {
-        uid
-    } else {
-        // Find existing user by email or create new user
-        let existing_user: Option<(Uuid,)> =
-            sqlx::query_as("SELECT id FROM users WHERE email = $1")
-                .bind(&email)
-                .fetch_optional(&state.pool)
-                .await
-                .map_err(ApiError::from)?;
-
-        let uid = match existing_user {
-            Some((uid,)) => uid,
-            None => {
-                let new_uid = Uuid::new_v4();
-                let dummy_hash = forge_auth::hash_password(&Uuid::new_v4().to_string())
-                    .map_err(ApiError::from)?;
-                sqlx::query(
-                    "INSERT INTO users (id, email, password_hash, display_name)
-                     VALUES ($1, $2, $3, $4)",
-                )
-                .bind(new_uid)
-                .bind(&email)
-                .bind(&dummy_hash)
-                .bind(body.display_name.as_deref().unwrap_or(&email))
-                .execute(&state.pool)
-                .await
-                .map_err(ApiError::from)?;
-                new_uid
-            }
-        };
-
-        // Link identity in user_identities
-        sqlx::query(
-            "INSERT INTO user_identities (id, user_id, provider, provider_subject, issuer)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (issuer, provider, provider_subject) DO NOTHING",
-        )
-        .bind(Uuid::new_v4())
-        .bind(uid)
-        .bind(&provider_name)
-        .bind(&subject)
-        .bind(&issuer)
-        .execute(&state.pool)
-        .await
-        .map_err(ApiError::from)?;
-
-        uid
+    let Some(pending) = pending else {
+        // Deliberately vague: distinguishing "unknown" from "expired" from
+        // "already used" tells an attacker how far a guess got.
+        return Err(ApiError::unauthenticated(
+            "this sign-in link has expired or was already used. Start again.",
+        ));
     };
 
-    // Find user's tenant membership or assign default
+    let secret: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT client_secret_ciphertext FROM identity_providers
+          WHERE name = $1 AND enabled = TRUE",
+    )
+    .bind(&pending.provider_name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let Some(secret) = secret else {
+        return Err(ApiError::unavailable(
+            "this identity provider is no longer configured.",
+        ));
+    };
+    let client_secret = forge_auth::crypto::decrypt(&secret, &state.api_key_pepper)?;
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| ApiError::unavailable(format!("cannot build an HTTP client: {e}")))?;
+
+    let metadata = forge_auth::oidc::ProviderMetadata::discover(
+        &http,
+        pending.issuer.trim_end_matches('/'),
+    )
+    .await?;
+
+    let provider = forge_auth::oidc::OidcProvider {
+        issuer: pending.issuer.clone(),
+        client_id: pending.client_id.clone(),
+        client_secret,
+        metadata: metadata.clone(),
+        scopes: vec!["openid".into(), "profile".into(), "email".into()],
+    };
+
+    // Redeem the code with the stored verifier. Without this the code is never
+    // exchanged and nothing has been proven about who the caller is.
+    let tokens = provider
+        .exchange_code(
+            &http,
+            &pending.redirect_uri,
+            &params.code,
+            &forge_auth::oidc::PkceVerifier {
+                verifier: pending.code_verifier.clone(),
+            },
+        )
+        .await?;
+
+    /*
+     * The identity comes from the *verified* ID token and nowhere else.
+     *
+     * The previous version read `subject` and `email` straight out of the
+     * request body, so an unauthenticated caller could name any identity — and
+     * any existing user's email — and be handed that account's session.
+     */
+    let verified = forge_auth::oidc::verify_id_token(
+        &http,
+        &metadata,
+        &tokens.id_token,
+        &pending.client_id,
+    )
+    .await?;
+
+    let allowed_domains: Option<Vec<String>> = sqlx::query_scalar(
+        "SELECT allowed_email_domains FROM identity_providers WHERE name = $1",
+    )
+    .bind(&pending.provider_name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let email = verified.email.clone().unwrap_or_default();
+    if !forge_auth::oidc::may_provision(
+        allowed_domains.as_deref().unwrap_or(&[]),
+        verified.email.as_deref(),
+    ) {
+        return Err(ApiError::forbidden(
+            "this account's domain is not permitted by the identity provider",
+        ));
+    }
+    if email.is_empty() {
+        return Err(ApiError::unauthenticated(
+            "the identity provider did not supply an email address",
+        ));
+    }
+
+    // An existing linked identity resolves to its user.
+    let linked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM user_identities
+          WHERE issuer = $1 AND provider = $2 AND provider_subject = $3",
+    )
+    .bind(&pending.issuer)
+    .bind(&pending.provider_name)
+    .bind(&verified.subject)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let user_id = match linked {
+        Some(uid) => uid,
+        None => {
+            // An unlinked identity may only join an account that already
+            // exists *and* whose email matches exactly what the provider
+            // verified. It may never invent one, and it may never silently take
+            // over an account on the strength of an address alone — the
+            // address is a claim to be confirmed, not proof of identity.
+            let existing: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+                    .bind(&email)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .map_err(ApiError::from)?;
+
+            let Some(uid) = existing else {
+                return Err(ApiError::forbidden(
+                    "this account has not been invited. Ask an administrator to \
+                     create it before signing in with single sign-on.",
+                ));
+            };
+
+            let disabled: bool = sqlx::query_scalar("SELECT disabled FROM users WHERE id = $1")
+                .bind(uid)
+                .fetch_one(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+            if disabled {
+                return Err(ApiError::forbidden("this account has been disabled"));
+            }
+
+            sqlx::query(
+                "INSERT INTO user_identities
+                     (id, user_id, provider, provider_subject, issuer)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (issuer, provider, provider_subject) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(uid)
+            .bind(&pending.provider_name)
+            .bind(&verified.subject)
+            .bind(&pending.issuer)
+            .execute(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+
+            uid
+        }
+    };
+
+    // Tenants come from real memberships, never `ORDER BY ... LIMIT 1`.
     let membership: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT tenant_id, role FROM tenant_memberships WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1",
     )
@@ -1260,37 +1428,10 @@ pub async fn oidc_callback(
     .await
     .map_err(ApiError::from)?;
 
-    let (tenant_uuid, role_str) = match membership {
-        Some(m) => m,
-        None => {
-            let first_tenant: Option<(Uuid,)> =
-                sqlx::query_as("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
-                    .fetch_optional(&state.pool)
-                    .await
-                    .map_err(ApiError::from)?;
-
-            let tid = match first_tenant {
-                Some((tid,)) => tid,
-                None => {
-                    let tid = Uuid::new_v4();
-                    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'default')")
-                        .bind(tid)
-                        .execute(&state.pool)
-                        .await
-                        .map_err(ApiError::from)?;
-                    tid
-                }
-            };
-
-            sqlx::query("INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, 'VIEWER') ON CONFLICT DO NOTHING")
-                .bind(user_id)
-                .bind(tid)
-                .execute(&state.pool)
-                .await
-                .map_err(ApiError::from)?;
-
-            (tid, "VIEWER".to_string())
-        }
+    let Some((tenant_uuid, role_str)) = membership else {
+        return Err(ApiError::forbidden(
+            "this account is not a member of any tenant",
+        ));
     };
 
     let tenant = TenantId::from_uuid(tenant_uuid);

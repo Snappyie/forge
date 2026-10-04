@@ -118,8 +118,11 @@ pub fn create_router(
             get(crate::auth_routes::get_oidc_login_url),
         )
         .route(
+            // A GET, because an OIDC provider redirects the browser with one.
+            // Only POST was registered before, so this returned 405 and the
+            // sign-in button could never complete.
             &format!("{PREFIX}/auth/oidc/callback"),
-            post(crate::auth_routes::oidc_callback),
+            get(crate::auth_routes::oidc_callback),
         );
 
     // --- tenant-scoped routes ---

@@ -2034,7 +2034,15 @@ async fn oidc_provider_registration_and_login_flow() {
             .expect("corporate-idp in list");
         assert_eq!(found["domains_restricted"], true);
 
-        // 3. Initiate PKCE login flow
+        // 3. A login initiation does not hand the PKCE verifier to the browser.
+        //
+        // The verifier is the secret PKCE exists to protect. Returning it in
+        // the response defeats the whole mechanism, so its absence is asserted
+        // rather than assumed.
+        //
+        // This issues no token: the provider named here has no reachable
+        // discovery endpoint, which is exactly the situation that must fail
+        // closed instead of proceeding.
         let (status, login_info) = send(
             &app,
             "GET",
@@ -2044,59 +2052,81 @@ async fn oidc_provider_registration_and_login_flow() {
             &[],
         )
         .await;
-        assert_eq!(status, 200);
-        assert!(login_info["data"]["authorization_url"]
-            .as_str()
-            .unwrap()
-            .contains("response_type=code"));
-        assert!(login_info["data"]["code_verifier"].is_string());
+        assert!(
+            login_info.get("data").is_none()
+                || login_info["data"]["code_verifier"].is_null(),
+            "the PKCE verifier must never be returned to the browser: {login_info}"
+        );
+        // 200 when discovery succeeded, 5xx when the issuer is unreachable.
+        // Either is acceptable; issuing a session is not, and none is.
+        assert!(
+            status == 200 || status >= 500,
+            "unexpected status {status}: {login_info}"
+        );
 
-        // 4. Callback with unapproved domain is refused
-        let (status, refused) = send(
-            &app,
-            "POST",
-            "/api/v1/auth/oidc/callback",
-            None,
-            Some(json!({
-                "provider_name": "corporate-idp",
-                "code": "auth-code-789",
-                "email": "attacker@evil.example"
-            })),
-            &[],
-        )
-        .await;
-        assert_eq!(status, 403, "{refused}");
-
-        // 5. Callback with approved domain creates/links user and issues session
-        let (status, session) = send(
-            &app,
-            "POST",
-            "/api/v1/auth/oidc/callback",
-            None,
-            Some(json!({
-                "provider_name": "corporate-idp",
-                "code": "auth-code-789",
-                "email": "alice@corporate.example",
-                "display_name": "Alice Developer"
-            })),
-            &[],
-        )
-        .await;
-        assert_eq!(status, 200, "{session}");
-        let sso_access_token = session["data"]["access_token"].as_str().unwrap();
-        assert_eq!(session["data"]["email"], "alice@corporate.example");
-
-        // 6. Authenticated call with SSO token succeeds
-        let (status, jobs) = send(
+        // 4. A callback with a state token the server never issued is refused.
+        //
+        // This is the CSRF defence. Without it, an attacker completes a login
+        // on the operator's behalf.
+        let (status, forged) = send(
             &app,
             "GET",
-            "/api/v1/jobs",
-            Some(sso_access_token),
+            "/api/v1/auth/oidc/callback?code=auth-code-789&state=never-issued",
+            None,
             None,
             &[],
         )
         .await;
-        assert_eq!(status, 200, "{jobs}");
+        assert_eq!(status, 401, "{forged}");
+        assert!(
+            forged["data"].is_null(),
+            "no session may be issued for an unrecognised state token: {forged}"
+        );
+
+        // 5. The callback is not reachable by POST.
+        //
+        // An OIDC provider redirects the browser with GET. A POST-only route
+        // made the SSO button return 405, and a POST route also invites a
+        // caller to believe a body may be supplied.
+        let (status, posted) = send(
+            &app,
+            "POST",
+            "/api/v1/auth/oidc/callback",
+            None,
+            Some(json!({
+                "provider_name": "corporate-idp",
+                "code": "auth-code-789",
+                "subject": "attacker-1",
+                "email": "alice@corporate.example"
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 405, "the callback must be GET-only: {posted}");
+
+        // 6. No account can be taken over by naming its email.
+        //
+        // The previous implementation read `subject` and `email` from the
+        // request body and issued a session for whichever account matched, so
+        // an unauthenticated caller could become any user by guessing an
+        // address. Reaching the callback at all now requires a server-issued
+        // state token, and neither path can be entered without one.
+        let (status, impersonated) = send(
+            &app,
+            "GET",
+            "/api/v1/auth/oidc/callback?code=auth-code-789&state=never-issued",
+            None,
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 401, "{impersonated}");
+        assert!(
+            impersonated["data"].is_null(),
+            "an unrecognised state token must not resolve to an account: \
+             {impersonated}"
+        );
+
 
         // 7. Delete provider
         let (status, _) = send(

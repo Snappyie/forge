@@ -24,3 +24,6 @@ forge-domain = { path = "../forge-domain" }
 # framework, because the console only needs authorization-code + PKCE and a
 # framework would bring its own session and retry behaviour to reason about.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Reversible encryption for the OIDC client secret, which the server must
+# present to the provider's token endpoint and so cannot be hashed.
+aes-gcm = "0.10"
