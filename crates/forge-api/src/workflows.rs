@@ -627,6 +627,7 @@ pub async fn trigger(
                     workflow_id: id,
                     workflow_version_id: version_id,
                     trigger_source: "WORKFLOW".to_string(),
+                    parent_execution_id: None,
                     correlation_id: Some(auth.request_id.clone()),
                     input: body.clone(),
                     timeout_seconds,
@@ -932,6 +933,30 @@ fn to_domain_workflow(
                     .unwrap_or_default()
                     .to_string(),
             },
+            "SUB_WORKFLOW" => {
+                let target_workflow_id = node
+                    .config
+                    .get("workflow_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|raw| Uuid::parse_str(raw).ok())
+                    .ok_or_else(|| {
+                        ApiError::validation(format!(
+                            "node `{}` must reference a workflow_id",
+                            node.key
+                        ))
+                        .with_detail("nodes", "missing workflow_id")
+                    })?;
+                if target_workflow_id == workflow_id {
+                    return Err(ApiError::validation(format!(
+                        "node `{}` cannot reference its own workflow",
+                        node.key
+                    ))
+                    .with_detail("nodes", "sub-workflow cannot be self"));
+                }
+                NodeType::SubWorkflow {
+                    workflow_id: target_workflow_id,
+                }
+            }
             "WEBHOOK" => NodeType::Delay { seconds: 0 },
             other => {
                 return Err(

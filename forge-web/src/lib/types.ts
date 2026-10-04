@@ -422,3 +422,26 @@ export interface Team {
   created_at: string;
 }
 
+export interface ServiceAccount {
+  id: string;
+  name: string;
+  description: string | null;
+  token_prefix: string;
+  scopes: string[];
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+export interface IdentityProvider {
+  id: string;
+  name: string;
+  issuer: string;
+  client_id: string;
+  scopes: string[];
+  enabled: boolean;
+  allowed_email_domains: string[] | null;
+  created_at: string;
+}
+

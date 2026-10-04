@@ -507,6 +507,8 @@ pub async fn preview(
         timezone,
         interval_seconds,
         one_time_at,
+        blackout_dates: Vec::new(),
+        time_window: None,
     };
 
     // An interval series is anchored at the schedule's stored `next_run_at`,
@@ -569,6 +571,10 @@ pub struct ExplainRequest {
     /// For a ONE_TIME preview.
     #[serde(default)]
     pub one_time_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub blackout_dates: Vec<String>,
+    #[serde(default)]
+    pub time_window: Option<forge_domain::TimeWindow>,
     #[serde(default = "default_preview_count")]
     pub count: usize,
 }
@@ -597,6 +603,8 @@ pub async fn explain(
         timezone: body.timezone.clone(),
         interval_seconds: body.interval_seconds,
         one_time_at: body.one_time_at,
+        blackout_dates: body.blackout_dates.clone(),
+        time_window: body.time_window,
     };
 
     if kind == forge_domain::ScheduleType::Cron && spec.timezone.trim().is_empty() {

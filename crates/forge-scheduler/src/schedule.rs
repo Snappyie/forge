@@ -515,6 +515,8 @@ pub struct RecurrenceSpec {
     pub timezone: String,
     pub interval_seconds: Option<i64>,
     pub one_time_at: Option<DateTime<Utc>>,
+    pub blackout_dates: Vec<String>,
+    pub time_window: Option<forge_domain::TimeWindow>,
 }
 
 impl RecurrenceSpec {
@@ -525,6 +527,8 @@ impl RecurrenceSpec {
             timezone: timezone.to_string(),
             interval_seconds: None,
             one_time_at: None,
+            blackout_dates: Vec::new(),
+            time_window: None,
         }
     }
 
@@ -535,6 +539,8 @@ impl RecurrenceSpec {
             timezone: timezone.to_string(),
             interval_seconds: Some(interval_seconds),
             one_time_at: None,
+            blackout_dates: Vec::new(),
+            time_window: None,
         }
     }
 
@@ -545,7 +551,45 @@ impl RecurrenceSpec {
             timezone: timezone.to_string(),
             interval_seconds: None,
             one_time_at: Some(at),
+            blackout_dates: Vec::new(),
+            time_window: None,
         }
+    }
+
+    pub fn with_blackout_dates(mut self, dates: Vec<String>) -> Self {
+        self.blackout_dates = dates;
+        self
+    }
+
+    pub fn with_time_window(mut self, window: forge_domain::TimeWindow) -> Self {
+        self.time_window = Some(window);
+        self
+    }
+
+    /// Checks if a proposed run instant falls on a blackout date or outside the daily time window.
+    pub fn exclusion_reason(&self, instant: DateTime<Utc>) -> Option<crate::misfire::SkipReason> {
+        use chrono::Timelike;
+        let tz: Tz = self.timezone.parse().ok()?;
+        let local = instant.with_timezone(&tz);
+
+        let date_str = local.format("%Y-%m-%d").to_string();
+        if self.blackout_dates.iter().any(|d| d.trim() == date_str) {
+            return Some(crate::misfire::SkipReason::BlackoutOrHoliday);
+        }
+
+        if let Some(window) = self.time_window {
+            let hour = local.hour() as u8;
+            let within = if window.start_hour <= window.end_hour {
+                hour >= window.start_hour && hour < window.end_hour
+            } else {
+                hour >= window.start_hour || hour < window.end_hour
+            };
+            if !within {
+                return Some(crate::misfire::SkipReason::OutsideTimeWindow);
+            }
+        }
+
+        None
     }
 
     /// Builds the calculator for this configuration.
@@ -1105,6 +1149,8 @@ mod tests {
             timezone: "UTC".to_string(),
             interval_seconds: None,
             one_time_at: None,
+            blackout_dates: Vec::new(),
+            time_window: None,
         };
         assert!(matches!(
             missing_expression.calculator(now),
@@ -1117,6 +1163,8 @@ mod tests {
             timezone: "UTC".to_string(),
             interval_seconds: None,
             one_time_at: None,
+            blackout_dates: Vec::new(),
+            time_window: None,
         };
         assert!(matches!(
             missing_period.calculator(now),
@@ -1129,11 +1177,38 @@ mod tests {
             timezone: "UTC".to_string(),
             interval_seconds: None,
             one_time_at: None,
+            blackout_dates: Vec::new(),
+            time_window: None,
         };
         assert!(matches!(
             missing_instant.calculator(now),
             Err(SchedulerError::MissingOneTimeAt)
         ));
+    }
+
+    #[test]
+    fn blackout_date_and_time_window_exclusions_work() {
+        let spec = RecurrenceSpec::cron("0 10 * * *", "UTC")
+            .with_blackout_dates(vec!["2026-12-25".to_string(), "2027-01-01".to_string()])
+            .with_time_window(forge_domain::TimeWindow {
+                start_hour: 9,
+                end_hour: 17,
+            });
+
+        // 2026-12-24 at 10:00 is allowed.
+        assert_eq!(spec.exclusion_reason(utc("2026-12-24T10:00:00Z")), None);
+
+        // 2026-12-25 at 10:00 is on a blackout date.
+        assert_eq!(
+            spec.exclusion_reason(utc("2026-12-25T10:00:00Z")),
+            Some(crate::misfire::SkipReason::BlackoutOrHoliday)
+        );
+
+        // 2026-12-26 at 20:00 is outside the daily time window (9-17).
+        assert_eq!(
+            spec.exclusion_reason(utc("2026-12-26T20:00:00Z")),
+            Some(crate::misfire::SkipReason::OutsideTimeWindow)
+        );
     }
 
     #[test]

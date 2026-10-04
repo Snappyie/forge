@@ -89,7 +89,10 @@ impl IsolationDb {
             }
         };
 
-        if let Err(e) = sqlx::migrate!("../forge-storage/migrations").run(&pool).await {
+        if let Err(e) = sqlx::migrate!("../forge-storage/migrations")
+            .run(&pool)
+            .await
+        {
             eprintln!("skipping RLS tests: migrations failed ({e})");
             return None;
         }
@@ -226,10 +229,7 @@ fn rls_hides_another_tenants_rows() {
 
         let mut conn = session(&db).await;
 
-        for (tenant, expected) in [
-            (TENANT_A, "secret-job-A"),
-            (TENANT_B, "secret-job-B"),
-        ] {
+        for (tenant, expected) in [(TENANT_A, "secret-job-A"), (TENANT_B, "secret-job-B")] {
             scoped(&mut conn, tenant).await;
             let names: Vec<String> = sqlx::query_scalar("SELECT name FROM jobs")
                 .fetch_all(&mut *conn)
@@ -251,7 +251,6 @@ fn rls_hides_another_tenants_rows() {
         db.cleanup().await;
     });
 }
-
 
 #[test]
 fn rls_blocks_a_cross_tenant_write() {
@@ -289,7 +288,6 @@ fn rls_blocks_a_cross_tenant_write() {
         db.cleanup().await;
     });
 }
-
 
 #[test]
 fn an_unset_tenant_denies_everything_rather_than_erroring() {
@@ -340,7 +338,6 @@ fn an_unset_tenant_denies_everything_rather_than_erroring() {
     });
 }
 
-
 #[test]
 fn the_domain_types_round_trip_through_the_new_tables() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -374,13 +371,11 @@ fn the_domain_types_round_trip_through_the_new_tables() {
             .await
             .unwrap();
 
-        let stored: String = sqlx::query_scalar(
-            "SELECT slug FROM applications WHERE id = $1",
-        )
-        .bind(app_id.as_uuid())
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT slug FROM applications WHERE id = $1")
+            .bind(app_id.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
         assert_eq!(stored, "payments-api-eu");
 
         // A second production environment is the failure mode ADR-0022 exists to
@@ -400,7 +395,6 @@ fn the_domain_types_round_trip_through_the_new_tables() {
         db.cleanup().await;
     });
 }
-
 
 #[test]
 fn a_job_revision_stores_and_reads_back_its_config() {
@@ -456,7 +450,6 @@ fn a_job_revision_stores_and_reads_back_its_config() {
         db.cleanup().await;
     });
 }
-
 
 #[tokio::test]
 async fn every_scoped_table_has_a_policy() {

@@ -26,6 +26,15 @@ pub enum StorageError {
 
     #[error("invalid cursor: {0}")]
     InvalidCursor(String),
+
+    /// A row exists but holds a value the domain cannot represent — an
+    /// environment `kind` outside the known set, for example.
+    ///
+    /// Distinct from `Database` because the query succeeded: the problem is the
+    /// *content*, and reporting it as a database error would send an operator
+    /// looking at the wrong subsystem.
+    #[error("stored value is not valid: {0}")]
+    Corrupt(String),
 }
 
 impl StorageError {

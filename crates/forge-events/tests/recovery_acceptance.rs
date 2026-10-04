@@ -115,10 +115,8 @@ macro_rules! with_db {
                     // broken test leaves its database behind forever. Awaiting a
                     // JoinHandle returns Err(JoinError) instead of propagating, so the
                     // panic is resumed *after* cleanup and a real failure still fails.
-                    let outcome = tokio::spawn(std::panic::AssertUnwindSafe(
-                        $body(db.pool.clone()),
-                    ))
-                    .await;
+                    let outcome =
+                        tokio::spawn(std::panic::AssertUnwindSafe($body(db.pool.clone()))).await;
                     match Arc::try_unwrap(db) {
                         Ok(db) => db.cleanup().await,
                         Err(_) => eprintln!("warning: test db handle still shared"),

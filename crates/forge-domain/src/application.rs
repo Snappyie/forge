@@ -133,7 +133,9 @@ impl Environment {
 /// Why an environment could not be created or changed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EnvironmentError {
-    #[error("`{0}` is not a known environment kind (use development, staging, production or other)")]
+    #[error(
+        "`{0}` is not a known environment kind (use development, staging, production or other)"
+    )]
     UnknownKind(String),
 
     #[error("a tenant may have at most one production environment")]

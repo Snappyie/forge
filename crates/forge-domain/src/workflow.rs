@@ -48,6 +48,8 @@ pub enum NodeType {
     Condition { expression: String },
     /// Dynamically spans multiple executions over an array of inputs.
     Map { target_node_id: String },
+    /// Executes a nested sub-workflow.
+    SubWorkflow { workflow_id: Uuid },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

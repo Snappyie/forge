@@ -23,14 +23,11 @@ pub struct AuthContext {
     pub role: Role,
     pub request_id: String,
     /// Set when the caller authenticated with a worker token (`forge_wkr_`).
-    ///
-    /// Spec 11.1 says workers are not implicitly trusted, so a worker is a
-    /// *narrower* principal than any human role: it may only drive the worker
-    /// protocol, and never administer the tenant it belongs to. Without this
-    /// flag a worker credential is indistinguishable from an ADMIN, which would
-    /// let any compromised worker mint users, revoke other workers and read the
-    /// audit trail.
     pub worker_id: Option<Uuid>,
+    /// Set when the caller authenticated with a service account token (`forge_sa_`).
+    pub service_account_id: Option<Uuid>,
+    /// Scopes granted to this principal (used by service accounts).
+    pub scopes: Vec<String>,
 }
 
 /// The only permissions a worker token can ever satisfy.
@@ -42,10 +39,14 @@ pub const WORKER_PERMISSIONS: &[&str] = &["workers:claim", "workers:heartbeat", 
 impl AuthContext {
     /// Whether this caller holds `permission`.
     pub fn can(&self, permission: &str) -> bool {
-        match self.worker_id {
-            Some(_) => WORKER_PERMISSIONS.contains(&permission),
-            None => self.role.allows(permission),
+        if self.worker_id.is_some() {
+            return WORKER_PERMISSIONS.contains(&permission);
         }
+        if self.service_account_id.is_some() {
+            return self.scopes.contains(&"*".to_string())
+                || self.scopes.iter().any(|s| s == permission);
+        }
+        self.role.allows(permission)
     }
 
     /// Refuses the request unless the caller holds `permission`.
@@ -113,6 +114,10 @@ impl FromRequestParts<AppState> for AuthUser {
             return worker_token_context(state, token, request_id).await;
         }
 
+        if token.starts_with("forge_sa_") {
+            return service_account_context(state, token, request_id).await;
+        }
+
         if token.starts_with("forge_") {
             return api_key_context(state, token, request_id).await;
         }
@@ -133,8 +138,50 @@ impl FromRequestParts<AppState> for AuthUser {
             role: claims.role,
             request_id,
             worker_id: None,
+            service_account_id: None,
+            scopes: Vec::new(),
         }))
     }
+}
+
+/// Resolves a service account token to an identity with explicit scopes.
+async fn service_account_context(
+    state: &AppState,
+    token: &str,
+    request_id: String,
+) -> Result<AuthUser, ApiError> {
+    use forge_storage::ServiceAccountRepository;
+
+    let hash = forge_auth::hash_api_key(&state.api_key_pepper, token);
+    let repo = ServiceAccountRepository::new(&state.pool);
+    let record = repo
+        .find_by_hash(&hash)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::unauthenticated("the service account token is not valid"))?;
+
+    if record.revoked_at.is_some() {
+        return Err(ApiError::unauthenticated(
+            "the service account has been revoked",
+        ));
+    }
+    if let Some(expires_at) = record.expires_at {
+        if expires_at <= chrono::Utc::now() {
+            return Err(ApiError::unauthenticated("the service account has expired"));
+        }
+    }
+
+    let _ = repo.touch(record.id).await;
+
+    Ok(AuthUser(AuthContext {
+        user_id: record.id,
+        tenant_id: TenantId::from_uuid(record.tenant_id),
+        role: Role::Developer,
+        request_id,
+        worker_id: None,
+        service_account_id: Some(record.id),
+        scopes: record.scopes,
+    }))
 }
 
 /// Resolves an API key to an identity.
@@ -191,6 +238,8 @@ async fn api_key_context(
         role,
         request_id,
         worker_id: None,
+        service_account_id: None,
+        scopes: Vec::new(),
     }))
 }
 
@@ -222,6 +271,8 @@ async fn worker_token_context(
         role: Role::Viewer,
         request_id,
         worker_id: Some(worker.id),
+        service_account_id: None,
+        scopes: Vec::new(),
     }))
 }
 
@@ -252,6 +303,8 @@ mod tests {
             role,
             request_id: "req-1".into(),
             worker_id: None,
+            service_account_id: None,
+            scopes: Vec::new(),
         }
     }
 
@@ -262,6 +315,20 @@ mod tests {
             role: Role::Viewer,
             request_id: "req-1".into(),
             worker_id: Some(worker_id),
+            service_account_id: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn service_account(sa_id: Uuid, scopes: Vec<&str>) -> AuthContext {
+        AuthContext {
+            user_id: sa_id,
+            tenant_id: TenantId::new(),
+            role: Role::Developer,
+            request_id: "req-1".into(),
+            worker_id: None,
+            service_account_id: Some(sa_id),
+            scopes: scopes.into_iter().map(String::from).collect(),
         }
     }
 
@@ -353,5 +420,18 @@ mod tests {
             WORKER_PERMISSIONS.to_vec(),
             vec!["workers:claim", "workers:heartbeat", "executions:write"]
         );
+    }
+
+    #[test]
+    fn service_account_scopes_are_strictly_enforced() {
+        let sa = service_account(Uuid::new_v4(), vec!["jobs:read", "executions:write"]);
+        assert!(sa.can("jobs:read"));
+        assert!(sa.can("executions:write"));
+        assert!(!sa.can("jobs:write"));
+        assert!(!sa.can("users:write"));
+
+        let wildcard_sa = service_account(Uuid::new_v4(), vec!["*"]);
+        assert!(wildcard_sa.can("jobs:read"));
+        assert!(wildcard_sa.can("tenants:delete"));
     }
 }

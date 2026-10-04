@@ -246,10 +246,7 @@ mod tests {
         // Uppercase is rejected rather than silently lowercased: a slug is often
         // typed by hand, and accepting "Payments" here would let two slugs that
         // differ only in case reach the database.
-        assert_eq!(
-            Slug::validate("Payments"),
-            Err(SlugError::InvalidCharacter)
-        );
+        assert_eq!(Slug::validate("Payments"), Err(SlugError::InvalidCharacter));
     }
 
     #[test]
@@ -295,7 +292,10 @@ mod tests {
 
     #[test]
     fn parse_normalises_human_input() {
-        assert_eq!(Slug::parse("Payments API").unwrap().as_str(), "payments-api");
+        assert_eq!(
+            Slug::parse("Payments API").unwrap().as_str(),
+            "payments-api"
+        );
         assert_eq!(
             Slug::parse("  Payments (EU)  ").unwrap().as_str(),
             "payments-eu"
@@ -310,10 +310,7 @@ mod tests {
     fn parse_collapses_runs_of_separators_into_one_hyphen() {
         // The whole point of the consecutive-hyphen rule: a display name with
         // punctuation must not produce a slug the validator rejects.
-        assert_eq!(
-            Slug::parse("a  --  b").unwrap().as_str(),
-            "a-b"
-        );
+        assert_eq!(Slug::parse("a  --  b").unwrap().as_str(), "a-b");
     }
 
     #[test]

@@ -9,7 +9,7 @@
  */
 
 import { useState } from "react";
-import { Copy, KeyRound, Plus, RefreshCw, ShieldOff, UserPlus } from "lucide-react";
+import { Bot, Copy, Globe, KeyRound, Plus, RefreshCw, Shield, ShieldOff, Trash2, UserPlus } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -18,10 +18,13 @@ import {
   formatTimestamp,
   roleCan,
   type ApiKey,
+  type IdentityProvider,
   type Role,
+  type ServiceAccount,
   type UserSummary,
 } from "@/lib/types";
 import { AsyncBoundary } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -51,6 +54,8 @@ export default function AdminPage() {
 
   const users = useList<UserSummary>(canReadUsers ? "/users" : null);
   const keys = useList<ApiKey>("/api-keys");
+  const serviceAccounts = useList<ServiceAccount>("/service-accounts");
+  const oidcProviders = useList<IdentityProvider>(canSettings ? "/auth/oidc/providers" : null);
 
   return (
     <div className="flex flex-col gap-8 p-6">
@@ -58,7 +63,7 @@ export default function AdminPage() {
         <div>
           <h1 className="text-lg font-semibold">Administration</h1>
           <p className="text-xs text-muted-foreground">
-            Users, API keys, and integrations for this tenant.
+            Users, API keys, service accounts, and enterprise SSO for this tenant.
           </p>
         </div>
         <Button
@@ -67,6 +72,8 @@ export default function AdminPage() {
           onClick={() => {
             users.reload();
             keys.reload();
+            serviceAccounts.reload();
+            oidcProviders.reload();
           }}
           aria-label="Refresh"
         >
@@ -216,6 +223,187 @@ export default function AdminPage() {
           </AsyncBoundary>
         </div>
       </section>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold">Service Accounts</h2>
+            <p className="text-xs text-muted-foreground">
+              Scoped automation tokens for CI/CD pipelines and external integrations.
+            </p>
+          </div>
+          {canWriteUsers ? <CreateServiceAccountDialog onCreated={serviceAccounts.reload} /> : null}
+        </div>
+
+        <div className="rounded-lg border border-border">
+          <AsyncBoundary
+            state={serviceAccounts.state}
+            error={serviceAccounts.error}
+            forbidden={serviceAccounts.forbidden}
+            empty={serviceAccounts.state === "ready" && serviceAccounts.rows.length === 0}
+            onRetry={serviceAccounts.reload}
+            loadingLabel="Loading service accounts"
+            emptyTitle="No service accounts yet"
+            emptyDescription="Create a service account with scoped permissions."
+          >
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Prefix</TableHead>
+                  <TableHead>Scopes</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead>Status</TableHead>
+                  {canWriteUsers ? <TableHead className="w-24 text-right">Actions</TableHead> : null}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {serviceAccounts.rows.map((sa) => (
+                  <TableRow key={sa.id}>
+                    <TableCell>
+                      <div className="flex flex-col">
+                        <span className="font-medium text-sm">{sa.name}</span>
+                        {sa.description ? (
+                          <span className="text-xs text-muted-foreground">{sa.description}</span>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <code className="font-mono text-xs">{sa.token_prefix}••••••••</code>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {sa.scopes && sa.scopes.length > 0 ? (
+                          sa.scopes.map((scope) => (
+                            <Badge key={scope} variant="outline" className="font-mono text-[10px]">
+                              {scope}
+                            </Badge>
+                          ))
+                        ) : (
+                          <span className="text-xs text-muted-foreground">None</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {formatTimestamp(sa.created_at)}
+                    </TableCell>
+                    <TableCell>
+                      {sa.revoked_at ? (
+                        <span className="inline-flex items-center rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                          Revoked
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                          Active
+                        </span>
+                      )}
+                    </TableCell>
+                    {canWriteUsers ? (
+                      <TableCell className="text-right">
+                        {!sa.revoked_at ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            onClick={async () => {
+                              if (!window.confirm(`Revoke service account "${sa.name}"?`)) return;
+                              try {
+                                await api.post(`/service-accounts/${sa.id}/revoke`);
+                                serviceAccounts.reload();
+                              } catch (cause) {
+                                window.alert(cause instanceof ApiError ? cause.message : "Revoke failed");
+                              }
+                            }}
+                          >
+                            Revoke
+                          </Button>
+                        ) : null}
+                      </TableCell>
+                    ) : null}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </AsyncBoundary>
+        </div>
+      </section>
+
+      {canSettings ? (
+        <section className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold">SSO / Identity Providers (OIDC)</h2>
+              <p className="text-xs text-muted-foreground">
+                Federated OpenID Connect providers for enterprise single sign-on.
+              </p>
+            </div>
+            <RegisterOidcProviderDialog onCreated={oidcProviders.reload} />
+          </div>
+
+          <div className="rounded-lg border border-border">
+            <AsyncBoundary
+              state={oidcProviders.state}
+              error={oidcProviders.error}
+              forbidden={oidcProviders.forbidden}
+              empty={oidcProviders.state === "ready" && oidcProviders.rows.length === 0}
+              onRetry={oidcProviders.reload}
+              loadingLabel="Loading identity providers"
+              emptyTitle="No identity providers configured"
+              emptyDescription="Add an OIDC provider (Okta, Google, Azure AD, Keycloak) to enable SSO."
+            >
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Provider Name</TableHead>
+                    <TableHead>Issuer URL</TableHead>
+                    <TableHead>Client ID</TableHead>
+                    <TableHead>Allowed Domains</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="w-24 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {oidcProviders.rows.map((prov) => (
+                    <TableRow key={prov.id}>
+                      <TableCell className="font-medium">{prov.name}</TableCell>
+                      <TableCell className="font-mono text-xs max-w-[200px] truncate">{prov.issuer}</TableCell>
+                      <TableCell className="font-mono text-xs">{prov.client_id}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {prov.allowed_email_domains && prov.allowed_email_domains.length > 0
+                          ? prov.allowed_email_domains.join(", ")
+                          : "Any"}
+                      </TableCell>
+                      <TableCell>
+                        <span className="inline-flex items-center rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                          Enabled
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={async () => {
+                            if (!window.confirm(`Delete identity provider "${prov.name}"?`)) return;
+                            try {
+                              await api.delete(`/auth/oidc/providers/${prov.id}`);
+                              oidcProviders.reload();
+                            } catch (cause) {
+                              window.alert(cause instanceof ApiError ? cause.message : "Delete failed");
+                            }
+                          }}
+                        >
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </AsyncBoundary>
+          </div>
+        </section>
+      ) : null}
 
       {canSettings ? (
         <p className="text-xs text-muted-foreground">
@@ -417,5 +605,293 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
         </p>
       ) : null}
     </div>
+  );
+}
+
+const SERVICE_ACCOUNT_SCOPES = [
+  "jobs:read",
+  "jobs:write",
+  "executions:read",
+  "executions:write",
+  "schedules:read",
+  "schedules:write",
+  "workflows:read",
+  "workflows:write",
+  "workers:read",
+  "system:read",
+];
+
+function CreateServiceAccountDialog({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [selectedScopes, setSelectedScopes] = useState<string[]>([
+    "jobs:read",
+    "executions:read",
+  ]);
+  const [issued, setIssued] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function toggleScope(scope: string) {
+    setSelectedScopes((prev) =>
+      prev.includes(scope) ? prev.filter((s) => s !== scope) : [...prev, scope],
+    );
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await api.post<{ token: string }>("/service-accounts", {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        scopes: selectedScopes,
+      });
+      setIssued(res.token);
+      setName("");
+      setDescription("");
+      onCreated();
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError ? cause.message : "could not reach the server",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Button size="sm" onClick={() => setOpen((value) => !value)}>
+        <Bot className="size-3.5" aria-hidden />
+        New service account
+      </Button>
+
+      {open ? (
+        <form
+          onSubmit={submit}
+          className="mt-2 flex flex-col gap-4 rounded-lg border border-border p-4 w-full"
+        >
+          <div className="flex flex-wrap gap-4">
+            <div className="flex min-w-[14rem] flex-col gap-1.5 flex-1">
+              <Label htmlFor="sa-name">Account Name</Label>
+              <Input
+                id="sa-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. ci-cd-deployer"
+                required
+              />
+            </div>
+            <div className="flex min-w-[14rem] flex-col gap-1.5 flex-1">
+              <Label htmlFor="sa-desc">Description</Label>
+              <Input
+                id="sa-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="e.g. GitHub Actions pipeline deployment token"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <Label>Scopes</Label>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+              {SERVICE_ACCOUNT_SCOPES.map((scope) => {
+                const checked = selectedScopes.includes(scope);
+                return (
+                  <label
+                    key={scope}
+                    className={`flex items-center gap-2 rounded-md border p-2 text-xs font-mono cursor-pointer transition-colors ${
+                      checked
+                        ? "border-primary bg-primary/5 text-primary font-medium"
+                        : "border-border text-muted-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleScope(scope)}
+                      className="size-3.5 rounded border-input"
+                    />
+                    <span>{scope}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between pt-2">
+            <Button type="submit" disabled={busy || !name.trim()}>
+              {busy ? "Issuing token…" : "Issue Token"}
+            </Button>
+            <Button variant="ghost" type="button" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+
+          {issued ? (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-4 py-3">
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+                  Service Account Token (shown once — store it now)
+                </span>
+                <code className="font-mono text-xs break-all text-emerald-950 dark:text-emerald-100">{issued}</code>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                type="button"
+                aria-label="Copy token"
+                onClick={() => navigator.clipboard?.writeText(issued)}
+              >
+                <Copy className="size-4" aria-hidden />
+              </Button>
+            </div>
+          ) : null}
+
+          {error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+        </form>
+      ) : null}
+    </>
+  );
+}
+
+function RegisterOidcProviderDialog({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [issuer, setIssuer] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [scopes, setScopes] = useState("openid, profile, email");
+  const [domains, setDomains] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const scopeArray = scopes.split(",").map((s) => s.trim()).filter(Boolean);
+      const domainArray = domains.split(",").map((d) => d.trim()).filter(Boolean);
+      await api.post("/auth/oidc/providers", {
+        name: name.trim().toLowerCase(),
+        issuer: issuer.trim(),
+        client_id: clientId.trim(),
+        client_secret: clientSecret.trim(),
+        scopes: scopeArray.length > 0 ? scopeArray : undefined,
+        allowed_email_domains: domainArray.length > 0 ? domainArray : undefined,
+      });
+      setOpen(false);
+      setName("");
+      setIssuer("");
+      setClientId("");
+      setClientSecret("");
+      onCreated();
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError ? cause.message : "could not register provider",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Button size="sm" onClick={() => setOpen((value) => !value)}>
+        <Globe className="size-3.5" aria-hidden />
+        Add Provider
+      </Button>
+
+      {open ? (
+        <form
+          onSubmit={submit}
+          className="mt-2 flex flex-col gap-3 rounded-lg border border-border p-4 w-full"
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="oidc-name">Provider Name (Slug)</Label>
+              <Input
+                id="oidc-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. okta, google, azure"
+                required
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="oidc-issuer">Issuer URL</Label>
+              <Input
+                id="oidc-issuer"
+                value={issuer}
+                onChange={(e) => setIssuer(e.target.value)}
+                placeholder="https://accounts.google.com"
+                required
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="oidc-client-id">Client ID</Label>
+              <Input
+                id="oidc-client-id"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                required
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="oidc-secret">Client Secret</Label>
+              <Input
+                id="oidc-secret"
+                type="password"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                required
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="oidc-scopes">Scopes (comma-separated)</Label>
+              <Input
+                id="oidc-scopes"
+                value={scopes}
+                onChange={(e) => setScopes(e.target.value)}
+                placeholder="openid, profile, email"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="oidc-domains">Allowed Email Domains (optional)</Label>
+              <Input
+                id="oidc-domains"
+                value={domains}
+                onChange={(e) => setDomains(e.target.value)}
+                placeholder="company.com, acme.corp"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between pt-2">
+            <Button type="submit" disabled={busy || !name.trim() || !issuer.trim()}>
+              {busy ? "Registering…" : "Register Provider"}
+            </Button>
+            <Button variant="ghost" type="button" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+
+          {error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+        </form>
+      ) : null}
+    </>
   );
 }

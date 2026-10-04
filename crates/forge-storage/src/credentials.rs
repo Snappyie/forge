@@ -60,6 +60,70 @@ impl<'a> ApiKeyRepository<'a> {
     }
 }
 
+/// A stored service account.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ServiceAccountRow {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub token_hash: String,
+    pub token_prefix: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_by: Option<Uuid>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub struct ServiceAccountRepository<'a> {
+    pool: &'a sqlx::PgPool,
+}
+
+impl<'a> ServiceAccountRepository<'a> {
+    pub fn new(pool: &'a sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn find_by_hash(&self, token_hash: &str) -> Result<Option<ServiceAccountRow>> {
+        sqlx::query_as::<_, ServiceAccountRow>(
+            "SELECT id, tenant_id, name, description, token_hash, token_prefix, scopes, \
+             expires_at, revoked_at, last_used_at, created_by, created_at, updated_at \
+             FROM service_accounts WHERE token_hash = $1",
+        )
+        .bind(token_hash)
+        .fetch_optional(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
+    }
+
+    pub async fn touch(&self, id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE service_accounts SET last_used_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(self.pool)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+        Ok(())
+    }
+}
+
+/// A registered OIDC identity provider.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct IdentityProviderRow {
+    pub id: Uuid,
+    pub name: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret_encrypted: Vec<u8>,
+    pub scopes: Vec<String>,
+    pub enabled: bool,
+    pub allowed_email_domains: Option<Vec<String>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

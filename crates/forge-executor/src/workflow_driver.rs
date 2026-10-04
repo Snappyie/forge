@@ -20,7 +20,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use forge_storage::{
-    is_terminal_execution_status, NewChildExecution, NodeStateRow, NodeStateUpdate,
+    is_terminal_execution_status, NewChildExecution, NewWorkflowRun, NodeStateRow, NodeStateUpdate,
     WorkflowRunRepository, WorkflowRunRow,
 };
 
@@ -189,6 +189,22 @@ impl<'a> WorkflowDriver<'a> {
                     }
                 }
 
+                WorkflowAction::DispatchWorkflow {
+                    node_id,
+                    workflow_id,
+                } => {
+                    match self
+                        .dispatch_child_workflow(&run, workflow_id, Value::Null, &node_id)
+                        .await
+                    {
+                        Ok(child_id) => {
+                            known_children.entry(node_id).or_default().push(child_id);
+                            dispatched += 1;
+                        }
+                        Err(reason) => execution.fail_node(&node_id, &reason),
+                    }
+                }
+
                 WorkflowAction::ScheduleDelay { .. } | WorkflowAction::NodeFailed { .. } => {
                     // The engine already recorded the node's new state; the
                     // write-back below is what makes it durable.
@@ -326,6 +342,7 @@ impl<'a> WorkflowDriver<'a> {
                     run.id,
                     if failed { "FAILED" } else { "SUCCEEDED" },
                     reason.as_deref(),
+                    Some(&context),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -468,7 +485,7 @@ impl<'a> WorkflowDriver<'a> {
         }
 
         repository
-            .settle_run(run.id, "CANCELLED", Some("cancelled by an operator"))
+            .settle_run(run.id, "CANCELLED", Some("cancelled by an operator"), None)
             .await
             .map_err(|error| error.to_string())?;
         Ok(RunOutcome::Settled)
@@ -488,7 +505,7 @@ impl<'a> WorkflowDriver<'a> {
             .await
             .map_err(|error| error.to_string())?;
         repository
-            .settle_run(run.id, "TIMED_OUT", Some(reason))
+            .settle_run(run.id, "TIMED_OUT", Some(reason), None)
             .await
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -532,6 +549,43 @@ impl<'a> WorkflowDriver<'a> {
                     .map(|base| format!("{base}:{suffix}")),
                 input,
                 priority: target.priority,
+            })
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Creates the child execution for one node's sub-workflow.
+    async fn dispatch_child_workflow(
+        &self,
+        run: &WorkflowRunRow,
+        workflow_id: Uuid,
+        input: Value,
+        suffix: &str,
+    ) -> Result<Uuid, String> {
+        let repository = WorkflowRunRepository::new(self.pool);
+        let tenant = TenantId::from_uuid(run.tenant_id);
+
+        let target = repository
+            .workflow_dispatch_target(tenant, workflow_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!("workflow {workflow_id} does not exist, is archived, or has no published version")
+            })?;
+
+        repository
+            .start_run(NewWorkflowRun {
+                tenant_id: tenant,
+                workflow_id,
+                workflow_version_id: target.workflow_version_id,
+                trigger_source: "WORKFLOW".to_string(),
+                parent_execution_id: Some(run.id),
+                correlation_id: run
+                    .correlation_id
+                    .as_ref()
+                    .map(|base| format!("{base}:{suffix}")),
+                input,
+                timeout_seconds: target.timeout_seconds,
             })
             .await
             .map_err(|error| error.to_string())

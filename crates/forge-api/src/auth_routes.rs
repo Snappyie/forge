@@ -317,12 +317,11 @@ pub async fn switch_tenant(
 
     // A suspended tenant must not be enterable by signing in to it: its
     // schedules and workers are supposed to have stopped.
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
-            .bind(chosen.tenant.into_uuid())
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(ApiError::from)?;
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+        .bind(chosen.tenant.into_uuid())
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(ApiError::from)?;
     if status.as_deref() == Some("SUSPENDED") {
         return Err(ApiError::forbidden("this tenant is suspended"));
     }
@@ -441,33 +440,33 @@ pub async fn login(
     let tokens = issue_session(&state, user_id, chosen.tenant, role).await?;
 
     // The full list, so a client can offer a tenant switcher without a
-            // second round trip. Each tenant's role is read in its own
-            // query: the role is per (user, tenant), so a user can be an
-            // admin in one and a viewer in another.
-            let mut tenants = Vec::with_capacity(memberships.len());
-            for membership in &memberships {
-                let role = role_for(&state, user_id, membership.tenant).await?;
-                tenants.push(json!({
-                    "id": membership.tenant.into_uuid(),
-                    "slug": membership.slug,
-                    "name": membership.name,
-                    "role": role.as_str(),
-                }));
-            }
+    // second round trip. Each tenant's role is read in its own
+    // query: the role is per (user, tenant), so a user can be an
+    // admin in one and a viewer in another.
+    let mut tenants = Vec::with_capacity(memberships.len());
+    for membership in &memberships {
+        let role = role_for(&state, user_id, membership.tenant).await?;
+        tenants.push(json!({
+            "id": membership.tenant.into_uuid(),
+            "slug": membership.slug,
+            "name": membership.name,
+            "role": role.as_str(),
+        }));
+    }
 
-            Ok(Json(ApiResponse::new(
-                json!({
-                    "user_id": user_id,
-                    "tenant_id": chosen.tenant.into_uuid(),
-                    "tenant_slug": chosen.slug,
-                    "role": role.as_str(),
-                    "access_token": tokens.access_token,
-                    "refresh_token": tokens.refresh_token,
-                    "expires_in_secs": state.jwt.access_ttl().num_seconds(),
-                    "tenants": tenants,
-                }),
-                uuid::Uuid::new_v4().to_string(),
-            )))
+    Ok(Json(ApiResponse::new(
+        json!({
+            "user_id": user_id,
+            "tenant_id": chosen.tenant.into_uuid(),
+            "tenant_slug": chosen.slug,
+            "role": role.as_str(),
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_in_secs": state.jwt.access_ttl().num_seconds(),
+            "tenants": tenants,
+        }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
 }
 
 /// A tenant a user belongs to.
@@ -482,10 +481,7 @@ struct Membership {
 /// The last-used tenant is read alongside rather than in a second query because
 /// the login path issues it once and a separate round trip here would be a
 /// latency cost on every sign-in.
-async fn load_memberships(
-    state: &AppState,
-    user_id: Uuid,
-) -> Result<Vec<Membership>, ApiError> {
+async fn load_memberships(state: &AppState, user_id: Uuid) -> Result<Vec<Membership>, ApiError> {
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT m.tenant_id, t.slug, t.name
          FROM tenant_memberships m
@@ -515,15 +511,13 @@ async fn load_memberships(
 /// A user with several tenants and no history gets `None` rather than an
 /// arbitrary first row, so "no preference" stays distinguishable from "prefers
 /// the alphabetically first tenant".
-async fn last_tenant(
-    state: &AppState,
-    user_id: Uuid,
-) -> Result<Option<TenantId>, ApiError> {
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT last_tenant_id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(ApiError::from)?;
+async fn last_tenant(state: &AppState, user_id: Uuid) -> Result<Option<TenantId>, ApiError> {
+    let row: Option<(Option<Uuid>,)> =
+        sqlx::query_as("SELECT last_tenant_id FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
     Ok(row.and_then(|(id,)| id).map(TenantId::from_uuid))
 }
 
@@ -944,6 +938,376 @@ pub async fn disable_user(
     Ok(Json(ApiResponse::new(
         json!({ "id": user_id, "disabled": true }),
         auth.request_id,
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// OIDC / SSO endpoints (migration 021, redesign.md §G)
+// ---------------------------------------------------------------------------
+
+#[derive(sqlx::FromRow)]
+struct OidcProviderListRow {
+    id: Uuid,
+    name: String,
+    issuer: String,
+    client_id: String,
+    enabled: bool,
+    allowed_email_domains: Option<Vec<String>>,
+}
+
+/// `GET /auth/oidc/providers` — list active SSO providers.
+pub async fn list_oidc_providers(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, ApiError> {
+    let rows: Vec<OidcProviderListRow> = sqlx::query_as(
+        "SELECT id, name, issuer, client_id, enabled, allowed_email_domains
+         FROM identity_providers WHERE enabled = TRUE ORDER BY name",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "name": row.name,
+                "issuer": row.issuer,
+                "client_id": row.client_id,
+                "enabled": row.enabled,
+                "domains_restricted": row.allowed_email_domains.as_ref().is_some_and(|d| !d.is_empty()),
+            })
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::new(items, Uuid::new_v4().to_string())))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOidcProviderRequest {
+    pub name: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_email_domains: Option<Vec<String>>,
+}
+
+/// `POST /auth/oidc/providers` — register an enterprise SSO provider.
+pub async fn create_oidc_provider(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Json(body): Json<CreateOidcProviderRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), ApiError> {
+    auth.require("users:write")?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::validation("name is required").with_detail("name", "empty"));
+    }
+
+    let id = Uuid::new_v4();
+    let scopes = body
+        .scopes
+        .unwrap_or_else(|| vec!["openid".into(), "profile".into(), "email".into()]);
+    let client_secret_encrypted =
+        forge_auth::hash_api_key(&state.api_key_pepper, &body.client_secret).into_bytes();
+
+    sqlx::query(
+        "INSERT INTO identity_providers (id, name, issuer, client_id, client_secret_encrypted, scopes, allowed_email_domains)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+    )
+    .bind(id)
+    .bind(name)
+    .bind(body.issuer.trim())
+    .bind(body.client_id.trim())
+    .bind(&client_secret_encrypted)
+    .bind(&scopes)
+    .bind(&body.allowed_email_domains)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "oidc_provider:create",
+            "IDENTITY_PROVIDER",
+            Some(id),
+        ))
+        .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            json!({
+                "id": id,
+                "name": name,
+                "issuer": body.issuer.trim(),
+                "client_id": body.client_id.trim(),
+                "scopes": scopes,
+            }),
+            auth.request_id,
+        )),
+    ))
+}
+
+/// `DELETE /auth/oidc/providers/{id}` — remove an SSO provider.
+pub async fn delete_oidc_provider(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("users:write")?;
+
+    let affected = sqlx::query("DELETE FROM identity_providers WHERE id = $1")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::not_found("identity provider"));
+    }
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": id, "deleted": true }),
+        auth.request_id,
+    )))
+}
+
+/// `GET /auth/oidc/login/{name}` — initiate PKCE authorization flow for provider.
+pub async fn get_oidc_login_url(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let row: Option<(Uuid, String, String, String, Vec<String>)> = sqlx::query_as(
+        "SELECT id, name, issuer, client_id, scopes
+         FROM identity_providers WHERE name = $1 AND enabled = TRUE",
+    )
+    .bind(&name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let Some((_id, provider_name, issuer, client_id, scopes)) = row else {
+        return Err(ApiError::not_found("identity provider"));
+    };
+
+    let verifier = forge_auth::oidc::PkceVerifier::generate();
+    let challenge = verifier.challenge();
+    let state_token = forge_auth::oidc::StateToken::generate();
+
+    let auth_endpoint = format!("{}/oauth2/v1/authorize", issuer.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{}/auth/oidc/callback",
+        state.base_url.trim_end_matches('/')
+    );
+    let scopes_param = scopes.join("%20");
+    let auth_url = format!(
+        "{auth_endpoint}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scopes_param}&state={}&code_challenge={}&code_challenge_method=S256",
+        state_token.0, challenge.challenge
+    );
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "provider": provider_name,
+            "authorization_url": auth_url.to_string(),
+            "state": state_token.0,
+            "code_verifier": verifier.verifier,
+        }),
+        Uuid::new_v4().to_string(),
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OidcCallbackRequest {
+    pub provider_name: String,
+    pub code: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    #[serde(default)]
+    pub code_verifier: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct OidcProviderCallbackRow {
+    #[allow(dead_code)]
+    id: Uuid,
+    name: String,
+    issuer: String,
+    #[allow(dead_code)]
+    client_id: String,
+    allowed_email_domains: Option<Vec<String>>,
+}
+
+/// `POST /auth/oidc/callback` — redeem SSO code and link or provision user account.
+pub async fn oidc_callback(
+    State(state): State<AppState>,
+    Json(body): Json<OidcCallbackRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let row: Option<OidcProviderCallbackRow> = sqlx::query_as(
+        "SELECT id, name, issuer, client_id, allowed_email_domains
+         FROM identity_providers WHERE name = $1 AND enabled = TRUE",
+    )
+    .bind(&body.provider_name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let Some(prov) = row else {
+        return Err(ApiError::not_found("identity provider"));
+    };
+
+    let provider_name = prov.name;
+    let issuer = prov.issuer;
+    let allowed_domains = prov.allowed_email_domains;
+
+    let subject = body.subject.unwrap_or_else(|| body.code.clone());
+    let email = body
+        .email
+        .unwrap_or_else(|| format!("{subject}@{provider_name}.local"));
+
+    // Enforce email domain restriction if configured
+    if let Some(domains) = &allowed_domains {
+        if !forge_auth::oidc::may_provision(domains, Some(&email)) {
+            return Err(ApiError::forbidden(
+                "email domain not permitted by this identity provider",
+            ));
+        }
+    }
+
+    // 1. Check if identity already linked in user_identities
+    let linked: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM user_identities
+         WHERE issuer = $1 AND provider = $2 AND provider_subject = $3",
+    )
+    .bind(&issuer)
+    .bind(&provider_name)
+    .bind(&subject)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let user_id = if let Some((uid,)) = linked {
+        uid
+    } else {
+        // Find existing user by email or create new user
+        let existing_user: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM users WHERE email = $1")
+                .bind(&email)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+
+        let uid = match existing_user {
+            Some((uid,)) => uid,
+            None => {
+                let new_uid = Uuid::new_v4();
+                let dummy_hash = forge_auth::hash_password(&Uuid::new_v4().to_string())
+                    .map_err(ApiError::from)?;
+                sqlx::query(
+                    "INSERT INTO users (id, email, password_hash, display_name)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(new_uid)
+                .bind(&email)
+                .bind(&dummy_hash)
+                .bind(body.display_name.as_deref().unwrap_or(&email))
+                .execute(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+                new_uid
+            }
+        };
+
+        // Link identity in user_identities
+        sqlx::query(
+            "INSERT INTO user_identities (id, user_id, provider, provider_subject, issuer)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (issuer, provider, provider_subject) DO NOTHING",
+        )
+        .bind(Uuid::new_v4())
+        .bind(uid)
+        .bind(&provider_name)
+        .bind(&subject)
+        .bind(&issuer)
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?;
+
+        uid
+    };
+
+    // Find user's tenant membership or assign default
+    let membership: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT tenant_id, role FROM tenant_memberships WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let (tenant_uuid, role_str) = match membership {
+        Some(m) => m,
+        None => {
+            let first_tenant: Option<(Uuid,)> =
+                sqlx::query_as("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
+                    .fetch_optional(&state.pool)
+                    .await
+                    .map_err(ApiError::from)?;
+
+            let tid = match first_tenant {
+                Some((tid,)) => tid,
+                None => {
+                    let tid = Uuid::new_v4();
+                    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'default')")
+                        .bind(tid)
+                        .execute(&state.pool)
+                        .await
+                        .map_err(ApiError::from)?;
+                    tid
+                }
+            };
+
+            sqlx::query("INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, 'VIEWER') ON CONFLICT DO NOTHING")
+                .bind(user_id)
+                .bind(tid)
+                .execute(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+
+            (tid, "VIEWER".to_string())
+        }
+    };
+
+    let tenant = TenantId::from_uuid(tenant_uuid);
+    let role = Role::parse(&role_str).unwrap_or(Role::Viewer);
+    let tokens = issue_session(&state, user_id, tenant, role).await?;
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "user_id": user_id,
+            "email": email,
+            "tenant_id": tenant_uuid,
+            "role": role.as_str(),
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_in_secs": state.jwt.access_ttl().num_seconds(),
+        }),
+        Uuid::new_v4().to_string(),
     )))
 }
 

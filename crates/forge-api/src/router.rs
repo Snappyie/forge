@@ -112,6 +112,14 @@ pub fn create_router(
         .route(
             &format!("{PREFIX}/auth/logout"),
             post(crate::auth_routes::logout),
+        )
+        .route(
+            &format!("{PREFIX}/auth/oidc/login/:name"),
+            get(crate::auth_routes::get_oidc_login_url),
+        )
+        .route(
+            &format!("{PREFIX}/auth/oidc/callback"),
+            post(crate::auth_routes::oidc_callback),
         );
 
     // --- tenant-scoped routes ---
@@ -128,6 +136,15 @@ pub fn create_router(
         .route(
             &format!("{PREFIX}/auth/switch-tenant"),
             post(crate::auth_routes::switch_tenant),
+        )
+        .route(
+            &format!("{PREFIX}/auth/oidc/providers"),
+            get(crate::auth_routes::list_oidc_providers)
+                .post(crate::auth_routes::create_oidc_provider),
+        )
+        .route(
+            &format!("{PREFIX}/auth/oidc/providers/:id"),
+            delete(crate::auth_routes::delete_oidc_provider),
         )
         // jobs (spec 05 endpoints 1-5)
         .route(
@@ -305,6 +322,19 @@ pub fn create_router(
         .route(
             &format!("{PREFIX}/api-keys/:id/revoke"),
             post(crate::system::revoke_api_key),
+        )
+        // service accounts (migration 021, redesign.md §G)
+        .route(
+            &format!("{PREFIX}/service-accounts"),
+            post(crate::system::create_service_account).get(crate::system::list_service_accounts),
+        )
+        .route(
+            &format!("{PREFIX}/service-accounts/:id/revoke"),
+            post(crate::system::revoke_service_account),
+        )
+        .route(
+            &format!("{PREFIX}/service-accounts/:id"),
+            delete(crate::system::delete_service_account),
         )
         // audit (spec 05 endpoint 52)
         .route(

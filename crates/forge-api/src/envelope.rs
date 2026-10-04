@@ -257,6 +257,10 @@ impl From<forge_storage::StorageError> for ApiError {
                 ApiError::validation(format!("invalid cursor: {message}"))
                     .with_detail("cursor", message)
             }
+            forge_storage::StorageError::Corrupt(message) => {
+                tracing::error!(%message, "corrupt database row encountered");
+                ApiError::internal()
+            }
             forge_storage::StorageError::Database(_)
             | forge_storage::StorageError::Migration(_) => {
                 // The underlying error is logged, not returned to the client.

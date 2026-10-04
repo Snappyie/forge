@@ -175,6 +175,8 @@ impl SchedulerEngine {
             timezone: row.timezone.clone(),
             interval_seconds: row.interval_seconds,
             one_time_at: row.one_time_at,
+            blackout_dates: Vec::new(),
+            time_window: None,
         };
         let calculator = match spec.calculator(due) {
             Ok(calculator) => calculator,
@@ -507,7 +509,24 @@ pub fn preview_recurrence(
     count: usize,
 ) -> Result<Vec<DateTime<Utc>>, crate::schedule::SchedulerError> {
     let calculator = spec.calculator(anchor)?;
-    Ok(calculator.next_n_after(after, count))
+    if spec.blackout_dates.is_empty() && spec.time_window.is_none() {
+        return Ok(calculator.next_n_after(after, count));
+    }
+    let mut results = Vec::new();
+    let mut cursor = after;
+    for _ in 0..(count * 10).max(50) {
+        if results.len() >= count {
+            break;
+        }
+        let Some(next) = calculator.next_after(cursor) else {
+            break;
+        };
+        cursor = next;
+        if spec.exclusion_reason(next).is_none() {
+            results.push(next);
+        }
+    }
+    Ok(results)
 }
 
 /// Explains what a schedule configuration will do next, used by the dispatch
@@ -518,8 +537,7 @@ pub fn explain_recurrence(
     after: DateTime<Utc>,
     count: usize,
 ) -> Result<ScheduleExplanation, crate::schedule::SchedulerError> {
-    let calculator = spec.calculator(anchor)?;
-    let upcoming = calculator.next_n_after(after, count.max(1));
+    let upcoming = preview_recurrence(spec, anchor, after, count.max(1))?;
     Ok(ScheduleExplanation {
         expression: spec.describe(),
         timezone: spec.timezone.clone(),

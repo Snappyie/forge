@@ -138,6 +138,7 @@ pub fn document(base_url: &str) -> Value {
             { "name": "assistant" },
             { "name": "system" },
             { "name": "apiKeys" },
+            { "name": "serviceAccounts" },
             { "name": "audit" },
             { "name": "users" },
             { "name": "admin" },
@@ -792,6 +793,38 @@ fn paths() -> Value {
         json!({ "post": op("Revoke an API key", "apiKeys", "revokeApiKey", Some("users:write"), vec![id_param("id")], None, "200") }),
     );
 
+    // --- service accounts (migration 021, redesign.md §G) ---
+    paths.insert(
+        "/service-accounts".into(),
+        json!({
+            "get": op("List service accounts", "serviceAccounts", "listServiceAccounts", Some("users:read"), vec![], None, "200"),
+            "post": op(
+                "Create a service account", "serviceAccounts", "createServiceAccount", Some("users:write"), vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "scopes": { "type": "array", "items": { "type": "string" } },
+                        "expires_in_days": { "type": "integer" }
+                    }
+                }))),
+                "201",
+            ),
+        }),
+    );
+    paths.insert(
+        "/service-accounts/{id}".into(),
+        json!({
+            "delete": op("Delete a service account", "serviceAccounts", "deleteServiceAccount", Some("users:write"), vec![id_param("id")], None, "200")
+        }),
+    );
+    paths.insert(
+        "/service-accounts/{id}/revoke".into(),
+        json!({ "post": op("Revoke a service account", "serviceAccounts", "revokeServiceAccount", Some("users:write"), vec![id_param("id")], None, "200") }),
+    );
+
     // --- audit (spec 05 endpoint 52) ---
     paths.insert(
         "/audit-events".into(),
@@ -921,6 +954,84 @@ fn paths() -> Value {
         "/auth/logout".into(),
         // Sign-out consumes the token it revokes, so it stays authenticated.
         json!({ "post": op("Sign out", "auth", "logout", None, vec![], None, "200") }),
+    );
+    paths.insert(
+        "/auth/oidc/providers".into(),
+        json!({
+            "get": op_public(
+                true,
+                Op {
+                    summary: "List enabled SSO identity providers",
+                    tag: "public",
+                    id: "listOidcProviders",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: None,
+                    success_status: "200",
+                },
+            ),
+            "post": op(
+                "Register an OIDC identity provider", "auth", "createOidcProvider", Some("users:write"), vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name", "issuer", "client_id", "client_secret"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "issuer": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "client_secret": { "type": "string" }
+                    }
+                }))),
+                "201",
+            ),
+        }),
+    );
+    paths.insert(
+        "/auth/oidc/providers/{id}".into(),
+        json!({
+            "delete": op("Delete an OIDC identity provider", "auth", "deleteOidcProvider", Some("users:write"), vec![id_param("id")], None, "200")
+        }),
+    );
+    paths.insert(
+        "/auth/oidc/login/{name}".into(),
+        json!({
+            "get": op_public(
+                true,
+                Op {
+                    summary: "Get OIDC authorization URL",
+                    tag: "public",
+                    id: "getOidcLoginUrl",
+                    permission: None,
+                    parameters: vec![id_param("name")],
+                    request_body: None,
+                    success_status: "200",
+                },
+            )
+        }),
+    );
+    paths.insert(
+        "/auth/oidc/callback".into(),
+        json!({
+            "post": op_public(
+                true,
+                Op {
+                    summary: "Complete OIDC authorization callback",
+                    tag: "public",
+                    id: "oidcCallback",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: Some(json_body(json!({
+                        "type": "object",
+                        "required": ["provider_name", "code"],
+                        "properties": {
+                            "provider_name": { "type": "string" },
+                            "code": { "type": "string" }
+                        }
+                    }))),
+                    success_status: "200",
+                },
+            )
+        }),
     );
     // --- tenant selection ---
     //

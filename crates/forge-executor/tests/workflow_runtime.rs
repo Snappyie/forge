@@ -110,10 +110,8 @@ macro_rules! with_db {
                     // broken test leaves its database behind forever. Awaiting a
                     // JoinHandle returns Err(JoinError) instead of propagating, so the
                     // panic is resumed *after* cleanup and a real failure still fails.
-                    let outcome = tokio::spawn(std::panic::AssertUnwindSafe(
-                        $body(db.pool.clone()),
-                    ))
-                    .await;
+                    let outcome =
+                        tokio::spawn(std::panic::AssertUnwindSafe($body(db.pool.clone()))).await;
                     match Arc::try_unwrap(db) {
                         Ok(db) => db.cleanup().await,
                         Err(_) => eprintln!("warning: test db handle still shared"),
@@ -292,6 +290,7 @@ async fn start_run(
             workflow_id: fixture.workflow_id,
             workflow_version_id: fixture.version_id,
             trigger_source: "MANUAL".to_string(),
+            parent_execution_id: None,
             correlation_id: Some("test-correlation".into()),
             input,
             timeout_seconds: 3600,
@@ -843,6 +842,69 @@ async fn a_failure_with_retry_budget_is_rescheduled_with_its_backoff() {
                 .status,
             "FAILED"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_sub_workflow_node_dispatches_child_workflow_and_settles() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = seed_tenant(&pool).await;
+
+        // 1. Seed child workflow with a condition node (completes immediately).
+        let child_fixture = seed_workflow(
+            &pool,
+            tenant,
+            &[("check", "CONDITION", json!({ "expression": "1 == 1" }))],
+            &[],
+            3600,
+        )
+        .await;
+
+        // 2. Seed parent workflow that invokes the child workflow.
+        let parent_fixture = seed_workflow(
+            &pool,
+            tenant,
+            &[(
+                "sub_wf",
+                "SUB_WORKFLOW",
+                json!({ "workflow_id": child_fixture.workflow_id.to_string() }),
+            )],
+            &[],
+            3600,
+        )
+        .await;
+
+        let parent_run_id = start_run(&pool, tenant, &parent_fixture, json!({})).await;
+        assert_eq!(run_status(&pool, parent_run_id).await, "RUNNING");
+
+        // Pass 1: Parent workflow driver dispatches the child workflow.
+        tick(&pool, chrono::Utc::now()).await;
+
+        let children = children_of(&pool, parent_run_id).await;
+        assert_eq!(
+            children.len(),
+            1,
+            "one sub-workflow node dispatches one child workflow run"
+        );
+        let (child_run_id, child_status) = children[0].clone();
+        assert_eq!(child_status, "RUNNING");
+        assert_eq!(
+            node_state(&pool, parent_run_id, "sub_wf").await.state,
+            "RUNNING"
+        );
+
+        // Pass 2: Child workflow driver runs the condition node and settles the child workflow.
+        tick(&pool, chrono::Utc::now()).await;
+        assert_eq!(run_status(&pool, child_run_id).await, "SUCCEEDED");
+
+        // Pass 3: Parent workflow observes the child workflow succeeded, completes the node, and settles.
+        tick(&pool, chrono::Utc::now()).await;
+        assert_eq!(
+            node_state(&pool, parent_run_id, "sub_wf").await.state,
+            "COMPLETED"
+        );
+        assert_eq!(run_status(&pool, parent_run_id).await, "SUCCEEDED");
     })
     .await;
 }

@@ -134,10 +134,8 @@ macro_rules! with_db {
                     // broken test leaves its database behind forever. Awaiting a
                     // JoinHandle returns Err(JoinError) instead of propagating, so the
                     // panic is resumed *after* cleanup and a real failure still fails.
-                    let outcome = tokio::spawn(std::panic::AssertUnwindSafe(
-                        $body(db.pool.clone()),
-                    ))
-                    .await;
+                    let outcome =
+                        tokio::spawn(std::panic::AssertUnwindSafe($body(db.pool.clone()))).await;
                     match Arc::try_unwrap(db) {
                         Ok(db) => db.cleanup().await,
                         Err(_) => eprintln!("warning: test db handle still shared"),
@@ -1919,6 +1917,198 @@ async fn comma_separated_status_filter_works() {
         assert!(statuses.contains(&"RUNNING"));
         assert!(!statuses.contains(&"QUEUED"));
         assert!(!statuses.contains(&"SUCCEEDED"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn service_account_lifecycle_and_scope_enforcement() {
+    with_db!(|pool: PgPool| async move {
+        let (user_token, _) =
+            register_user(&pool, "owner_sa@example.com", "correct horse battery").await;
+        let app = router(pool.clone());
+
+        // 1. Create service account with scoped permissions
+        let (status, created) = send(
+            &app,
+            "POST",
+            "/api/v1/service-accounts",
+            Some(&user_token),
+            Some(json!({
+                "name": "ci-builder",
+                "description": "Continuous Integration",
+                "scopes": ["jobs:read", "executions:write"],
+                "expires_in_days": 30
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 201, "{created}");
+        let sa_id = created["data"]["id"].as_str().unwrap();
+        let sa_token = created["data"]["token"].as_str().unwrap();
+        assert!(sa_token.starts_with("forge_sa_"));
+
+        // 2. List service accounts
+        let (status, list) = send(
+            &app,
+            "GET",
+            "/api/v1/service-accounts",
+            Some(&user_token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200);
+        let items = list["data"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["id"] == sa_id));
+
+        // 3. Service account authenticates successfully for granted scope (jobs:read)
+        let (status, _) = send(&app, "GET", "/api/v1/jobs", Some(sa_token), None, &[]).await;
+        assert_eq!(status, 200);
+
+        // 4. Service account is denied for ungranted scope (jobs:write)
+        let (status, denied) = send(
+            &app,
+            "POST",
+            "/api/v1/jobs",
+            Some(sa_token),
+            Some(json!({ "name": "forbidden-job" })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 403, "{denied}");
+
+        // 5. Revoke service account
+        let (status, _) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/service-accounts/{sa_id}/revoke"),
+            Some(&user_token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        // 6. Revoked service account token is now refused
+        let (status, _) = send(&app, "GET", "/api/v1/jobs", Some(sa_token), None, &[]).await;
+        assert_eq!(status, 401);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn oidc_provider_registration_and_login_flow() {
+    with_db!(|pool: PgPool| async move {
+        let (admin_token, _) =
+            register_user(&pool, "owner_oidc@example.com", "correct horse battery").await;
+        let app = router(pool.clone());
+
+        // 1. Admin registers an OIDC provider with domain restriction
+        let (status, registered) = send(
+            &app,
+            "POST",
+            "/api/v1/auth/oidc/providers",
+            Some(&admin_token),
+            Some(json!({
+                "name": "corporate-idp",
+                "issuer": "https://idp.corporate.example",
+                "client_id": "corp-client-123",
+                "client_secret": "corp-secret-abc",
+                "allowed_email_domains": ["corporate.example"]
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 201, "{registered}");
+        let provider_id = registered["data"]["id"].as_str().unwrap();
+
+        // 2. Public discovery of providers
+        let (status, list) =
+            send(&app, "GET", "/api/v1/auth/oidc/providers", None, None, &[]).await;
+        assert_eq!(status, 200);
+        let providers = list["data"].as_array().unwrap();
+        let found = providers
+            .iter()
+            .find(|p| p["name"] == "corporate-idp")
+            .expect("corporate-idp in list");
+        assert_eq!(found["domains_restricted"], true);
+
+        // 3. Initiate PKCE login flow
+        let (status, login_info) = send(
+            &app,
+            "GET",
+            "/api/v1/auth/oidc/login/corporate-idp",
+            None,
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(login_info["data"]["authorization_url"]
+            .as_str()
+            .unwrap()
+            .contains("response_type=code"));
+        assert!(login_info["data"]["code_verifier"].is_string());
+
+        // 4. Callback with unapproved domain is refused
+        let (status, refused) = send(
+            &app,
+            "POST",
+            "/api/v1/auth/oidc/callback",
+            None,
+            Some(json!({
+                "provider_name": "corporate-idp",
+                "code": "auth-code-789",
+                "email": "attacker@evil.example"
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 403, "{refused}");
+
+        // 5. Callback with approved domain creates/links user and issues session
+        let (status, session) = send(
+            &app,
+            "POST",
+            "/api/v1/auth/oidc/callback",
+            None,
+            Some(json!({
+                "provider_name": "corporate-idp",
+                "code": "auth-code-789",
+                "email": "alice@corporate.example",
+                "display_name": "Alice Developer"
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{session}");
+        let sso_access_token = session["data"]["access_token"].as_str().unwrap();
+        assert_eq!(session["data"]["email"], "alice@corporate.example");
+
+        // 6. Authenticated call with SSO token succeeds
+        let (status, jobs) = send(
+            &app,
+            "GET",
+            "/api/v1/jobs",
+            Some(sso_access_token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{jobs}");
+
+        // 7. Delete provider
+        let (status, _) = send(
+            &app,
+            "DELETE",
+            &format!("/api/v1/auth/oidc/providers/{provider_id}"),
+            Some(&admin_token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200);
     })
     .await;
 }

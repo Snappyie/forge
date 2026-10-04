@@ -71,7 +71,8 @@ pub struct OccurrencePlan {
     pub skipped: Vec<(DateTime<Utc>, SkipReason)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SkipReason {
     /// Beyond the catch-up ceiling (spec 09.8).
     CatchUpLimit,
@@ -79,6 +80,19 @@ pub enum SkipReason {
     NonexistentLocalTime,
     /// Collapsed onto an occurrence that already exists.
     AlreadyMaterialised,
+    /// Skipped because the occurrence falls on a holiday or blackout date.
+    BlackoutOrHoliday,
+    /// Skipped because the occurrence falls outside the permitted daily time window.
+    OutsideTimeWindow,
+}
+
+/// A permitted daily execution window within a schedule's local timezone.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimeWindow {
+    /// Hour of day (0..=23) in the schedule's timezone when runs may begin.
+    pub start_hour: u8,
+    /// Hour of day (0..=23) in the schedule's timezone when runs must cease.
+    pub end_hour: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

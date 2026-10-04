@@ -106,10 +106,8 @@ macro_rules! with_db {
             match TestDb::new().await {
                 Some(db) => {
                     let db = Arc::new(db);
-                    let outcome = tokio::spawn(std::panic::AssertUnwindSafe(
-                        $body(db.pool.clone()),
-                    ))
-                    .await;
+                    let outcome =
+                        tokio::spawn(std::panic::AssertUnwindSafe($body(db.pool.clone()))).await;
                     match Arc::try_unwrap(db) {
                         Ok(db) => db.cleanup().await,
                         Err(_) => eprintln!("warning: test db handle still shared"),
@@ -132,15 +130,13 @@ async fn multi_tenant_user(db: &PgPool, email: &str) -> (Uuid, String, String) {
     let user_id = Uuid::new_v4();
     let password_hash = forge_auth::hash_password("multi-tenant-password").unwrap();
 
-    sqlx::query(
-        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)",
-    )
-    .bind(user_id)
-    .bind(email)
-    .bind(password_hash)
-    .execute(db)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(email)
+        .bind(password_hash)
+        .execute(db)
+        .await
+        .unwrap();
 
     // Two tenants, named so their alphabetical order is not the same as the
     // order they are inserted in — the old `LIMIT 1` bug was an ordering bug.

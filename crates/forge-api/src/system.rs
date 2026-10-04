@@ -418,6 +418,190 @@ pub async fn revoke_api_key(
     )))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateServiceAccountRequest {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub expires_in_days: Option<i64>,
+}
+
+/// `POST /service-accounts` — mint a new scoped service account.
+pub async fn create_service_account(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Json(body): Json<CreateServiceAccountRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), ApiError> {
+    auth.require("users:write")?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::validation("name is required").with_detail("name", "empty"));
+    }
+
+    let token = forge_auth::generate_service_account_token(&state.api_key_pepper);
+    let prefix: String = token.raw.chars().take(15).collect();
+    let raw_token = token.raw;
+    let hash = token.hash;
+
+    let id = Uuid::new_v4();
+    let expires_at = body
+        .expires_in_days
+        .map(|days| Utc::now() + chrono::Duration::days(days.max(1)));
+
+    sqlx::query(
+        "INSERT INTO service_accounts (id, tenant_id, name, description, token_hash, token_prefix, scopes, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(name)
+    .bind(body.description.as_deref())
+    .bind(&hash)
+    .bind(&prefix)
+    .bind(&body.scopes)
+    .bind(expires_at)
+    .bind(auth.user_id)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "service_accounts:create",
+            "SERVICE_ACCOUNT",
+            Some(id),
+        ))
+        .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            json!({
+                "id": id,
+                "name": name,
+                "description": body.description,
+                "token": raw_token,
+                "prefix": prefix,
+                "scopes": body.scopes,
+                "expires_at": expires_at,
+                "warning": "this token is shown only once; store it now",
+            }),
+            auth.request_id,
+        )),
+    ))
+}
+
+/// `GET /service-accounts` — list active and revoked service accounts.
+pub async fn list_service_accounts(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+) -> Result<Json<ListResponse<serde_json::Value>>, ApiError> {
+    auth.require("users:read")?;
+
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT json_build_object(
+             'id', id, 'name', name, 'description', description,
+             'prefix', token_prefix, 'scopes', scopes,
+             'revoked', revoked_at IS NOT NULL,
+             'expires_at', expires_at, 'created_at', created_at,
+             'last_used_at', last_used_at
+         )
+         FROM service_accounts WHERE tenant_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let items = rows.into_iter().map(|(v,)| v).collect();
+    Ok(Json(ListResponse::new(
+        items,
+        Default::default(),
+        auth.request_id,
+    )))
+}
+
+/// `POST /service-accounts/{id}/revoke` — revoke a service account immediately.
+pub async fn revoke_service_account(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(sa_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("users:write")?;
+
+    let affected = sqlx::query(
+        "UPDATE service_accounts SET revoked_at = NOW() WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(sa_id)
+    .bind(auth.tenant_id.into_uuid())
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::not_found("service account"));
+    }
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "service_accounts:revoke",
+            "SERVICE_ACCOUNT",
+            Some(sa_id),
+        ))
+        .await;
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": sa_id, "revoked": true }),
+        auth.request_id,
+    )))
+}
+
+/// `DELETE /service-accounts/{id}` — delete a service account.
+pub async fn delete_service_account(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(sa_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("users:write")?;
+
+    let affected = sqlx::query("DELETE FROM service_accounts WHERE id = $1 AND tenant_id = $2")
+        .bind(sa_id)
+        .bind(auth.tenant_id.into_uuid())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::not_found("service account"));
+    }
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "service_accounts:delete",
+            "SERVICE_ACCOUNT",
+            Some(sa_id),
+        ))
+        .await;
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": sa_id, "deleted": true }),
+        auth.request_id,
+    )))
+}
+
 /// `GET /integrations` (spec 05 endpoint 53).
 /// `GET /integrations` (spec 05 endpoint 53, UI.md section 74).
 ///

@@ -406,6 +406,17 @@ pub fn generate_api_key(pepper: &[u8]) -> GeneratedApiKey {
     }
 }
 
+/// Generates a service account token with `forge_sa_` prefix.
+pub fn generate_service_account_token(pepper: &[u8]) -> GeneratedApiKey {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let raw = format!("forge_sa_{}", base64_url_encode(&bytes));
+    GeneratedApiKey {
+        hash: hash_api_key_with(pepper, &raw),
+        raw,
+    }
+}
+
 /// Hashes an API key for lookup.
 pub fn hash_api_key(pepper: &[u8], raw: &str) -> String {
     hash_api_key_with(pepper, raw)

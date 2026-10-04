@@ -113,6 +113,13 @@ pub struct NewChildExecution {
     pub priority: String,
 }
 
+/// Where a sub-workflow node's work should be sent.
+#[derive(Debug, Clone)]
+pub struct WorkflowDispatchTarget {
+    pub workflow_version_id: Uuid,
+    pub timeout_seconds: i32,
+}
+
 /// Everything needed to start a run.
 #[derive(Debug, Clone)]
 pub struct NewWorkflowRun {
@@ -120,6 +127,7 @@ pub struct NewWorkflowRun {
     pub workflow_id: Uuid,
     pub workflow_version_id: Uuid,
     pub trigger_source: String,
+    pub parent_execution_id: Option<Uuid>,
     pub correlation_id: Option<String>,
     pub input: Value,
     pub timeout_seconds: i32,
@@ -220,8 +228,8 @@ impl<'a> WorkflowRunRepository<'a> {
             sqlx::query(
                 "INSERT INTO executions
                      (id, tenant_id, workflow_id, workflow_version_id, status, trigger_source,
-                      correlation_id, input, workflow_context, started_at)
-                 VALUES ($1, $2, $3, $4, 'RUNNING', $5, $6, $7, $8, NOW())",
+                      correlation_id, input, workflow_context, started_at, parent_execution_id)
+                 VALUES ($1, $2, $3, $4, 'RUNNING', $5, $6, $7, $8, NOW(), $9)",
             )
             .bind(id)
             .bind(run.tenant_id.into_uuid())
@@ -231,6 +239,7 @@ impl<'a> WorkflowRunRepository<'a> {
             .bind(run.correlation_id.as_deref())
             .bind(&run.input)
             .bind(&context)
+            .bind(run.parent_execution_id)
             .execute(&mut *tx)
             .await
             .map_err(StorageError::from_sqlx)?;
@@ -469,6 +478,50 @@ impl<'a> WorkflowRunRepository<'a> {
             }))
     }
 
+    /// Resolves which workflow version a SUB_WORKFLOW node should execute.
+    pub async fn workflow_dispatch_target(
+        &self,
+        tenant_id: TenantId,
+        workflow_id: Uuid,
+    ) -> Result<Option<WorkflowDispatchTarget>> {
+        let row: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+            "SELECT w.current_version_id,
+                    (SELECT v.id FROM workflow_versions v
+                      WHERE v.workflow_id = w.id AND v.published_at IS NOT NULL
+                      ORDER BY v.version_number DESC LIMIT 1) AS latest_version_id
+             FROM workflows w
+             WHERE w.id = $1 AND w.tenant_id = $2 AND w.status <> 'ARCHIVED'",
+        )
+        .bind(workflow_id)
+        .bind(tenant_id.into_uuid())
+        .fetch_optional(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?;
+
+        let Some((current, latest)) = row else {
+            return Ok(None);
+        };
+
+        let Some(version_id) = current.or(latest) else {
+            return Ok(None);
+        };
+
+        let timeout_seconds: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(timeout_seconds, 86400) FROM workflow_versions WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(version_id)
+        .bind(tenant_id.into_uuid())
+        .fetch_optional(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?
+        .unwrap_or(86_400);
+
+        Ok(Some(WorkflowDispatchTarget {
+            workflow_version_id: version_id,
+            timeout_seconds,
+        }))
+    }
+
     /// Reads a node's state from its database id.
     ///
     /// The approval endpoints address a node by the id the caller sees in the
@@ -553,9 +606,11 @@ impl<'a> WorkflowRunRepository<'a> {
         run_id: Uuid,
         status: &str,
         error_message: Option<&str>,
+        output: Option<&Value>,
     ) -> Result<bool> {
         let affected = sqlx::query(
             "UPDATE executions SET status = $2, error_message = COALESCE($3, error_message),
+                    output = COALESCE($4, output),
                     ended_at = NOW(), updated_at = NOW()
              WHERE id = $1 AND workflow_id IS NOT NULL AND job_id IS NULL
                AND status IN ('RUNNING', 'CANCEL_REQUESTED')",
@@ -563,6 +618,7 @@ impl<'a> WorkflowRunRepository<'a> {
         .bind(run_id)
         .bind(status)
         .bind(error_message)
+        .bind(output)
         .execute(self.pool)
         .await
         .map_err(StorageError::from_sqlx)?
@@ -740,6 +796,18 @@ fn node_type_from_storage(raw_type: &str, config: &Value, node_key: &str) -> Res
             Ok(NodeType::Map {
                 target_node_id: target,
             })
+        }
+        "SUB_WORKFLOW" => {
+            let workflow_id = config
+                .get("workflow_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "sub-workflow node `{node_key}` does not reference a valid workflow_id"
+                    ))
+                })?;
+            Ok(NodeType::SubWorkflow { workflow_id })
         }
         // A webhook node is an outbound HTTP call. Until the dispatcher performs
         // it, treating it as a zero-second delay would silently succeed, so it

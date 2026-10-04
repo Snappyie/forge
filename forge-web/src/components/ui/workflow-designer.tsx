@@ -37,7 +37,7 @@ interface Definition {
   edges?: { from: string; to: string }[];
 }
 
-const NODE_TYPES = ["JOB", "APPROVAL", "DELAY", "CONDITION", "MAP", "WEBHOOK"] as const;
+const NODE_TYPES = ["JOB", "APPROVAL", "DELAY", "CONDITION", "MAP", "WEBHOOK", "SUB_WORKFLOW"] as const;
 
 export function WorkflowDesigner({
   workflowId,
@@ -53,15 +53,19 @@ export function WorkflowDesigner({
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [jobs, setJobs] = useState<{ id: string, name: string }[]>([]);
+  const [workflows, setWorkflows] = useState<{ id: string, name: string }[]>([]);
 
   useUnsavedChanges(dirty);
 
-  // Fetch jobs for autocomplete
+  // Fetch jobs and workflows for autocomplete
   useEffect(() => {
     api.get<{ id: string, name: string }[]>("/jobs")
       .then(res => setJobs(Array.isArray(res) ? res : []))
       .catch(() => {});
-  }, []);
+    api.get<{ id: string, name: string }[]>("/workflows")
+      .then(res => setWorkflows(Array.isArray(res) ? res.filter(w => w.id !== workflowId) : []))
+      .catch(() => {});
+  }, [workflowId]);
 
   // Seed the canvas from the stored definition once it arrives.
   useEffect(() => {
@@ -295,6 +299,75 @@ export function WorkflowDesigner({
                 }}
                 className="w-64"
                 placeholder="https://..."
+              />
+            </div>
+          )}
+          {current.data.type === "SUB_WORKFLOW" && (
+            <div className="flex flex-col gap-1 relative">
+              <Label htmlFor="node-sub-wf">Child Workflow</Label>
+              <Input
+                id="node-sub-wf"
+                list="wf-subworkflows-list"
+                value={workflows.find(w => w.id === current.data.config?.workflow_id)?.name || current.data.config?.workflow_id || ""}
+                onChange={(e) => {
+                  const match = workflows.find(w => w.name === e.target.value);
+                  const targetWfId = match ? match.id : e.target.value;
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, workflow_id: targetWfId } } } : n));
+                  setDirty(true);
+                }}
+                placeholder="Select or enter workflow..."
+                autoComplete="off"
+                className="w-56"
+              />
+              <datalist id="wf-subworkflows-list">
+                {workflows.map(w => (
+                  <option key={w.id} value={w.name} />
+                ))}
+              </datalist>
+            </div>
+          )}
+          {current.data.type === "CONDITION" && (
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="node-condition">Expression</Label>
+              <Input
+                id="node-condition"
+                value={current.data.config?.expression || ""}
+                onChange={(e) => {
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, expression: e.target.value } } } : n));
+                  setDirty(true);
+                }}
+                className="w-56"
+                placeholder="e.g. 1 == 1"
+              />
+            </div>
+          )}
+          {current.data.type === "APPROVAL" && (
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="node-approval">Required Role</Label>
+              <Input
+                id="node-approval"
+                value={current.data.config?.required_role || "ADMIN"}
+                onChange={(e) => {
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, required_role: e.target.value } } } : n));
+                  setDirty(true);
+                }}
+                className="w-36"
+                placeholder="ADMIN"
+              />
+            </div>
+          )}
+          {current.data.type === "MAP" && (
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="node-map">Target Node Key</Label>
+              <Input
+                id="node-map"
+                value={current.data.config?.target_node_id || ""}
+                onChange={(e) => {
+                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, target_node_id: e.target.value } } } : n));
+                  setDirty(true);
+                }}
+                className="w-40"
+                placeholder="e.g. process_item"
               />
             </div>
           )}

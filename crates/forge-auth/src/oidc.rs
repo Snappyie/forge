@@ -46,10 +46,7 @@ impl ProviderMetadata {
     /// configured. Without that check, a misconfigured or hijacked DNS entry
     /// could redirect the whole login flow at a substitute IdP, and every token
     /// issued by it would then verify.
-    pub async fn discover(
-        client: &reqwest::Client,
-        issuer: &str,
-    ) -> Result<Self, AuthError> {
+    pub async fn discover(client: &reqwest::Client, issuer: &str) -> Result<Self, AuthError> {
         let base = issuer.trim_end_matches('/');
         let url = format!("{base}/.well-known/openid-configuration");
 
@@ -144,9 +141,7 @@ impl OidcProvider {
             // The body can carry the provider's own error code, which is what an
             // operator needs to debug a misconfigured client — but it can also
             // echo the submitted code, so only the status is surfaced here.
-            return Err(AuthError::Oidc(format!(
-                "token endpoint returned {status}"
-            )));
+            return Err(AuthError::Oidc(format!("token endpoint returned {status}")));
         }
 
         response
@@ -352,10 +347,7 @@ pub enum LinkOutcome {
 /// This is the control that stops a misconfigured IdP from granting access to
 /// the console: a provider restricted to verified domains refuses an identity
 /// outside them instead of provisioning one.
-pub fn may_provision(
-    allowed_domains: &[String],
-    email: Option<&str>,
-) -> bool {
+pub fn may_provision(allowed_domains: &[String], email: Option<&str>) -> bool {
     if allowed_domains.is_empty() {
         // Unconfigured means open, which is the right default for a
         // self-hosted single-provider install and the wrong one otherwise — so
@@ -380,9 +372,12 @@ pub fn may_provision(
     }
 
     let domain = domain.to_ascii_lowercase();
-    allowed_domains
-        .iter()
-        .any(|allowed| allowed.trim().trim_start_matches('@').eq_ignore_ascii_case(&domain))
+    allowed_domains.iter().any(|allowed| {
+        allowed
+            .trim()
+            .trim_start_matches('@')
+            .eq_ignore_ascii_case(&domain)
+    })
 }
 
 /// Serialises a provider for the console.
@@ -435,7 +430,10 @@ mod tests {
     fn generated_verifiers_are_unique() {
         let a = PkceVerifier::generate();
         let b = PkceVerifier::generate();
-        assert_ne!(a.verifier, b.verifier, "a fresh login must not reuse a verifier");
+        assert_ne!(
+            a.verifier, b.verifier,
+            "a fresh login must not reuse a verifier"
+        );
     }
 
     #[test]
@@ -444,8 +442,7 @@ mod tests {
         let b = StateToken::generate();
         assert_ne!(a.0, b.0);
         assert!(
-            a.0
-                .chars()
+            a.0.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "state travels in a query string, so it must be URL-safe"
         );

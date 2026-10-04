@@ -18,6 +18,10 @@ pub enum SkipReason {
     CatchUpLimit,
     /// The schedule was disabled between claiming and planning.
     ScheduleDisabled,
+    /// Skipped because the occurrence falls on a holiday or blackout date.
+    BlackoutOrHoliday,
+    /// Skipped because the occurrence falls outside the permitted daily time window.
+    OutsideTimeWindow,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -26,6 +30,8 @@ impl std::fmt::Display for SkipReason {
             SkipReason::AlreadyMaterialised => "already materialised",
             SkipReason::CatchUpLimit => "beyond the catch-up limit",
             SkipReason::ScheduleDisabled => "schedule is disabled",
+            SkipReason::BlackoutOrHoliday => "occurrence falls on a blackout date or holiday",
+            SkipReason::OutsideTimeWindow => "occurrence falls outside permitted time window",
         })
     }
 }

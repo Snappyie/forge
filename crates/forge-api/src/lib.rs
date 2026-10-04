@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod applications;
 pub mod auth_routes;
 pub mod bulk;
 pub mod envelope;

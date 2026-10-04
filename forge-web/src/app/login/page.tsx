@@ -10,8 +10,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { AlertTriangle, Key, Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, Key, Loader2, Shield } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -25,8 +25,26 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
+  const [oidcProviders, setOidcProviders] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get<{ id: string; name: string }[]>("/auth/oidc/providers")
+      .then((res) => setOidcProviders(Array.isArray(res) ? res : []))
+      .catch(() => {});
+  }, []);
+
+  async function onOidcLogin(providerName: string) {
+    try {
+      const res = await api.get<{ authorization_url: string }>(`/auth/oidc/login/${providerName}`);
+      if (res?.authorization_url) {
+        window.location.assign(res.authorization_url);
+      }
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "Failed to initiate SSO sign in");
+    }
+  }
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -147,6 +165,24 @@ export default function LoginPage() {
               {busy ? "Signing in…" : "Sign in"}
             </Button>
           </form>
+
+          {/* SSO Providers */}
+          {oidcProviders.length > 0 && (
+            <div className="mt-4 flex flex-col gap-2">
+              {oidcProviders.map((provider) => (
+                <Button
+                  key={provider.id}
+                  variant="outline"
+                  type="button"
+                  onClick={() => onOidcLogin(provider.name)}
+                  className="h-11 w-full flex items-center justify-center gap-2 border-emerald-500/30 hover:bg-emerald-500/10"
+                >
+                  <Shield className="size-4 text-emerald-600 dark:text-emerald-400" />
+                  <span>Sign in with {provider.name.charAt(0).toUpperCase() + provider.name.slice(1)} SSO</span>
+                </Button>
+              ))}
+            </div>
+          )}
 
           {/* Divider */}
           <div className="my-6 flex items-center gap-3">

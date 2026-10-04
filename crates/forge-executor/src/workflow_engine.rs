@@ -62,6 +62,11 @@ pub enum WorkflowAction {
         target_node_id: String,
         items: Vec<serde_json::Value>,
     },
+    /// Dispatch the referenced sub-workflow for this node.
+    DispatchWorkflow {
+        node_id: String,
+        workflow_id: uuid::Uuid,
+    },
     /// The node finished unsuccessfully.
     NodeFailed { node_id: String, reason: String },
 }
@@ -416,6 +421,15 @@ impl WorkflowExecution {
                         items,
                     })
                 }
+            }
+
+            NodeType::SubWorkflow { workflow_id } => {
+                self.node_states
+                    .insert(node_id.to_string(), NodeState::Running);
+                Some(WorkflowAction::DispatchWorkflow {
+                    node_id: node_id.to_string(),
+                    workflow_id: *workflow_id,
+                })
             }
         };
 
