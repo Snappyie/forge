@@ -142,6 +142,8 @@ macro_rules! with_db {
 }
 
 const SECRET: &str = "integration-test-secret-not-for-production";
+/// A stand-in for `FORGE_API_KEY_HASHING_SECRET` in tests.
+const API_KEY_PEPPER: &[u8] = b"integration-test-pepper";
 
 fn router(pool: PgPool) -> axum::Router {
     create_router(
@@ -151,6 +153,7 @@ fn router(pool: PgPool) -> axum::Router {
         true,
         1024 * 1024,
         4 * 1024 * 1024,
+        API_KEY_PEPPER,
     )
 }
 
@@ -1644,4 +1647,189 @@ async fn dispatch_honours_worker_state_and_concurrency() {
     );
 
     db.cleanup().await;
+}
+
+/// End-to-end smoke test verifying the worker execution protocol:
+/// register worker → receive worker token → heartbeat worker → enqueue job →
+/// worker claims job → execution runs → heartbeat → complete → execution becomes SUCCEEDED.
+#[tokio::test]
+async fn worker_end_to_end_lifecycle_smoke_test() {
+    with_db!(|pool: PgPool| async move {
+        let (token, _tenant_id) =
+            register_user(&pool, "worker-admin@example.com", "correct horse battery").await;
+        let app = router(pool.clone());
+
+        // 1. Register worker via admin endpoint
+        let (status, reg_body) = send(
+            &app,
+            "POST",
+            "/api/v1/workers/register",
+            Some(&token),
+            Some(json!({
+                "hostname": "worker-e2e-node-1",
+                "capabilities": ["compute", "memory"],
+                "labels": { "tier": "gold" }
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 201, "worker registration failed: {reg_body}");
+        assert_eq!(reg_body["data"]["status"], "READY");
+        let worker_id = reg_body["data"]["id"]
+            .as_str()
+            .expect("worker id")
+            .to_string();
+        let worker_token = reg_body["data"]["token"]
+            .as_str()
+            .expect("worker token")
+            .to_string();
+
+        // 2. Heartbeat worker using worker token
+        let (status, beat) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/workers/{worker_id}/heartbeat"),
+            Some(&worker_token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "worker heartbeat failed: {beat}");
+
+        // 3. Define and publish a job
+        let (status, job) = send(
+            &app,
+            "POST",
+            "/api/v1/jobs",
+            Some(&token),
+            Some(json!({ "name": "e2e-smoke-job", "key": "e2e_job" })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 201, "{job}");
+        let job_id = job["data"]["id"].as_str().unwrap().to_string();
+
+        let (status, version) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/versions"),
+            Some(&token),
+            Some(json!({
+                "execution_type": "WORKER_TASK",
+                "resource_requirements": { "worker_capabilities": ["compute"] }
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 201, "{version}");
+        let version_id = version["data"]["id"].as_str().unwrap().to_string();
+
+        let (status, published) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/versions/{version_id}/publish"),
+            Some(&token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{published}");
+
+        // 4. Enqueue job execution
+        let (status, triggered) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/trigger"),
+            Some(&token),
+            Some(json!({ "input": { "task_payload": 42 } })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 202, "{triggered}");
+        assert_eq!(triggered["data"]["status"], "QUEUED");
+        let execution_id = triggered["data"]["id"].as_str().unwrap().to_string();
+
+        // 5. Worker claims job using worker token
+        let (status, claim_body) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/workers/{worker_id}/claim"),
+            Some(&worker_token),
+            Some(json!({})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "worker claim failed: {claim_body}");
+        assert!(
+            !claim_body["data"]["execution"].is_null(),
+            "execution should be claimed: {claim_body}"
+        );
+        assert_eq!(claim_body["data"]["execution"]["id"], execution_id);
+        let lease_id = claim_body["data"]["lease"]["id"]
+            .as_str()
+            .expect("lease id")
+            .to_string();
+
+        // 6. Execution heartbeat using worker token
+        let (status, hb_res) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/executions/{execution_id}/heartbeat"),
+            Some(&worker_token),
+            Some(json!({ "lease_id": lease_id, "worker_id": worker_id })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "execution heartbeat failed: {hb_res}");
+
+        // 7. Execution logs submitted by worker
+        let (status, log_res) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/executions/{execution_id}/logs"),
+            Some(&worker_token),
+            Some(json!({
+                "lines": [
+                    { "stream": "stdout", "content": "Processing task 42" },
+                    { "stream": "stdout", "content": "Task 42 completed successfully" }
+                ]
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 201, "execution logs failed: {log_res}");
+
+        // 8. Execution completion by worker
+        let (status, comp_res) = send(
+            &app,
+            "POST",
+            &format!("/api/v1/executions/{execution_id}/complete"),
+            Some(&worker_token),
+            Some(json!({
+                "lease_id": lease_id,
+                "worker_id": worker_id,
+                "succeeded": true,
+                "output": { "result": 84 }
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "execution complete failed: {comp_res}");
+        assert_eq!(comp_res["data"]["status"], "SUCCEEDED");
+
+        // 9. Verify execution state via GET /executions/{id}
+        let (status, exec_view) = send(
+            &app,
+            "GET",
+            &format!("/api/v1/executions/{execution_id}"),
+            Some(&token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{exec_view}");
+        assert_eq!(exec_view["data"]["status"], "SUCCEEDED");
+        assert_eq!(exec_view["data"]["worker_id"], worker_id);
+    })
+    .await;
 }

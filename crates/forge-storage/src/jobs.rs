@@ -560,8 +560,10 @@ impl<'a> JobVersionRepository<'a> {
 pub struct ExecutionRow {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub job_id: Uuid,
-    pub job_version_id: Uuid,
+    /// `None` for a workflow run: a run is an execution that names a workflow
+    /// rather than a job (migration 016).
+    pub job_id: Option<Uuid>,
+    pub job_version_id: Option<Uuid>,
     pub workflow_id: Option<Uuid>,
     pub status: String,
     pub queue_id: Option<Uuid>,
@@ -578,11 +580,20 @@ pub struct ExecutionRow {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// The task input the worker needs in order to do the work (spec 01.6).
+    pub input: serde_json::Value,
+    /// The result a completed attempt reported, where one was given.
+    pub output: Option<serde_json::Value>,
+    /// When a `RETRY_SCHEDULED` execution becomes eligible again (migration 017).
+    pub retry_at: Option<DateTime<Utc>>,
+    /// When a running attempt must be declared `TIMED_OUT` (migration 017).
+    pub deadline_at: Option<DateTime<Utc>>,
 }
 
 const EXECUTION_COLUMNS: &str = "id, tenant_id, job_id, job_version_id, workflow_id, status, \
      queue_id, worker_id, attempt_count, priority, trigger_source, scheduled_for, enqueued_at, \
-     correlation_id, error_class, error_code, error_message, created_at, started_at, ended_at";
+     correlation_id, error_class, error_code, error_message, created_at, started_at, ended_at, \
+     input, output, retry_at, deadline_at";
 
 /// Filters for `list_executions` (spec 05 endpoint 17).
 #[derive(Debug, Clone, Default)]
@@ -663,6 +674,17 @@ impl<'a> ExecutionRepository<'a> {
         let mut tx = self.pool.begin().await.map_err(StorageError::from_sqlx)?;
 
         let result = async {
+            // Every execution belongs to a queue. A job without an explicit
+            // default queue still needs one, otherwise the execution lands with
+            // `queue_id IS NULL` and a worker polling a named queue can never
+            // claim it: the work is visible in the queue list and unreachable by
+            // any worker. Only a caller that explicitly asks for "any queue" —
+            // which no SDK does — would find it.
+            let queue_id = match new.queue_id {
+                Some(id) => Some(id),
+                None => Some(default_queue_id(&mut tx, new.tenant_id).await?),
+            };
+
             let row = sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO executions
                      (id, tenant_id, job_id, job_version_id, queue_id, status, priority,
@@ -674,7 +696,7 @@ impl<'a> ExecutionRepository<'a> {
             .bind(new.tenant_id.into_uuid())
             .bind(new.job_id.into_uuid())
             .bind(new.job_version_id.into_uuid())
-            .bind(new.queue_id)
+            .bind(queue_id)
             .bind(new.priority.as_str())
             .bind(new.trigger_source.as_str())
             .bind(new.schedule_id)
@@ -832,6 +854,14 @@ impl<'a> ExecutionRepository<'a> {
                      enqueued_at = $7,
                      error_class = COALESCE($8, error_class),
                      error_message = COALESCE($9, error_message),
+                     -- Spec 02's side effects: becoming QUEUED clears the
+                     -- pending retry, and a terminal state clears the deadline
+                     -- so the timeout sweeper stops looking at it.
+                     retry_at = CASE WHEN $3 = 'QUEUED' THEN NULL ELSE retry_at END,
+                     deadline_at = CASE
+                         WHEN $3 IN ('SUCCEEDED','FAILED','CANCELLED','TIMED_OUT',
+                                     'DEAD_LETTERED','RETRY_SCHEDULED')
+                         THEN NULL ELSE deadline_at END,
                      updated_at = NOW()
                  WHERE id = $1 AND tenant_id = $2
                  RETURNING {EXECUTION_COLUMNS}"
@@ -894,6 +924,11 @@ impl<'a> ExecutionRepository<'a> {
 
         let sql = format!(
             "UPDATE executions SET status = 'DISPATCHED', worker_id = $3, enqueued_at = NOW(),
+                    -- The ceiling is the one the version agreed to; a version
+                    -- without a timeout falls back to one hour (spec 10.7).
+                    deadline_at = NOW() + make_interval(secs => COALESCE(
+                        (SELECT timeout_seconds FROM job_versions
+                          WHERE id = executions.job_version_id), 3600)),
                     updated_at = NOW()
              WHERE id = (
                  SELECT e.id
@@ -905,9 +940,35 @@ impl<'a> ExecutionRepository<'a> {
                  JOIN workers w ON w.id = $3
                  WHERE e.status = 'QUEUED'
                    AND e.tenant_id = $1
+                   -- A workflow run is driven by the server, never claimed by a
+                   -- worker, so it must not enter the dispatch queue.
+                   AND e.job_id IS NOT NULL
                    AND ($2::uuid IS NULL OR e.queue_id = $2)
                    -- A paused queue must stop receiving work (spec 10.10).
                    AND (e.queue_id IS NULL OR q.paused = FALSE)
+                   -- Queue max concurrency:
+                   AND (
+                       e.queue_id IS NULL
+                       OR q.max_concurrency IS NULL
+                       OR (
+                           SELECT COUNT(*) FROM executions q_active
+                           WHERE q_active.queue_id = e.queue_id
+                             AND q_active.tenant_id = e.tenant_id
+                             AND q_active.status IN ('DISPATCHED','RUNNING')
+                       ) < q.max_concurrency
+                   )
+                   -- Worker capability matching:
+                   AND (
+                       w.capabilities @> '[\"*\"]'::jsonb
+                       OR jv.resource_requirements IS NULL
+                       OR jv.resource_requirements->'worker_capabilities' IS NULL
+                       OR jsonb_typeof(jv.resource_requirements->'worker_capabilities') <> 'array'
+                       OR jsonb_array_length(jv.resource_requirements->'worker_capabilities') = 0
+                       OR (
+                           jsonb_typeof(w.capabilities) = 'array'
+                           AND w.capabilities @> (jv.resource_requirements->'worker_capabilities')
+                       )
+                   )
                    -- A revoked, offline, or draining worker takes no work.
                    AND w.tenant_id = $1
                    AND w.status IN ('READY','BUSY')
@@ -956,6 +1017,275 @@ impl<'a> ExecutionRepository<'a> {
             .fetch_optional(self.pool)
             .await
             .map_err(StorageError::from_sqlx)
+    }
+
+    /// Dispatches one *specific* queued execution to a named worker (spec 10.10).
+    ///
+    /// `claim_next` is the pull path: a worker asks for whatever is next.
+    /// `POST /executions/{id}/dispatch` is the push path and already knows which
+    /// execution it means, so it must not re-derive a worker from the execution
+    /// id. The transition is replayed through the domain machine, and the worker
+    /// must still be able to accept work in this tenant.
+    pub async fn dispatch_to(
+        &self,
+        tenant_id: TenantId,
+        execution_id: Uuid,
+        worker_id: Uuid,
+    ) -> Result<Option<ExecutionRow>> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from_sqlx)?;
+
+        let result = async {
+            let current = sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
+                "SELECT {EXECUTION_COLUMNS} FROM executions
+                 WHERE id = $1 AND tenant_id = $2 FOR UPDATE"
+            )))
+            .bind(execution_id)
+            .bind(tenant_id.into_uuid())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+            let Some(current) = current else {
+                return Ok(None);
+            };
+
+            let mut exec = build_domain_execution(&current);
+            exec.transition_to(ExecutionStatus::Dispatched)
+                .map_err(|e| StorageError::Validation(e.to_string()))?;
+
+            // A paused queue must not receive work, even by explicit dispatch.
+            if let Some(queue_id) = current.queue_id {
+                let queue_info: Option<(bool, Option<i32>)> = sqlx::query_as(
+                    "SELECT paused, max_concurrency FROM queues WHERE id = $1 AND tenant_id = $2",
+                )
+                .bind(queue_id)
+                .bind(tenant_id.into_uuid())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from_sqlx)?;
+                if let Some((paused, max_concurrency)) = queue_info {
+                    if paused {
+                        return Err(StorageError::Validation(
+                            "the execution's queue is paused".into(),
+                        ));
+                    }
+                    if let Some(max_c) = max_concurrency {
+                        let active_count: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM executions
+                             WHERE queue_id = $1 AND tenant_id = $2
+                               AND status IN ('DISPATCHED','RUNNING')",
+                        )
+                        .bind(queue_id)
+                        .bind(tenant_id.into_uuid())
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(StorageError::from_sqlx)?;
+
+                        if active_count >= max_c as i64 {
+                            return Err(StorageError::Validation(
+                                "queue max concurrency limit reached".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let dispatchable: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+                "SELECT id, capabilities FROM workers
+                 WHERE id = $1 AND tenant_id = $2
+                   AND status IN ('READY','BUSY') AND draining = FALSE",
+            )
+            .bind(worker_id)
+            .bind(tenant_id.into_uuid())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+            let Some((_, worker_caps_val)) = dispatchable else {
+                return Err(StorageError::Validation(
+                    "the worker is unknown, offline, revoked or draining".into(),
+                ));
+            };
+
+            // Check worker capabilities if job specifies any
+            if let Some(jv_id) = current.job_version_id {
+                let reqs: Option<serde_json::Value> = sqlx::query_scalar(
+                    "SELECT resource_requirements FROM job_versions WHERE id = $1",
+                )
+                .bind(jv_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from_sqlx)?;
+
+                if let Some(req_val) = reqs {
+                    if let Some(req_caps) = req_val
+                        .get("worker_capabilities")
+                        .and_then(|c| c.as_array())
+                    {
+                        if !req_caps.is_empty() {
+                            let w_caps = worker_caps_val.as_array();
+                            let has_wildcard = w_caps
+                                .map(|caps| caps.iter().any(|c| c.as_str() == Some("*")))
+                                .unwrap_or(false);
+                            if !has_wildcard {
+                                let has_all = w_caps
+                                    .map(|caps| {
+                                        req_caps.iter().all(|req_cap| caps.contains(req_cap))
+                                    })
+                                    .unwrap_or(false);
+                                if !has_all {
+                                    return Err(StorageError::Validation(
+                                        "worker lacks required capabilities for this job".into(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A workflow run has no job version, so there is no timeout to read;
+            // the dispatch below falls back to the default ceiling.
+            let timeout_seconds: Option<i32> = sqlx::query_scalar::<_, i32>(
+                "SELECT timeout_seconds FROM job_versions WHERE id = $1",
+            )
+            .bind(current.job_version_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+            let row = sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
+                "UPDATE executions SET status = $3, worker_id = $4, enqueued_at = NOW(),
+                        deadline_at = NOW() + make_interval(secs => COALESCE($5, 3600)),
+                        updated_at = NOW()
+                 WHERE id = $1 AND tenant_id = $2
+                 RETURNING {EXECUTION_COLUMNS}"
+            )))
+            .bind(execution_id)
+            .bind(tenant_id.into_uuid())
+            .bind(ExecutionStatus::Dispatched.as_str())
+            .bind(worker_id)
+            .bind(timeout_seconds)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+            Ok(Some(row))
+        }
+        .await;
+
+        match result {
+            Ok(row) => {
+                tx.commit().await.map_err(StorageError::from_sqlx)?;
+                Ok(row)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Stores the result a completed attempt produced (spec 10.4).
+    ///
+    /// Completion carries a result "where applicable"; without persisting it the
+    /// worker's answer is accepted, acknowledged, and then silently dropped —
+    /// downstream nodes and the console both see nothing.
+    pub async fn record_output(
+        &self,
+        tenant_id: TenantId,
+        execution_id: Uuid,
+        output: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE executions SET output = $3, updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(execution_id)
+        .bind(tenant_id.into_uuid())
+        .bind(output)
+        .execute(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?;
+        Ok(())
+    }
+
+    /// Moves a failed execution to `RETRY_SCHEDULED` with the instant it may run
+    /// again (spec 10.8, spec 10.9).
+    ///
+    /// The delay is computed by the caller from the version's retry policy, so
+    /// storage records the decision rather than re-deriving it.
+    pub async fn schedule_retry(
+        &self,
+        tenant_id: TenantId,
+        execution_id: Uuid,
+        retry_at: DateTime<Utc>,
+    ) -> Result<ExecutionRow> {
+        // The state machine requires `FAILED`/`TIMED_OUT` -> `RETRY_SCHEDULED`,
+        // so the caller has already recorded the failure; this only records
+        // *when* the retry may run.
+        self.transition(
+            tenant_id,
+            execution_id,
+            ExecutionStatus::RetryScheduled,
+            None,
+            None,
+        )
+        .await?;
+
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
+            "UPDATE executions SET retry_at = $3, updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2 RETURNING {EXECUTION_COLUMNS}"
+        )))
+        .bind(execution_id)
+        .bind(tenant_id.into_uuid())
+        .bind(retry_at)
+        .fetch_one(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
+    }
+
+    /// Retries whose delay has elapsed, oldest first.
+    ///
+    /// Ordered by `retry_at` rather than `updated_at` so a retry actually waits
+    /// the backoff it was given instead of the sweep interval.
+    pub async fn due_retries(&self, limit: i64) -> Result<Vec<ExecutionRow>> {
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
+            "UPDATE executions SET status = 'QUEUED', retry_at = NULL, updated_at = NOW()
+             WHERE id IN (
+                 SELECT id FROM executions
+                 WHERE status = 'RETRY_SCHEDULED'
+                   AND retry_at IS NOT NULL
+                   AND retry_at <= NOW()
+                 ORDER BY retry_at ASC
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT $1
+             )
+             RETURNING {EXECUTION_COLUMNS}"
+        )))
+        .bind(limit)
+        .fetch_all(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
+    }
+
+    /// Executions that have outlived the timeout their version set (spec 10.7).
+    ///
+    /// Only `DISPATCHED` and `RUNNING` rows are eligible: a queued execution has
+    /// not started, so its deadline has no meaning yet.
+    pub async fn overdue(&self, limit: i64) -> Result<Vec<ExecutionRow>> {
+        sqlx::query_as::<_, ExecutionRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {EXECUTION_COLUMNS} FROM executions
+             WHERE status IN ('DISPATCHED', 'RUNNING')
+               AND deadline_at IS NOT NULL
+               AND deadline_at <= NOW()
+             ORDER BY deadline_at ASC
+             LIMIT $1"
+        )))
+        .bind(limit)
+        .fetch_all(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
     }
 
     /// Counts non-terminal executions for a scope, used by concurrency checks.
@@ -1050,12 +1380,18 @@ impl<'a> ExecutionRepository<'a> {
 
 /// Rebuilds a domain `Execution` from a stored row so the state machine can be
 /// applied without duplicating transition rules in SQL.
+///
+/// A workflow run has no job, but the transition machine never reads `job_id` —
+/// it only walks statuses — so the nil id stands in for "not job work" rather
+/// than being a meaningful reference.
 fn build_domain_execution(row: &ExecutionRow) -> forge_domain::Execution {
     forge_domain::Execution {
         id: forge_domain::ExecutionId::from_uuid(row.id),
         tenant_id: forge_domain::TenantId::from_uuid(row.tenant_id),
-        job_id: forge_domain::JobId::from_uuid(row.job_id),
-        job_version_id: forge_domain::JobVersionId::from_uuid(row.job_version_id),
+        job_id: forge_domain::JobId::from_uuid(row.job_id.unwrap_or_default()),
+        job_version_id: forge_domain::JobVersionId::from_uuid(
+            row.job_version_id.unwrap_or_default(),
+        ),
         status: row.status.parse().unwrap_or(ExecutionStatus::Queued),
         worker_id: row.worker_id.map(forge_domain::WorkerId::from_uuid),
         attempt_count: row.attempt_count.max(0) as u32,
@@ -1094,4 +1430,44 @@ pub fn bounded_concurrency(limit: u32) -> ConcurrencyPolicy {
         max_concurrent_executions: ConcurrencyLimit::Bounded(limit),
         ..Default::default()
     }
+}
+
+/// The tenant's `default` queue, created on first use.
+///
+/// Work that names no queue still has to be addressable by a worker polling a
+/// queue, and queues are how workers ask for work. Resolving the default inside
+/// the same transaction as the insert keeps the invariant "every execution has a
+/// queue" true without a separate reconciliation pass.
+async fn default_queue_id(conn: &mut sqlx::PgConnection, tenant_id: TenantId) -> Result<Uuid> {
+    let existing: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM queues WHERE tenant_id = $1 AND name = 'default'")
+            .bind(tenant_id.into_uuid())
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+    if let Some((id,)) = existing {
+        return Ok(id);
+    }
+
+    // `DO NOTHING` rather than an upsert: a concurrent insert of the same queue
+    // is not an error, and the follow-up select returns whichever row won.
+    sqlx::query(
+        "INSERT INTO queues (id, tenant_id, name) VALUES ($1, $2, 'default')
+         ON CONFLICT (tenant_id, name) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id.into_uuid())
+    .execute(&mut *conn)
+    .await
+    .map_err(StorageError::from_sqlx)?;
+
+    let (id,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM queues WHERE tenant_id = $1 AND name = 'default'")
+            .bind(tenant_id.into_uuid())
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(StorageError::from_sqlx)?;
+
+    Ok(id)
 }

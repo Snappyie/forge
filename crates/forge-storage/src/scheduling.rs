@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -27,6 +27,14 @@ pub struct DueSchedule {
     pub enabled: bool,
     pub next_run_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
+    /// Period in seconds for an INTERVAL schedule (migration 015).
+    pub interval_seconds: Option<i64>,
+    /// The single instant a ONE_TIME schedule fires at (migration 015).
+    pub one_time_at: Option<DateTime<Utc>>,
+    /// The version a PINNED schedule executes (spec 02.4).
+    pub pinned_version_id: Option<Uuid>,
+    /// Set when the scheduler disabled the schedule itself.
+    pub disabled_reason: Option<String>,
 }
 
 impl DueSchedule {
@@ -47,8 +55,8 @@ impl DueSchedule {
             schedule_type: parse_schedule_type(&self.schedule_type),
             expression: self.cron_expression.clone(),
             timezone: self.timezone.clone(),
-            interval: None,
-            one_time_at: None,
+            interval: self.interval_seconds.map(Duration::seconds),
+            one_time_at: self.one_time_at,
             misfire_policy: parse_misfire_policy(&self.misfire_policy),
             catch_up_policy: CatchUpPolicy {
                 max_occurrences: catch_up_max,
@@ -59,6 +67,35 @@ impl DueSchedule {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+}
+
+impl ClaimedSchedule {
+    /// Rebuilds the domain schedule used for occurrence calculation.
+    ///
+    /// The claimed row is the same shape as [`DueSchedule`] plus its lease; it
+    /// is converted through that type so the two can never disagree.
+    pub fn to_domain(&self, tenant: TenantId) -> Schedule {
+        DueSchedule {
+            id: self.id,
+            tenant_id: self.tenant_id,
+            target_type: self.target_type.clone(),
+            target_id: self.target_id,
+            target_version_policy: self.target_version_policy.clone(),
+            schedule_type: self.schedule_type.clone(),
+            cron_expression: self.cron_expression.clone(),
+            timezone: self.timezone.clone(),
+            misfire_policy: self.misfire_policy.clone(),
+            catch_up_policy: self.catch_up_policy.clone(),
+            enabled: self.enabled,
+            next_run_at: self.next_run_at,
+            last_run_at: self.last_run_at,
+            interval_seconds: self.interval_seconds,
+            one_time_at: self.one_time_at,
+            pinned_version_id: self.pinned_version_id,
+            disabled_reason: self.disabled_reason.clone(),
+        }
+        .to_domain(tenant)
     }
 }
 
@@ -119,6 +156,14 @@ pub struct ClaimedSchedule {
     pub enabled: bool,
     pub next_run_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
+    /// Period in seconds for an INTERVAL schedule (migration 015).
+    pub interval_seconds: Option<i64>,
+    /// The single instant a ONE_TIME schedule fires at (migration 015).
+    pub one_time_at: Option<DateTime<Utc>>,
+    /// The version a PINNED schedule executes (spec 02.4).
+    pub pinned_version_id: Option<Uuid>,
+    /// Set when the scheduler disabled the schedule itself.
+    pub disabled_reason: Option<String>,
 }
 
 impl<'a> ScheduleRepository<'a> {
@@ -163,7 +208,8 @@ impl<'a> ScheduleRepository<'a> {
                  )
                  RETURNING id AS lease_id, lease_expires_at, id, tenant_id, target_type,
                      target_id, target_version_policy, schedule_type, cron_expression,
-                     timezone, misfire_policy, catch_up_policy, enabled, next_run_at, last_run_at",
+                     timezone, misfire_policy, catch_up_policy, enabled, next_run_at, last_run_at,
+                     interval_seconds, one_time_at, pinned_version_id, disabled_reason",
             )
             .bind(now)
             .bind(now)
@@ -250,9 +296,73 @@ impl<'a> ScheduleRepository<'a> {
         Ok(())
     }
 
+    /// Disables a schedule the scheduler itself cannot evaluate, recording why.
+    ///
+    /// Distinct from [`Self::pause`]: an operator pause sets `is_paused`, while
+    /// an engine disable records `disabled_reason` and leaves `is_paused`
+    /// FALSE, so the two are distinguishable after the fact. Used for a
+    /// malformed cron, a non-positive interval, a one-time schedule with no
+    /// instant, and a cron with no future occurrence.
+    pub async fn disable(
+        &self,
+        tenant_id: TenantId,
+        schedule_id: Uuid,
+        reason: &str,
+    ) -> Result<()> {
+        let affected = sqlx::query(
+            "UPDATE schedules SET enabled = FALSE, is_paused = FALSE,
+                 disabled_reason = $3, updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(schedule_id)
+        .bind(tenant_id.into_uuid())
+        .bind(reason)
+        .execute(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(StorageError::not_found("schedule"));
+        }
+        Ok(())
+    }
+
+    /// Completes a one-time schedule: the occurrence fired, so there is no
+    /// next run and the schedule is disabled as *finished*, not paused.
+    ///
+    /// The UPDATE is conditional on the occurrence the scheduler acted on, so
+    /// two schedulers racing a one-time schedule cannot both complete it, and
+    /// a stale scheduler cannot clear a newer `next_run_at`. Combined with the
+    /// `(schedule_id, scheduled_for)` unique index, this is what guarantees a
+    /// one-shot fires at most once across restarts and concurrent schedulers.
+    pub async fn complete_one_time(
+        &self,
+        schedule_id: Uuid,
+        tenant_id: TenantId,
+        from_occurrence: DateTime<Utc>,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE schedules SET next_run_at = NULL, last_run_at = $3, enabled = FALSE,
+                 is_paused = FALSE, disabled_reason = 'COMPLETED_ONE_TIME',
+                 updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2 AND next_run_at = $3",
+        )
+        .bind(schedule_id)
+        .bind(tenant_id.into_uuid())
+        .bind(from_occurrence)
+        .execute(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?
+        .rows_affected();
+
+        Ok(affected > 0)
+    }
+
     pub async fn resume(&self, tenant_id: TenantId, schedule_id: Uuid) -> Result<()> {
         let affected = sqlx::query(
-            "UPDATE schedules SET enabled = TRUE, is_paused = FALSE, updated_at = NOW()
+            "UPDATE schedules SET enabled = TRUE, is_paused = FALSE,
+                 disabled_reason = NULL, updated_at = NOW()
              WHERE id = $1 AND tenant_id = $2",
         )
         .bind(schedule_id)
@@ -328,13 +438,44 @@ impl<'a> WorkerRepository<'a> {
         capabilities: serde_json::Value,
         labels: serde_json::Value,
     ) -> Result<WorkerRow> {
+        self.register_with_token(
+            tenant_id,
+            name,
+            hostname,
+            version,
+            capabilities,
+            labels,
+            None,
+        )
+        .await
+    }
+
+    /// Identical to [`Self::register`] but stores the credential hash a worker
+    /// presents when it claims or completes work. The argument list mirrors the
+    /// worker's registration fields; grouping them into a struct would add a
+    /// type that nothing else uses.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_with_token(
+        &self,
+        tenant_id: TenantId,
+        name: &str,
+        hostname: &str,
+        version: Option<&str>,
+        capabilities: serde_json::Value,
+        labels: serde_json::Value,
+        token_hash: Option<&str>,
+    ) -> Result<WorkerRow> {
         // The only interpolation is a `const *_COLUMNS` list; no user
         // input reaches this string, which is what `AssertSqlSafe` asserts.
+        //
+        // `token_hash` identifies the worker for the lease protocol (spec
+        // 10.2): only the holder may renew or complete an execution, and a
+        // worker's operator is a different identity.
         sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO workers
                  (id, tenant_id, name, hostname, version, status, capabilities, labels,
-                  last_heartbeat_at, registered_at)
-             VALUES ($1, $2, $3, $4, $5, 'READY', $6, $7, NOW(), NOW())
+                  token_hash, last_heartbeat_at, registered_at)
+             VALUES ($1, $2, $3, $4, $5, 'READY', $6, $7, $8, NOW(), NOW())
              RETURNING {WORKER_COLUMNS}"
         )))
         .bind(Uuid::new_v4())
@@ -344,7 +485,24 @@ impl<'a> WorkerRepository<'a> {
         .bind(version)
         .bind(capabilities)
         .bind(labels)
+        .bind(token_hash)
         .fetch_one(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
+    }
+
+    /// Resolves a worker from the hash of the token it presented.
+    ///
+    /// This is how a claim, heartbeat, or completion identifies its worker
+    /// without the caller asserting a worker id. Comparing hashes in SQL rather
+    /// than loading every row keeps the lookup a single indexed read.
+    pub async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<WorkerRow>> {
+        sqlx::query_as::<_, WorkerRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {WORKER_COLUMNS} FROM workers
+             WHERE token_hash = $1"
+        )))
+        .bind(token_hash)
+        .fetch_optional(self.pool)
         .await
         .map_err(StorageError::from_sqlx)
     }

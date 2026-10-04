@@ -574,6 +574,17 @@ pub async fn create_user(
         .await
         .map_err(ApiError::from)?;
 
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "users:create",
+            "USER",
+            Some(user_id),
+        ))
+        .await;
+
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::new(
@@ -646,6 +657,17 @@ pub async fn update_user(
         }
     }
 
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "users:update",
+            "USER",
+            Some(user_id),
+        ))
+        .await;
+
     Ok(Json(ApiResponse::new(
         json!({ "id": user_id, "updated": true }),
         auth.request_id,
@@ -699,6 +721,17 @@ pub async fn disable_user(
     // Both writes commit together, so a failure cannot leave a disabled account
     // still holding live sessions.
     tx.commit().await.map_err(ApiError::from)?;
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "users:disable",
+            "USER",
+            Some(user_id),
+        ))
+        .await;
 
     Ok(Json(ApiResponse::new(
         json!({ "id": user_id, "disabled": true }),

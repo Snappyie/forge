@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::schedule::CronSchedule;
+use crate::schedule::OccurrenceSource;
 
 /// Why a planned occurrence was not created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,8 +74,11 @@ pub fn default_catch_up_limit() -> u32 {
 /// `already_materialised` guards idempotency: a scheduler that retries a tick,
 /// or a second scheduler that somehow claimed the same row, produces the same
 /// plan minus the occurrences that already exist.
+///
+/// `schedule` is any [`OccurrenceSource`], so cron, interval and one-time
+/// schedules share one misfire/catch-up path (spec 09.7, 09.8).
 pub fn plan_occurrences(
-    cron: &CronSchedule,
+    schedule: &dyn OccurrenceSource,
     due: DateTime<Utc>,
     now: DateTime<Utc>,
     policy: MisfirePolicy,
@@ -115,7 +118,8 @@ pub fn plan_occurrences(
         MisfirePolicy::CatchUp => {
             let ceiling = catch_up_limit.max(1) as usize;
             // Reconstruct the missed window from the due occurrence up to now.
-            let candidates = cron.occurrences_between(due - Duration::seconds(1), now, ceiling + 1);
+            let candidates =
+                schedule.occurrences_between(due - Duration::seconds(1), now, ceiling + 1);
 
             for candidate in candidates.iter().take(ceiling) {
                 if already_materialised.contains(candidate) {
@@ -145,6 +149,7 @@ pub fn plan_occurrences(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schedule::{CronSchedule, IntervalSchedule, OccurrenceSource, OneTimeSchedule};
 
     fn cron() -> CronSchedule {
         CronSchedule::parse("0 * * * *", "UTC").unwrap()
@@ -305,6 +310,79 @@ mod tests {
         assert_eq!(MisfirePolicy::parse("CATCH_UP"), MisfirePolicy::CatchUp);
         assert_eq!(MisfirePolicy::parse("FIRE_ONCE"), MisfirePolicy::FireOnce);
         assert_eq!(MisfirePolicy::parse("nonsense"), MisfirePolicy::FireOnce);
+    }
+
+    /// Spec 09.7/09.8: interval catch-up walks the series by its own period,
+    /// not by cron density, and honours the same ceiling.
+    #[test]
+    fn interval_catch_up_uses_the_interval_period() {
+        let anchor = at("2026-10-03T00:00:00Z");
+        let interval = IntervalSchedule::new(600, anchor).unwrap();
+
+        let plan = plan_occurrences(
+            &interval,
+            anchor,
+            at("2026-10-03T00:25:00Z"),
+            MisfirePolicy::CatchUp,
+            100,
+            &[],
+        );
+        assert_eq!(
+            plan.fire,
+            vec![
+                anchor,
+                at("2026-10-03T00:10:00Z"),
+                at("2026-10-03T00:20:00Z"),
+            ]
+        );
+        assert!(plan.skipped.is_empty());
+    }
+
+    #[test]
+    fn interval_catch_up_respects_the_ceiling() {
+        let anchor = at("2026-10-03T00:00:00Z");
+        let interval = IntervalSchedule::new(60, anchor).unwrap();
+
+        let plan = plan_occurrences(
+            &interval,
+            anchor,
+            at("2026-10-03T00:10:00Z"),
+            MisfirePolicy::CatchUp,
+            3,
+            &[],
+        );
+        assert_eq!(plan.fire.len(), 3);
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|(_, reason)| *reason == SkipReason::CatchUpLimit));
+    }
+
+    /// Spec 01.5: a one-time occurrence fires once and then has no successor,
+    /// which is what lets the engine complete the schedule.
+    #[test]
+    fn a_one_time_occurrence_fires_once_and_has_no_successor() {
+        let instant = at("2026-10-03T05:00:00Z");
+        let one_time = OneTimeSchedule::new(instant);
+
+        let plan = plan_occurrences(
+            &one_time,
+            instant,
+            at("2026-10-03T06:00:00Z"),
+            MisfirePolicy::FireOnce,
+            default_catch_up_limit(),
+            &[],
+        );
+        assert_eq!(plan.fire, vec![instant]);
+
+        assert_eq!(
+            one_time.next_after(instant),
+            None,
+            "a fired one-time schedule has no next run"
+        );
+        assert!(one_time
+            .occurrences_between(instant, at("2026-10-04T00:00:00Z"), 10)
+            .is_empty());
     }
 
     #[test]

@@ -219,9 +219,18 @@ impl Execution {
             (ExecutionStatus::Scheduled, ExecutionStatus::Queued)
                 | (ExecutionStatus::Queued, ExecutionStatus::Dispatched)
                 | (ExecutionStatus::Dispatched, ExecutionStatus::Running)
+                // A worker may report the outcome without an explicit "started"
+                // step: the protocol hands out work as DISPATCHED and the SDKs go
+                // straight to complete/fail. Requiring a heartbeat first would
+                // strand every fast job in DISPATCHED forever.
+                | (ExecutionStatus::Dispatched, ExecutionStatus::Succeeded)
+                | (ExecutionStatus::Dispatched, ExecutionStatus::Failed)
                 | (ExecutionStatus::Running, ExecutionStatus::Succeeded)
                 | (ExecutionStatus::Running, ExecutionStatus::Failed)
                 | (ExecutionStatus::Running, ExecutionStatus::TimedOut)
+                // A dispatched attempt whose deadline passes has also run out of
+                // time, whether or not the worker ever reported that it started.
+                | (ExecutionStatus::Dispatched, ExecutionStatus::TimedOut)
                 | (ExecutionStatus::Running, ExecutionStatus::Abandoned)
                 | (ExecutionStatus::Dispatched, ExecutionStatus::Abandoned)
                 | (ExecutionStatus::CancelRequested, ExecutionStatus::Cancelled)
@@ -354,9 +363,29 @@ mod tests {
     #[test]
     fn cannot_skip_from_queued_to_succeeded() {
         let mut exec = sample();
-        exec.transition_to(ExecutionStatus::Dispatched).unwrap();
-        // Dispatched -> Succeeded is not in the spec table.
+        // QUEUED -> SUCCEEDED is not in the spec table: work must at least be
+        // handed to a worker before it can be reported done.
         assert!(exec.transition_to(ExecutionStatus::Succeeded).is_err());
+    }
+
+    /// A worker reports the outcome of dispatched work without a separate
+    /// "started" step, so completion must be legal from DISPATCHED as well as
+    /// from RUNNING. Without this every fast job was refused at completion time
+    /// with `Invalid state transition: DISPATCHED -> SUCCEEDED`.
+    #[test]
+    fn dispatched_work_can_be_completed_without_a_started_step() {
+        for outcome in [
+            ExecutionStatus::Succeeded,
+            ExecutionStatus::Failed,
+            ExecutionStatus::TimedOut,
+        ] {
+            let mut exec = sample();
+            exec.transition_to(ExecutionStatus::Dispatched).unwrap();
+            assert!(
+                exec.transition_to(outcome).is_ok(),
+                "DISPATCHED -> {outcome} must be permitted"
+            );
+        }
     }
 
     // AT-STATE-003: a terminal execution cannot return to an active state

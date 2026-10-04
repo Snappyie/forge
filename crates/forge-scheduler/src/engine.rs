@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use forge_domain::{JobId, JobVersionId, TenantId};
+use forge_domain::{JobId, JobVersionId, ScheduleType, TenantId};
 use forge_storage::{
     ClaimedSchedule, ExecutionRepository, JobRepository, JobVersionRepository, NewExecution,
     OutboxRepository, ScheduleRepository,
@@ -27,7 +27,7 @@ use forge_storage::{
 
 use crate::clock::{Clock, SystemClock};
 use crate::misfire::{default_catch_up_limit, plan_occurrences, MisfirePolicy, SkipReason};
-use crate::schedule::CronSchedule;
+use crate::schedule::{OccurrenceCalculator, RecurrenceSpec};
 
 /// What one tick of the loop did. Returned so callers (and tests) can assert on
 /// it without reaching into the database.
@@ -164,21 +164,50 @@ impl SchedulerEngine {
         let due = row.next_run_at;
         let mut outcome = ProcessOutcome::default();
 
-        // Resolve the cron before doing anything else; a schedule with an
-        // invalid expression must not block the rest of the batch.
-        let cron = match CronSchedule::parse(
-            row.cron_expression.as_deref().unwrap_or_default(),
-            &row.timezone,
-        ) {
-            Ok(c) => c,
+        // Build the calculator for the schedule's kind. Spec 01.5 requires all
+        // three, so this is where CRON, ONE_TIME and INTERVAL diverge; a
+        // configuration that cannot be evaluated (malformed cron, non-positive
+        // interval, one-time with no instant) disables the schedule with a
+        // logged reason instead of being retried forever.
+        let spec = RecurrenceSpec {
+            schedule_type: parse_schedule_type(&row.schedule_type),
+            expression: row.cron_expression.clone(),
+            timezone: row.timezone.clone(),
+            interval_seconds: row.interval_seconds,
+            one_time_at: row.one_time_at,
+        };
+        let calculator = match spec.calculator(due) {
+            Ok(calculator) => calculator,
             Err(e) => {
-                warn!(schedule_id = %row.id, error = %e, "skipping schedule with invalid cron");
-                // Still advance so a broken schedule is not retried forever.
-                self.advance(row, tenant, due, now, schedules).await?;
-                outcome.advanced = true;
+                warn!(
+                    schedule_id = %row.id,
+                    schedule_type = %row.schedule_type,
+                    error = %e,
+                    "disabling schedule with an unusable configuration"
+                );
+                schedules
+                    .disable(tenant, row.id, "INVALID_CONFIGURATION")
+                    .await?;
                 return Ok(outcome);
             }
         };
+
+        // A ONE_TIME row records its instant twice: in `one_time_at` and as
+        // the `next_run_at` the loop acts on. If they disagree the row is not
+        // self-consistent, and firing at `next_run_at` would run at a time the
+        // operator never asked for, so it is disabled instead.
+        if matches!(calculator, OccurrenceCalculator::OneTime(_)) && row.one_time_at != Some(due) {
+            warn!(
+                schedule_id = %row.id,
+                %due,
+                one_time_at = ?row.one_time_at,
+                "one-time schedule's next_run_at does not match one_time_at; disabling"
+            );
+            schedules
+                .disable(tenant, row.id, "INVALID_CONFIGURATION")
+                .await?;
+            return Ok(outcome);
+        }
 
         let policy = MisfirePolicy::parse(&row.misfire_policy);
         let catch_up_limit = row
@@ -189,7 +218,7 @@ impl SchedulerEngine {
 
         // Which occurrences already exist makes the whole tick idempotent.
         let existing = schedules.materialised_occurrences(row.id, due).await?;
-        let plan = plan_occurrences(&cron, due, now, policy, catch_up_limit, &existing);
+        let plan = plan_occurrences(&calculator, due, now, policy, catch_up_limit, &existing);
 
         for (occurrence, reason) in &plan.skipped {
             if *reason == SkipReason::AlreadyMaterialised {
@@ -218,15 +247,31 @@ impl SchedulerEngine {
             }
         }
 
+        // A one-time schedule whose occurrence produced nothing is still
+        // consumed: leaving it enabled would retry the same instant on every
+        // tick, and the occurrence can never legitimately fire later.
+        if matches!(calculator, OccurrenceCalculator::OneTime(_))
+            && outcome.created == 0
+            && outcome.duplicates == 0
+        {
+            warn!(
+                schedule_id = %row.id,
+                %due,
+                "one-time occurrence produced no execution; completing the schedule"
+            );
+        }
+
         // Advance the schedule regardless of how many executions were made, so
         // a broken occurrence does not wedge the schedule forever.
-        self.advance(row, tenant, due, now, schedules).await?;
+        self.advance(row, tenant, due, now, schedules, &calculator)
+            .await?;
         outcome.advanced = true;
 
         Ok(outcome)
     }
 
-    /// Advances `next_run_at` to the following occurrence.
+    /// Advances `next_run_at` to the following occurrence, or finishes the
+    /// schedule when its kind has no successor.
     ///
     /// The UPDATE is conditional on the occurrence that was acted on, so a
     /// scheduler acting on a stale read cannot overwrite a newer one.
@@ -237,14 +282,29 @@ impl SchedulerEngine {
         due: DateTime<Utc>,
         now: DateTime<Utc>,
         schedules: &ScheduleRepository<'_>,
+        calculator: &OccurrenceCalculator,
     ) -> Result<(), forge_storage::StorageError> {
-        let next = match CronSchedule::parse(
-            row.cron_expression.as_deref().unwrap_or_default(),
-            &row.timezone,
-        ) {
-            Ok(c) => c.next_after(due).or_else(|| c.next_after(now)),
-            Err(_) => None,
-        };
+        // A one-time schedule is finished once it has fired. Completion is
+        // conditional on the claimed occurrence, so concurrent schedulers
+        // cannot both complete it, and `next_run_at` becomes NULL so it can
+        // never be claimed again — including after a restart.
+        if matches!(calculator, OccurrenceCalculator::OneTime(_)) {
+            let completed = schedules.complete_one_time(row.id, tenant, due).await?;
+            if completed {
+                debug!(schedule_id = %row.id, %due, "one-time schedule completed");
+            } else {
+                debug!(
+                    schedule_id = %row.id,
+                    %due,
+                    "one-time schedule was already completed by another scheduler"
+                );
+            }
+            return Ok(());
+        }
+
+        let next = calculator
+            .next_after(due)
+            .or_else(|| calculator.next_after(now));
 
         match next {
             Some(next_run) => {
@@ -259,10 +319,16 @@ impl SchedulerEngine {
                 );
             }
             None => {
-                // An expression with no future occurrence (e.g. February 30th)
-                // disables the schedule rather than spinning on it.
-                warn!(schedule_id = %row.id, "cron has no future occurrence; disabling");
-                schedules.pause(tenant, row.id).await?;
+                // No future occurrence (e.g. February 30th) disables the
+                // schedule rather than spinning on it.
+                warn!(
+                    schedule_id = %row.id,
+                    schedule_type = %row.schedule_type,
+                    "schedule has no future occurrence; disabling"
+                );
+                schedules
+                    .disable(tenant, row.id, "NO_FUTURE_OCCURRENCE")
+                    .await?;
             }
         }
         Ok(())
@@ -325,6 +391,10 @@ impl SchedulerEngine {
     }
 
     /// Resolves the job version an occurrence should run.
+    ///
+    /// Spec 02.4: `PINNED` runs the version recorded on the schedule; anything
+    /// else runs the job's current version, falling back to the latest
+    /// published one.
     async fn resolve_version(
         &self,
         tenant: TenantId,
@@ -334,6 +404,39 @@ impl SchedulerEngine {
         let jobs = JobRepository::new(&self.pool);
         let versions = JobVersionRepository::new(&self.pool);
         let job_id = JobId::from_uuid(row.target_id);
+
+        if row.target_version_policy.eq_ignore_ascii_case("PINNED") {
+            let Some(pinned) = row.pinned_version_id else {
+                // A row from before migration 015 has no recorded version. It
+                // is served the latest published one rather than being stopped
+                // outright, but the gap is reported so it can be re-pinned.
+                warn!(
+                    schedule_id = %row.id,
+                    "PINNED schedule has no recorded version; using the latest published version"
+                );
+                return Ok(versions
+                    .latest_published(tenant, job_id)
+                    .await?
+                    .map(|v| JobVersionId::from_uuid(v.id)));
+            };
+
+            // The lookup is scoped to the target job and tenant, so a pin can
+            // never pull in another job's — or another tenant's — version.
+            match versions
+                .get(tenant, job_id, JobVersionId::from_uuid(pinned))
+                .await
+            {
+                Ok(version) => return Ok(Some(JobVersionId::from_uuid(version.id))),
+                Err(_) => {
+                    warn!(
+                        schedule_id = %row.id,
+                        version_id = %pinned,
+                        "PINNED version is not a version of the target job; occurrence skipped"
+                    );
+                    return Ok(None);
+                }
+            }
+        }
 
         // An explicit current version wins.
         if let Ok(job) = jobs.get(tenant, job_id).await {
@@ -381,36 +484,75 @@ struct ProcessOutcome {
     skipped: Vec<(Uuid, DateTime<Utc>, SkipReason)>,
 }
 
-/// Previews the next `count` occurrences for a schedule expression.
+/// Parses the storage vocabulary for `schedule_type` (spec 02.4).
+fn parse_schedule_type(raw: &str) -> ScheduleType {
+    match raw {
+        "ONE_TIME" => ScheduleType::OneTime,
+        "INTERVAL" => ScheduleType::Interval,
+        _ => ScheduleType::Cron,
+    }
+}
+
+/// Previews the next `count` occurrences for a schedule configuration.
 ///
 /// Spec 9.13 requires the preview and the real loop to share one engine, so
-/// this is the same [`CronSchedule`] the loop uses — a preview cannot drift
-/// from actual behaviour.
+/// this is the same [`OccurrenceCalculator`] the loop uses — a preview cannot
+/// drift from actual behaviour. `anchor` is the stored `next_run_at`, which is
+/// what an interval series counts from; `after` is the point the preview is
+/// taken from (normally now).
+pub fn preview_recurrence(
+    spec: &RecurrenceSpec,
+    anchor: DateTime<Utc>,
+    after: DateTime<Utc>,
+    count: usize,
+) -> Result<Vec<DateTime<Utc>>, crate::schedule::SchedulerError> {
+    let calculator = spec.calculator(anchor)?;
+    Ok(calculator.next_n_after(after, count))
+}
+
+/// Explains what a schedule configuration will do next, used by the dispatch
+/// explanation required by spec 12 (AT-OBS-005).
+pub fn explain_recurrence(
+    spec: &RecurrenceSpec,
+    anchor: DateTime<Utc>,
+    after: DateTime<Utc>,
+    count: usize,
+) -> Result<ScheduleExplanation, crate::schedule::SchedulerError> {
+    let calculator = spec.calculator(anchor)?;
+    let upcoming = calculator.next_n_after(after, count.max(1));
+    Ok(ScheduleExplanation {
+        expression: spec.describe(),
+        timezone: spec.timezone.clone(),
+        next_run_at: upcoming.first().copied(),
+        upcoming,
+    })
+}
+
+/// Previews the next `count` occurrences of a five-field cron expression.
+///
+/// Kept as the cron-specific entry point; it delegates to
+/// [`preview_recurrence`] so cron and the other kinds share one engine.
 pub fn preview_occurrences(
     expression: &str,
     timezone: &str,
     after: DateTime<Utc>,
     count: usize,
 ) -> Result<Vec<DateTime<Utc>>, crate::schedule::SchedulerError> {
-    let cron = CronSchedule::parse(expression, timezone)?;
-    Ok(cron.next_n_after(after, count))
+    preview_recurrence(
+        &RecurrenceSpec::cron(expression, timezone),
+        after,
+        after,
+        count,
+    )
 }
 
-/// Human-readable explanation of what a schedule will do next, used by the
-/// dispatch explanation required by spec 12 (AT-OBS-005).
+/// Human-readable explanation of what a cron schedule will do next.
 pub fn explain_schedule(
     expression: &str,
     timezone: &str,
     after: DateTime<Utc>,
 ) -> Result<ScheduleExplanation, crate::schedule::SchedulerError> {
-    let cron = CronSchedule::parse(expression, timezone)?;
-    let upcoming = cron.next_n_after(after, 3);
-    Ok(ScheduleExplanation {
-        expression: expression.to_string(),
-        timezone: timezone.to_string(),
-        next_run_at: upcoming.first().copied(),
-        upcoming,
-    })
+    explain_recurrence(&RecurrenceSpec::cron(expression, timezone), after, after, 3)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -424,6 +566,7 @@ pub struct ScheduleExplanation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schedule::CronSchedule;
 
     #[test]
     fn preview_and_scheduler_share_one_engine() {

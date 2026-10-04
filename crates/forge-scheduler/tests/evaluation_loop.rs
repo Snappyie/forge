@@ -171,31 +171,70 @@ async fn scaffold_job(db: &PgPool, tenant: forge_domain::TenantId) -> uuid::Uuid
 
 /// Everything a schedule row needs, so the helper stays readable.
 struct ScheduleSpec {
-    expression: &'static str,
+    schedule_type: &'static str,
+    expression: Option<&'static str>,
     timezone: &'static str,
     next_run_at: DateTime<Utc>,
     misfire: &'static str,
     catch_up_max: Option<u32>,
+    interval_seconds: Option<i64>,
+    one_time_at: Option<DateTime<Utc>>,
+    version_policy: &'static str,
+    pinned_version_id: Option<Uuid>,
 }
 
 impl ScheduleSpec {
     fn cron(expression: &'static str, next_run_at: DateTime<Utc>) -> Self {
         Self {
-            expression,
+            schedule_type: "CRON",
+            expression: Some(expression),
             timezone: "UTC",
             next_run_at,
             misfire: "FIRE_ONCE",
             catch_up_max: None,
+            interval_seconds: None,
+            one_time_at: None,
+            version_policy: "LATEST_PUBLISHED",
+            pinned_version_id: None,
         }
     }
 
     fn tz(expression: &'static str, timezone: &'static str, next_run_at: DateTime<Utc>) -> Self {
         Self {
-            expression,
             timezone,
+            ..Self::cron(expression, next_run_at)
+        }
+    }
+
+    /// A one-time schedule fires at exactly `at`, so its stored `next_run_at`
+    /// is the same instant (the engine rejects a row where they disagree).
+    fn one_time(at: DateTime<Utc>) -> Self {
+        Self {
+            schedule_type: "ONE_TIME",
+            expression: None,
+            timezone: "UTC",
+            next_run_at: at,
+            misfire: "FIRE_ONCE",
+            catch_up_max: None,
+            interval_seconds: None,
+            one_time_at: Some(at),
+            version_policy: "LATEST_PUBLISHED",
+            pinned_version_id: None,
+        }
+    }
+
+    fn interval(seconds: i64, next_run_at: DateTime<Utc>) -> Self {
+        Self {
+            schedule_type: "INTERVAL",
+            expression: None,
+            timezone: "UTC",
             next_run_at,
             misfire: "FIRE_ONCE",
             catch_up_max: None,
+            interval_seconds: Some(seconds),
+            one_time_at: None,
+            version_policy: "LATEST_PUBLISHED",
+            pinned_version_id: None,
         }
     }
 
@@ -206,6 +245,12 @@ impl ScheduleSpec {
 
     fn catch_up(mut self, max: u32) -> Self {
         self.catch_up_max = Some(max);
+        self
+    }
+
+    fn pinned(mut self, version_id: Uuid) -> Self {
+        self.version_policy = "PINNED";
+        self.pinned_version_id = Some(version_id);
         self
     }
 }
@@ -219,15 +264,21 @@ async fn insert_schedule(
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO schedules
-            (id, tenant_id, job_id, target_id, target_type, cron_expression, timezone,
-             next_run_at, enabled, misfire_policy, catch_up_policy)
-         VALUES ($1, $2, $3, $4, 'JOB', $5, $6, $7, TRUE, $8, $9)",
+            (id, tenant_id, job_id, target_id, target_type, target_version_policy,
+             pinned_version_id, schedule_type, cron_expression, interval_seconds, one_time_at,
+             timezone, next_run_at, enabled, misfire_policy, catch_up_policy)
+         VALUES ($1, $2, $3, $4, 'JOB', $5, $6, $7, $8, $9, $10, $11, $12, TRUE, $13, $14)",
     )
     .bind(id)
     .bind(tenant.into_uuid())
     .bind(job_id)
     .bind(job_id)
+    .bind(spec.version_policy)
+    .bind(spec.pinned_version_id)
+    .bind(spec.schedule_type)
     .bind(spec.expression)
+    .bind(spec.interval_seconds)
+    .bind(spec.one_time_at)
     .bind(spec.timezone)
     .bind(spec.next_run_at)
     .bind(spec.misfire)
@@ -236,6 +287,35 @@ async fn insert_schedule(
     .await
     .unwrap();
     id
+}
+
+/// The stored state of a schedule, for assertions about enabling/disabling.
+struct ScheduleState {
+    enabled: bool,
+    is_paused: bool,
+    next_run_at: Option<DateTime<Utc>>,
+    disabled_reason: Option<String>,
+}
+
+async fn schedule_state(db: &PgPool, schedule_id: Uuid) -> ScheduleState {
+    let (enabled, is_paused, next_run_at, disabled_reason): (
+        bool,
+        bool,
+        Option<DateTime<Utc>>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT enabled, is_paused, next_run_at, disabled_reason FROM schedules WHERE id = $1",
+    )
+    .bind(schedule_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    ScheduleState {
+        enabled,
+        is_paused,
+        next_run_at,
+        disabled_reason,
+    }
 }
 
 // AT-SCH-001: a one-time schedule produces exactly one execution.
@@ -621,13 +701,14 @@ async fn an_invalid_cron_disables_rather_than_blocking() {
         assert_eq!(report.executions_created, 0);
         assert_eq!(report.errors.len(), 0, "a bad expression is not an error");
 
-        // Paused, so it will not be claimed again.
-        let (enabled,): (bool,) = sqlx::query_as("SELECT enabled FROM schedules WHERE id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert!(!enabled, "an unusable schedule is disabled");
+        // Disabled, with the reason recorded, so it will not be claimed again.
+        let state = schedule_state(&pool, id).await;
+        assert!(!state.enabled, "an unusable schedule is disabled");
+        assert!(!state.is_paused, "the engine disables rather than pausing");
+        assert_eq!(
+            state.disabled_reason.as_deref(),
+            Some("INVALID_CONFIGURATION")
+        );
     })
     .await;
 }
@@ -733,6 +814,343 @@ async fn the_batch_size_bounds_a_tick() {
                 .len(),
             2
         );
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// One-time and interval schedules (spec 01.5)
+// ---------------------------------------------------------------------------
+
+/// AT-SCH-001 for a one-shot: it fires exactly once, then finishes with no
+/// next run. It must be disabled as *completed*, not as an error, so an
+/// operator can tell a finished one-shot from a broken schedule.
+#[tokio::test]
+async fn a_one_time_schedule_fires_once_and_is_completed_not_paused() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = forge_domain::TenantId::from_uuid(Uuid::new_v4());
+        let job_id = scaffold_job(&pool, tenant).await;
+
+        let now = Utc::now();
+        let instant = now - Duration::minutes(1);
+        let schedule_id =
+            insert_schedule(&pool, tenant, job_id, ScheduleSpec::one_time(instant)).await;
+
+        let clock = FixedClock::at(&now.to_rfc3339());
+        let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
+        let report = engine.tick().await;
+
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.executions_created, 1);
+        assert_eq!(report.errors.len(), 0, "{:?}", report.errors);
+
+        let state = schedule_state(&pool, schedule_id).await;
+        assert!(!state.enabled, "a fired one-shot is disabled");
+        assert!(
+            !state.is_paused,
+            "a completed one-shot is not an operator pause"
+        );
+        assert_eq!(
+            state.next_run_at, None,
+            "a completed one-shot has no next run"
+        );
+        assert_eq!(
+            state.disabled_reason.as_deref(),
+            Some("COMPLETED_ONE_TIME"),
+            "the completion reason is recorded"
+        );
+
+        let executions = ExecutionRepository::new(&pool);
+        let all = executions
+            .list(tenant, &ExecutionFilter::default(), None, 50)
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 1);
+        assert_eq!(all.items[0].scheduled_for, Some(instant));
+
+        // A restart — a fresh engine over the same rows — must not fire it
+        // again. This is the "including across restarts" half of the rule.
+        let restarted = SchedulerEngine::new(pool.clone(), 100)
+            .with_clock(Arc::new(FixedClock::at(&now.to_rfc3339())));
+        let second = restarted.tick().await;
+        assert_eq!(second.claimed, 0, "a completed one-shot is never reclaimed");
+        assert_eq!(second.executions_created, 0);
+
+        let after_restart = executions
+            .list(tenant, &ExecutionFilter::default(), None, 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_restart.items.len(),
+            1,
+            "a one-time occurrence must never fire twice"
+        );
+    })
+    .await;
+}
+
+/// Regression: a non-cron schedule must not be paused or disabled for being
+/// non-cron. Before migration 015 the engine parsed a NULL expression as cron,
+/// failed, and switched the schedule off.
+#[tokio::test]
+async fn an_interval_schedule_is_not_disabled_and_advances_by_its_period() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = forge_domain::TenantId::from_uuid(Uuid::new_v4());
+        let job_id = scaffold_job(&pool, tenant).await;
+
+        let now = Utc::now();
+        let due = now - Duration::minutes(1);
+        let schedule_id = insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::interval(3600, due).misfire("FIRE_ONCE"),
+        )
+        .await;
+
+        let clock = FixedClock::at(&now.to_rfc3339());
+        let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
+        let report = engine.tick().await;
+
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.executions_created, 1);
+        assert_eq!(report.errors.len(), 0, "{:?}", report.errors);
+
+        let state = schedule_state(&pool, schedule_id).await;
+        assert!(
+            state.enabled,
+            "an interval schedule must keep running, not be disabled"
+        );
+        assert!(!state.is_paused, "and it must not be paused");
+        assert_eq!(state.disabled_reason, None);
+        assert_eq!(
+            state.next_run_at,
+            Some(due + Duration::seconds(3600)),
+            "the next run is exactly one period after the intended occurrence"
+        );
+
+        // The next occurrence is an hour away, so a second tick claims nothing.
+        let second = engine.tick().await;
+        assert_eq!(second.claimed, 0);
+        assert_eq!(second.executions_created, 0);
+    })
+    .await;
+}
+
+/// Spec 09.7/09.8: interval catch-up uses the interval period and honours the
+/// configured ceiling, exactly as cron does.
+#[tokio::test]
+async fn an_interval_schedule_catches_up_within_its_ceiling() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = forge_domain::TenantId::from_uuid(Uuid::new_v4());
+        let job_id = scaffold_job(&pool, tenant).await;
+
+        let now = Utc::now();
+        let due = now - Duration::minutes(10);
+        let schedule_id = insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::interval(60, due)
+                .misfire("CATCH_UP")
+                .catch_up(3),
+        )
+        .await;
+
+        let clock = FixedClock::at(&now.to_rfc3339());
+        let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
+        let report = engine.tick().await;
+
+        assert_eq!(
+            report.executions_created, 3,
+            "capped at the configured ceiling"
+        );
+        assert!(report
+            .skipped
+            .iter()
+            .any(|(_, _, reason)| *reason == forge_scheduler::SkipReason::CatchUpLimit));
+        assert_eq!(report.errors.len(), 0, "{:?}", report.errors);
+
+        let state = schedule_state(&pool, schedule_id).await;
+        assert!(state.enabled, "catch-up must not disable the schedule");
+        assert_eq!(state.next_run_at, Some(due + Duration::seconds(60)));
+    })
+    .await;
+}
+
+/// The claim lease and the occurrence index must still make a one-shot safe
+/// under concurrent schedulers.
+#[tokio::test]
+async fn concurrent_schedulers_fire_a_one_time_schedule_once() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = forge_domain::TenantId::from_uuid(Uuid::new_v4());
+        let job_id = scaffold_job(&pool, tenant).await;
+
+        let now = Utc::now();
+        let instant = now - Duration::minutes(1);
+        let schedule_id =
+            insert_schedule(&pool, tenant, job_id, ScheduleSpec::one_time(instant)).await;
+
+        let shared = FixedClock::at(&now.to_rfc3339()).shared();
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let pool = pool.clone();
+            let clock = shared.clone();
+            handles.push(tokio::spawn(async move {
+                SchedulerEngine::new(pool, 100)
+                    .with_clock(clock)
+                    .tick()
+                    .await
+            }));
+        }
+
+        let mut total_created = 0;
+        let mut total_claimed = 0;
+        for handle in handles {
+            let report = handle.await.unwrap();
+            total_created += report.executions_created;
+            total_claimed += report.claimed;
+        }
+
+        assert_eq!(total_claimed, 1, "SKIP LOCKED must let exactly one claim");
+        assert_eq!(total_created, 1);
+
+        let executions = ExecutionRepository::new(&pool);
+        let all = executions
+            .list(tenant, &ExecutionFilter::default(), None, 50)
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 1, "the one-shot fires exactly once");
+
+        let state = schedule_state(&pool, schedule_id).await;
+        assert!(!state.enabled);
+        assert_eq!(state.next_run_at, None);
+    })
+    .await;
+}
+
+/// Spec 02.4: PINNED runs the version recorded on the schedule, not the job's
+/// current version.
+#[tokio::test]
+async fn a_pinned_schedule_runs_the_recorded_version() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = forge_domain::TenantId::from_uuid(Uuid::new_v4());
+        let job_id = scaffold_job(&pool, tenant).await;
+
+        // `scaffold_job` publishes v1, which is the pinned version. Publish a
+        // second version so the job's current version differs from the pin.
+        let versions = JobVersionRepository::new(&pool);
+        let v1 = versions
+            .latest_published(tenant, forge_domain::JobId::from_uuid(job_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let v2 = versions
+            .create(
+                tenant,
+                forge_domain::JobId::from_uuid(job_id),
+                &NewJobVersion::default(),
+            )
+            .await
+            .unwrap();
+        versions
+            .publish(
+                tenant,
+                forge_domain::JobId::from_uuid(job_id),
+                forge_domain::JobVersionId::from_uuid(v2.id),
+            )
+            .await
+            .unwrap();
+
+        let job = JobRepository::new(&pool)
+            .get(tenant, forge_domain::JobId::from_uuid(job_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            job.current_version_id,
+            Some(v2.id),
+            "the job's current version moved to v2"
+        );
+
+        let now = Utc::now();
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).pinned(v1.id),
+        )
+        .await;
+
+        let clock = FixedClock::at(&now.to_rfc3339());
+        let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
+        assert_eq!(engine.tick().await.executions_created, 1);
+
+        let all = ExecutionRepository::new(&pool)
+            .list(tenant, &ExecutionFilter::default(), None, 50)
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 1);
+        assert_eq!(
+            all.items[0].job_version_id,
+            Some(v1.id),
+            "the execution must run the version the schedule pinned, not the current one"
+        );
+        assert_ne!(v1.id, v2.id);
+    })
+    .await;
+}
+
+/// A genuinely unusable stored configuration is disabled with a reason rather
+/// than retried on every tick.
+#[tokio::test]
+async fn unusable_non_cron_configurations_are_disabled_with_a_reason() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = forge_domain::TenantId::from_uuid(Uuid::new_v4());
+        let job_id = scaffold_job(&pool, tenant).await;
+
+        let now = Utc::now();
+        let due = now - Duration::minutes(1);
+
+        // An interval with a non-positive period.
+        let zero_interval =
+            insert_schedule(&pool, tenant, job_id, ScheduleSpec::interval(0, due)).await;
+
+        // A one-time schedule with no instant.
+        let mut no_instant = ScheduleSpec::one_time(due);
+        no_instant.one_time_at = None;
+        let missing_instant = insert_schedule(&pool, tenant, job_id, no_instant).await;
+
+        // A one-time schedule whose stored anchor disagrees with its instant.
+        let mut mismatched = ScheduleSpec::one_time(due);
+        mismatched.one_time_at = Some(due + Duration::hours(1));
+        let anchor_mismatch = insert_schedule(&pool, tenant, job_id, mismatched).await;
+
+        let clock = FixedClock::at(&now.to_rfc3339());
+        let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
+        let report = engine.tick().await;
+
+        assert_eq!(report.executions_created, 0);
+        assert_eq!(
+            report.errors.len(),
+            0,
+            "an unusable configuration is handled, not surfaced as an error: {:?}",
+            report.errors
+        );
+
+        for (schedule_id, label) in [
+            (zero_interval, "non-positive interval"),
+            (missing_instant, "one-time without an instant"),
+            (anchor_mismatch, "one-time with a mismatched anchor"),
+        ] {
+            let state = schedule_state(&pool, schedule_id).await;
+            assert!(!state.enabled, "{label} must be disabled");
+            assert!(!state.is_paused, "{label} is disabled, not paused");
+            assert_eq!(
+                state.disabled_reason.as_deref(),
+                Some("INVALID_CONFIGURATION"),
+                "{label} records why it was disabled"
+            );
+        }
     })
     .await;
 }

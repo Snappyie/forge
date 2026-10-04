@@ -32,6 +32,11 @@ pub struct AppState {
     pub max_request_body_bytes: usize,
     /// Ceiling on a single execution's log fetch (spec 17).
     pub max_log_bytes: usize,
+    /// The pepper mixed into every stored API-key hash (spec 11.3).
+    ///
+    /// `FORGE_API_KEY_HASHING_SECRET` is required at startup; carrying it here
+    /// is what makes that requirement true rather than aspirational.
+    pub api_key_pepper: Arc<[u8]>,
 }
 
 /// The conventional prefix for every endpoint.
@@ -44,6 +49,7 @@ pub fn create_router(
     allow_open_registration: bool,
     max_request_body_bytes: usize,
     max_log_bytes: usize,
+    api_key_pepper: &[u8],
 ) -> Router {
     let state = AppState {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -53,6 +59,7 @@ pub fn create_router(
         allow_open_registration,
         max_request_body_bytes,
         max_log_bytes,
+        api_key_pepper: Arc::from(api_key_pepper),
     };
 
     // The limiter works with or without a ConnectInfo extension; the server
@@ -159,6 +166,12 @@ pub fn create_router(
             &format!("{PREFIX}/schedules/:id/preview"),
             post(crate::schedules::preview),
         )
+        // Preview an expression that has not been saved yet. Registered before
+        // the `/:id` routes so a literal "explain" is never read as an id.
+        .route(
+            &format!("{PREFIX}/schedules/explain"),
+            post(crate::schedules::explain),
+        )
         // executions (spec 05 endpoints 17-23)
         .route(
             &format!("{PREFIX}/executions"),
@@ -186,7 +199,7 @@ pub fn create_router(
         )
         .route(
             &format!("{PREFIX}/executions/:id/logs"),
-            get(crate::executions::logs),
+            get(crate::executions::logs).post(crate::executions::add_log),
         )
         // worker protocol (spec 10.1; recorded in an ADR)
         .route(
@@ -195,11 +208,15 @@ pub fn create_router(
         )
         .route(
             &format!("{PREFIX}/executions/:id/heartbeat"),
-            post(crate::executions::heartbeat),
+            post(crate::executions::heartbeat).patch(crate::executions::heartbeat),
         )
         .route(
             &format!("{PREFIX}/executions/:id/complete"),
             post(crate::executions::complete),
+        )
+        .route(
+            &format!("{PREFIX}/executions/:id/fail"),
+            post(crate::executions::fail),
         )
         .route(
             &format!("{PREFIX}/executions/:id/dispatch"),
@@ -234,6 +251,10 @@ pub fn create_router(
             get(crate::workers::get_queue).patch(crate::workers::update_queue),
         )
         .route(
+            &format!("{PREFIX}/queues/:id/dequeue"),
+            post(crate::workers::dequeue),
+        )
+        .route(
             &format!("{PREFIX}/queues/:id/pause"),
             post(crate::workers::pause_queue),
         )
@@ -253,6 +274,15 @@ pub fn create_router(
         .route(
             &format!("{PREFIX}/users/:id/disable"),
             post(crate::auth_routes::disable_user),
+        )
+        // teams (UI.md §46)
+        .route(
+            &format!("{PREFIX}/teams"),
+            post(crate::system::create_team).get(crate::system::list_teams),
+        )
+        .route(
+            &format!("{PREFIX}/teams/:id"),
+            get(crate::system::get_team).delete(crate::system::delete_team),
         )
         // API keys (spec 05 endpoints 49-51)
         .route(
@@ -307,8 +337,32 @@ pub fn create_router(
             post(crate::workflows::publish),
         )
         .route(
+            &format!("{PREFIX}/workflows/:id/versions/:version_id/publish"),
+            post(crate::workflows::publish_specific_version),
+        )
+        .route(
             &format!("{PREFIX}/workflows/:id/trigger"),
             post(crate::workflows::trigger),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:execution_id"),
+            get(crate::workflows::get_execution),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:execution_id/cancel"),
+            post(crate::workflows::cancel_execution),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:execution_id/nodes/:node_id/approve"),
+            post(crate::workflows::approve_node),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:execution_id/nodes/:node_id/reject"),
+            post(crate::workflows::reject_node),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:execution_id/approvals"),
+            get(crate::workflows::list_approvals),
         )
         // execution metrics, integrations, webhooks, saved views,
         // dependencies, undo and system health (UI.md 17, 38, 48, 70, 73, 74, 75)
@@ -431,6 +485,14 @@ pub fn create_router(
             post(crate::alerts::acknowledge_alert),
         )
         .route(
+            &format!("{PREFIX}/alerts/:id/resolve"),
+            post(crate::alerts::resolve_alert),
+        )
+        .route(
+            &format!("{PREFIX}/alerts/:id/snooze"),
+            post(crate::alerts::snooze_alert),
+        )
+        .route(
             &format!("{PREFIX}/alert-rules"),
             post(crate::alerts::create_alert_rule).get(crate::alerts::list_alert_rules),
         )
@@ -445,6 +507,18 @@ pub fn create_router(
         .route(
             &format!("{PREFIX}/incidents/:id"),
             get(crate::alerts::get_incident),
+        )
+        .route(
+            &format!("{PREFIX}/incidents/:id/acknowledge"),
+            post(crate::alerts::acknowledge_incident),
+        )
+        .route(
+            &format!("{PREFIX}/incidents/:id/resolve"),
+            post(crate::alerts::resolve_incident),
+        )
+        .route(
+            &format!("{PREFIX}/incidents/:id/assign"),
+            post(crate::alerts::assign_incident),
         )
         // notifications (UI.md 50-51)
         .route(
@@ -564,6 +638,7 @@ mod tests {
             false,
             1024 * 1024,
             4 * 1024 * 1024,
+            b"test-pepper",
         )
     }
 
@@ -701,6 +776,7 @@ mod tests {
             allow_open_registration: false,
             max_request_body_bytes: 1024 * 1024,
             max_log_bytes: 4 * 1024 * 1024,
+            api_key_pepper: Arc::from(&b"test-pepper"[..]),
         };
         assert!(!state.version.is_empty());
         assert!(state.base_url.starts_with("http"));

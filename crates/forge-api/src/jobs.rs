@@ -669,6 +669,11 @@ pub fn execution_view(row: &forge_storage::ExecutionRow) -> serde_json::Value {
         "created_at": row.created_at,
         "started_at": row.started_at,
         "ended_at": row.ended_at,
+        // Spec 01.6: the input a worker must run with, and the output a
+        // completed attempt produced. Without these a worker protocol client
+        // receives an execution it cannot actually perform.
+        "input": row.input,
+        "output": row.output,
     })
 }
 
@@ -770,8 +775,8 @@ mod tests {
         let row = forge_storage::ExecutionRow {
             id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
-            job_id: Uuid::new_v4(),
-            job_version_id: Uuid::new_v4(),
+            job_id: Some(Uuid::new_v4()),
+            job_version_id: Some(Uuid::new_v4()),
             workflow_id: None,
             status: "FAILED".into(),
             queue_id: None,
@@ -788,6 +793,10 @@ mod tests {
             created_at: chrono::Utc::now(),
             started_at: None,
             ended_at: None,
+            input: serde_json::json!({}),
+            output: None,
+            retry_at: None,
+            deadline_at: None,
         };
         let view = execution_view(&row);
         assert_eq!(view["status"], "FAILED");

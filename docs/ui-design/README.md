@@ -199,6 +199,90 @@ unlabelled clock icons. Grouping by work pattern teaches the mental model:
 Counts carry state colour, so a red badge next to Alerts is the same red as a
 failed execution.
 
+## What is implemented
+
+The mockups were built first, then implemented in `forge-web/` and verified
+against a live stack (Postgres, `forge-server`, real seeded data) rather than
+only typechecked.
+
+| Change | File |
+|---|---|
+| Grouped navigation with live counts | `src/components/layout/nav.ts`, `src/components/layout/AppShell.tsx` |
+| First-run checklist | `src/components/ui/getting-started.tsx` |
+| Log viewer: search, stream filter, line numbers | `src/components/ui/log-viewer.tsx` |
+| Non-truncating error badge, status glyphs | `src/components/status-badge.tsx` |
+| Failure headline and retry action | `src/app/executions/[id]/page.tsx` |
+| Focus-ring token fix | `src/app/globals.css` |
+| Session bootstrap fix | `src/lib/auth.tsx` |
+| Next-runs preview for an unsaved expression | `src/components/ui/schedule-preview.tsx` |
+| Schedule step rebuilt to match the mockup | `src/components/ui/job-wizard.tsx` |
+| Stateless preview endpoint | `crates/forge-api/src/schedules.rs`, `router.rs` |
+
+### The schedule step, and why it needed a backend change
+
+The mockup's most valuable element on this screen is the next-runs preview, and
+it could not be built as designed. The only preview endpoint,
+`POST /schedules/{id}/preview`, requires a **saved** schedule — so it was useless
+while authoring one, which is the only time a preview matters.
+
+`POST /schedules/explain` evaluates an expression that does not exist yet. It
+calls the same `forge_scheduler::preview_occurrences` the scheduler uses, so the
+preview still cannot disagree with what fires (spec 09.13). It reads and writes
+nothing, and it requires a timezone exactly as a saved schedule does: a preview
+that silently fell back to the server's local time would disagree with the
+scheduler on the one point the screen exists to establish.
+
+The step itself now has pattern presets, a timezone picker, a plain-English
+reading of the cron expression, the six-run preview in both local time and UTC,
+and DST-conflict flags. The misfire radio group and the manual-only toggle are
+wired to real draft state and sent on publish — previously they were decorative,
+so the choice an operator made about a missed run was silently discarded.
+
+### Bugs found and fixed while verifying
+
+These were not part of the design work; they surfaced because the console was
+run against a real server.
+
+**The focus ring never rendered.** `globals.css` declared `:focus-visible` with
+`hsl(var(--primary))` while every custom property holds a raw `oklch()` value.
+`hsl(oklch(...))` is invalid, so the rule was dropped and keyboard focus was
+invisible — a hard requirement in `docs/UI.md` §64.
+
+**Signing out on every page load.** Forge refresh tokens are single-use: spending
+one revokes it. The auth provider exchanged the stored token on mount, and the
+API client was wired in an effect that ran *after* the first child effects had
+already fired requests. Those early requests went out with no `Authorization`
+header, came back 401, and tripped `onUnauthorized`, which cleared a perfectly
+valid session. Fixed by publishing the token through a ref that `applySession`
+updates synchronously, and by collapsing refresh exchanges so a repeated call
+cannot spend an already-rotated token.
+
+**A missing UI primitive.** `job-wizard.tsx` imported `@/components/ui/radio-group`,
+which did not exist. It is now implemented against `@base-ui/react/radio-group`,
+matching the conventions of the neighbouring primitives.
+
+
+**The wizard overflowed its own shell.** Its root used
+`h-[calc(100vh-3rem)]` to compensate for the application header, but it renders
+*inside* that header's shell. Subtracting the height twice pushed the step rail
+past the viewport and the shell's footer overlapped the wizard's own.
+
+**The pattern picker displayed its id, not its label.** base-ui's `SelectValue`
+falls back to the selected item's value, so the control read "weekday" rather
+than "Every weekday at a specific time". It now renders the label explicitly.
+
+Cron parse failures also read `invalid cron expression: Invalid expression:
+Invalid cron expression.` — the same problem named three times, because `cron`
+0.12 emits no detail at all. That boilerplate is now dropped in favour of what
+Forge expected. All 69 `forge-scheduler` tests pass.
+
+Three latent type errors were also fixed because they blocked the build:
+`executions/page.tsx` compared `trigger_source` against `"SCHEDULED"` (a status,
+not a trigger — the value is `SCHEDULE`), `jobs/[id]/page.tsx` read
+`job.queue_id`, which does not exist on `Job` (it is `default_queue_id`), and
+three `<Select>` handlers assigned base-ui's nullable value into a `string`
+field.
+
 ## What I did not design
 
 Honesty about scope, because these are the gaps that will be noticed:

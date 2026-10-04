@@ -124,3 +124,43 @@ The same schedule calculation engine MUST power:
 - actual scheduling
 
 There must not be separate implementations.
+
+All three schedule kinds are evaluated by one calculator, so the preview of a
+one-time or interval schedule is the same series the loop materialises.
+
+## 9.14 Schedule kinds
+
+Spec 01.5 requires one-time and fixed-interval schedules alongside cron.
+
+- `CRON` is unchanged: five-field dialect (ADR-0013), IANA timezone, the
+  first-occurrence DST policy (ADR-0014), and the SKIP/FIRE_ONCE/CATCH_UP
+  misfire policies.
+- `ONE_TIME` fires exactly once, at the UTC instant stored in
+  `schedules.one_time_at`. After it fires, `next_run_at` is cleared and the
+  schedule is disabled with `disabled_reason = COMPLETED_ONE_TIME`. That is a
+  completion, not an error and not an operator pause, so `is_paused` stays
+  false. The claim lease and the `(schedule_id, scheduled_for)` unique index
+  keep it at-most-once across restarts and concurrent schedulers.
+- `INTERVAL` fires every `schedules.interval_seconds` seconds, counted from the
+  schedule's stored `next_run_at`. That stored occurrence is the series anchor,
+  so a restart cannot re-anchor the series, and catch-up honours the same
+  `catch_up_limit` it does for cron.
+
+A stored configuration that cannot be evaluated — a malformed cron, a
+non-positive interval, a one-time schedule with no instant, or a one-time
+schedule whose `next_run_at` disagrees with `one_time_at` — is disabled with
+`disabled_reason = INVALID_CONFIGURATION` and logged. It is not retried on
+every tick.
+
+`disabled_reason` is NULL while a schedule is enabled or was paused by an
+operator; `is_paused` distinguishes the latter.
+
+## 9.15 Pinned target versions
+
+`target_version_policy = PINNED` runs the version recorded in
+`schedules.pinned_version_id`, resolved within the schedule's tenant and target
+job. A pin that no longer resolves to a version of that job causes the
+occurrence to be skipped with a warning rather than running the wrong version.
+`LATEST_PUBLISHED` keeps its existing behaviour: the job's current version,
+else the latest published version.
+

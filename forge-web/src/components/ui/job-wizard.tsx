@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronLeft, Check, Copy, Info } from "lucide-react";
 
@@ -19,6 +19,10 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  SchedulePreview,
+  describeCron,
+} from "@/components/ui/schedule-preview";
 import { useUnsavedChanges } from "@/lib/useUnsavedChanges";
 import { cn } from "cn";
 
@@ -41,6 +45,10 @@ interface Draft {
   alertEmail: string;
   alertWebhook: string;
   concurrencyPolicy: string;
+  /** Misfire policy: what happens to an occurrence missed while Forge was down. */
+  misfirePolicy: "FIRE_ONCE" | "CATCH_UP" | "SKIP";
+  /** True when this job is only ever triggered by hand and has no schedule. */
+  manualOnly: boolean;
 }
 
 const EMPTY: Draft = {
@@ -59,7 +67,50 @@ const EMPTY: Draft = {
   alertEmail: "",
   alertWebhook: "",
   concurrencyPolicy: "ALLOW",
+  misfirePolicy: "FIRE_ONCE",
+  manualOnly: false,
 };
+
+/**
+ * The patterns the builder offers.
+ *
+ * Each entry is a real five-field cron with the minute and hour slots marked,
+ * so choosing one fills the expression field and the preview immediately shows
+ * what it means. Offering an "every N minutes" preset with an hour of `*` would
+ * be honest but useless, so intervals are left to the expression field.
+ */
+const PATTERNS: { id: string; label: string; cron: string }[] = [
+  { id: "daily", label: "Every day at a specific time", cron: "0 2 * * *" },
+  { id: "weekday", label: "Every weekday at a specific time", cron: "0 2 * * 1-5" },
+  { id: "weekly", label: "Weekly on specific days", cron: "0 2 * * 1" },
+  { id: "hourly", label: "Every hour", cron: "0 * * * *" },
+  { id: "interval", label: "Every 15 minutes", cron: "*/15 * * * *" },
+  { id: "custom", label: "Custom expression", cron: "" },
+];
+
+/**
+ * Replaces the minute and hour fields of a cron expression, leaving the other
+ * three alone. Returns the expression unchanged if it is not five fields, so a
+ * half-typed expression is not silently rewritten.
+ */
+function applyTime(expression: string, time: string): string {
+  const fields = expression.trim().split(/\s+/);
+  const [hour, minute] = time.split(":");
+  if (fields.length !== 5 || !hour || !minute) return expression;
+  return [minute.padStart(2, "0"), hour.padStart(2, "0"), ...fields.slice(2)].join(" ");
+}
+
+/** The timezones offered in the picker. Any IANA name is accepted on save. */
+const TIMEZONES = [
+  "UTC",
+  "Asia/Kolkata",
+  "Asia/Singapore",
+  "Europe/London",
+  "Europe/Berlin",
+  "America/New_York",
+  "America/Los_Angeles",
+  "Australia/Sydney",
+];
 
 const TABS = [
   { id: 1, label: "Basics" },
@@ -108,6 +159,23 @@ export function JobWizard() {
 
   const dirty = draft.name.trim() !== "";
   useUnsavedChanges(dirty);
+
+  // The pattern picker and the time input are views onto the cron expression
+  // rather than state of their own. Deriving them keeps one source of truth, so
+  // typing an expression by hand cannot leave the picker claiming something the
+  // expression does not actually say.
+  const patternId = useMemo(() => {
+    const match = PATTERNS.find((p) => p.cron && p.cron === draft.cron);
+    return match ? match.id : "custom";
+  }, [draft.cron]);
+
+  const cronTime = useMemo(() => {
+    const fields = draft.cron.trim().split(/\s+/);
+    if (fields.length !== 5) return "";
+    const [, hour, minute] = fields;
+    if (!/^\d+$/.test(hour) || !/^\d+$/.test(minute)) return "";
+    return `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
+  }, [draft.cron]);
 
   async function saveDraft(): Promise<string | undefined> {
     if (!draft.name.trim()) {
@@ -171,11 +239,16 @@ export function JobWizard() {
       
       await api.post(`/jobs/${jobId}/versions/${version.id}/publish`, {});
 
-      if (draft.cron) {
+      // A job marked manual-only gets no schedule at all: every execution then
+      // comes from a person or the API, which is what the author asked for.
+      if (draft.cron.trim() && !draft.manualOnly) {
         await api.post("/schedules", {
+          target_type: "JOB",
           target_id: jobId,
-          expression: draft.cron,
+          schedule_type: "CRON",
+          expression: draft.cron.trim(),
           timezone: draft.timezone || "UTC",
+          misfire_policy: draft.misfirePolicy,
         });
       }
 
@@ -194,9 +267,9 @@ export function JobWizard() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] w-full overflow-hidden">
+    <div className="flex w-full items-start">
       {/* ─── Left Sidebar ─── */}
-      <div className="w-64 shrink-0 border-r border-border bg-background flex flex-col">
+      <div className="sticky top-0 flex w-64 shrink-0 flex-col self-start border-r border-border bg-background">
         <div className="p-4 pt-6">
           <Button
             variant="ghost"
@@ -263,7 +336,7 @@ export function JobWizard() {
       </div>
 
       {/* ─── Main Content ─── */}
-      <div className="flex-1 overflow-y-auto bg-background p-8 lg:p-12">
+      <div className="min-w-0 flex-1 bg-background p-8 lg:p-12">
         <div className="mx-auto max-w-3xl">
           {activeTab === 1 && (
             <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
@@ -305,95 +378,237 @@ export function JobWizard() {
             </div>
           )}
 
-          {activeTab === 2 && (
-            <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
+{activeTab === 2 && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 max-w-3xl">
               <div>
-                <h2 className="text-2xl font-semibold tracking-tight">When should this run?</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Pick a pattern or type an expression. The preview below is computed by the same engine that fires the job.
+                <h2 className="text-lg font-semibold tracking-tight">When should this run?</h2>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Pick a pattern or type an expression. The preview below is computed by the same
+                  engine that fires the job, so it cannot disagree with what actually runs.
                 </p>
               </div>
-              
-              <div className="grid gap-6">
-                <div className="grid gap-2">
-                  <Label htmlFor="w-cron-desc">Describe the schedule</Label>
-                  <div className="flex items-center gap-2 max-w-2xl">
-                    <Input id="w-cron-desc" placeholder="Every weekday at 2 AM" />
-                    <Button variant="outline">Interpret</Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Reads "every weekday at 2 AM", "hourly on the half hour". Never applies a change without showing you first.
-                  </p>
-                </div>
 
-                <div className="grid sm:grid-cols-2 gap-4 max-w-2xl">
-                  <div className="grid gap-2">
-                    <Label>Pattern</Label>
-                    <Select defaultValue="specific">
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="specific">Every weekday at a specific time</SelectItem>
-                        <SelectItem value="interval">At regular intervals</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-2">
-                    <Label>Timezone</Label>
-                    <Input
-                      value={draft.timezone}
-                      onChange={(e) => setDraft({ ...draft, timezone: e.target.value })}
+              <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 p-3">
+                <span className="mt-0.5">
+                  <Info className="size-3.5 text-muted-foreground" aria-hidden />
+                </span>
+                <div className="flex-1">
+                  <label
+                    htmlFor="w-manual-only"
+                    className="flex cursor-pointer items-start gap-2 text-xs font-medium"
+                  >
+                    <input
+                      id="w-manual-only"
+                      type="checkbox"
+                      checked={draft.manualOnly}
+                      onChange={(e) => setDraft({ ...draft, manualOnly: e.target.checked })}
+                      className="mt-0.5 size-3.5 accent-primary"
                     />
-                  </div>
-                </div>
-
-                <div className="grid gap-2 max-w-2xl">
-                  <Label htmlFor="w-cron">Cron expression</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="w-cron"
-                      value={draft.cron}
-                      onChange={(e) => setDraft({ ...draft, cron: e.target.value })}
-                      className="font-mono tracking-widest"
-                    />
-                    <Button variant="outline" size="icon"><Copy className="size-4" /></Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Five fields, weekday numbering from Sunday.
+                    This job is only triggered by hand
+                  </label>
+                  <p className="text-[11px] text-muted-foreground mt-1 ml-5">
+                    {draft.manualOnly
+                      ? "No schedule will be created. Trigger it from the job page or the API."
+                      : "Leave this off and Forge will create a schedule from the expression below."}
                   </p>
-                </div>
-
-                <div className="mt-4 rounded-lg border border-border">
-                  <div className="bg-muted/30 p-4 border-b border-border">
-                    <p className="text-sm font-medium">If Forge was down at {draft.cron.split(' ')[1]}:00, what should happen?</p>
-                    <p className="text-xs text-muted-foreground mt-1">This is the misfire policy, the difference between a missed run and a stampede.</p>
-                  </div>
-                  <div className="p-4">
-                    <RadioGroup defaultValue="run_once">
-                      <div className="flex items-start space-x-3 rounded-md border border-border bg-background p-3 mb-3">
-                        <RadioGroupItem value="run_once" id="run_once" className="mt-1" />
-                        <div>
-                          <Label htmlFor="run_once" className="font-medium">Run once, late</Label>
-                          <p className="text-xs text-muted-foreground mt-0.5">One execution fires immediately when Forge recovers. Missed occurrences are skipped, not queued. <strong className="font-medium">Default.</strong></p>
-                        </div>
-                      </div>
-                      <div className="flex items-start space-x-3 rounded-md p-3 mb-3 hover:bg-muted/30">
-                        <RadioGroupItem value="catch_up" id="catch_up" className="mt-1" />
-                        <div>
-                          <Label htmlFor="catch_up" className="font-medium">Catch up every missed run</Label>
-                          <p className="text-xs text-muted-foreground mt-0.5">Replays each missed occurrence, oldest first. Safe for idempotent jobs; dangerous for ones that charge a card.</p>
-                        </div>
-                      </div>
-                      <div className="flex items-start space-x-3 rounded-md p-3 hover:bg-muted/30">
-                        <RadioGroupItem value="skip" id="skip" className="mt-1" />
-                        <div>
-                          <Label htmlFor="skip" className="font-medium">Skip entirely</Label>
-                          <p className="text-xs text-muted-foreground mt-0.5">The occurrence is discarded. Use when a late run is worse than no run.</p>
-                        </div>
-                      </div>
-                    </RadioGroup>
-                  </div>
                 </div>
               </div>
+
+              {!draft.manualOnly ? (
+                <>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="grid gap-2">
+                      <Label htmlFor="w-pattern">Pattern</Label>
+                      <Select
+                        value={patternId}
+                        onValueChange={(value) => {
+                          const pattern = PATTERNS.find((p) => p.id === value);
+                          // "Custom" leaves the expression alone so typing is not
+                          // overwritten; every other preset fills it in.
+                          if (pattern && pattern.cron) {
+                            setDraft({ ...draft, cron: pattern.cron });
+                          }
+                        }}
+                      >
+                        <SelectTrigger id="w-pattern" className="h-auto min-h-8 items-start py-1.5 text-left">
+                          <SelectValue>
+                            {() =>
+                              PATTERNS.find((p) => p.id === patternId)?.label ?? "Custom expression"
+                            }
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {PATTERNS.map((pattern) => (
+                            <SelectItem key={pattern.id} value={pattern.id}>
+                              {pattern.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="w-time">Time (24h)</Label>
+                      <Input
+                        id="w-time"
+                        type="time"
+                        step={60}
+                        value={cronTime}
+                        onChange={(e) => setDraft({ ...draft, cron: applyTime(draft.cron, e.target.value) })}
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Sets the minute and hour fields, leaving the rest untouched.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="grid gap-2">
+                      <Label htmlFor="w-timezone">Timezone</Label>
+                      <Select
+                        value={draft.timezone}
+                        onValueChange={(value) => setDraft({ ...draft, timezone: value ?? "UTC" })}
+                      >
+                        <SelectTrigger id="w-timezone" className="whitespace-normal">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {TIMEZONES.map((zone) => (
+                            <SelectItem key={zone} value={zone}>
+                              {zone}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        Never inferred from the server. A missing timezone is a validation error.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="w-cron">Cron expression</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          id="w-cron"
+                          value={draft.cron}
+                          onChange={(e) =>
+                            setDraft({ ...draft, cron: e.target.value })
+                          }
+                          className="font-mono"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          aria-label="Copy cron expression"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(draft.cron);
+                            toast.success("Cron expression copied");
+                          }}
+                        >
+                          <Copy className="size-4" aria-hidden />
+                        </Button>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        {describeCron(draft.cron) ? (
+                          <>
+                            <span className="font-medium text-foreground">
+                              {describeCron(draft.cron)}.
+                            </span>{" "}
+                            Five fields, weekday numbering from Sunday.
+                          </>
+                        ) : (
+                          "Five fields: minute hour day-of-month month day-of-week."
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <SchedulePreview expression={draft.cron} timezone={draft.timezone} count={6} />
+
+                  <div className="rounded-lg border border-border">
+                    <div className="bg-muted/30 p-4 border-b border-border">
+                      <p className="text-sm font-medium">
+                        If Forge was down when this was due, what should happen?
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        This is the misfire policy, and it is the difference between a missed run and
+                        a stampede.
+                      </p>
+                    </div>
+                    <div className="p-4">
+                      <RadioGroup
+                        value={draft.misfirePolicy}
+                        onValueChange={(value) =>
+                          setDraft({
+                            ...draft,
+                            misfirePolicy: (value ?? "FIRE_ONCE") as Draft["misfirePolicy"],
+                          })
+                        }
+                      >
+                        <label
+                          htmlFor="run_once"
+                          className={cn(
+                            "flex items-start space-x-3 rounded-md border p-3 mb-3 cursor-pointer",
+                            draft.misfirePolicy === "FIRE_ONCE"
+                              ? "border-primary bg-background"
+                              : "border-transparent hover:bg-muted/30",
+                          )}
+                        >
+                          <RadioGroupItem value="FIRE_ONCE" id="run_once" className="mt-1" />
+                          <div>
+                            <span className="text-sm font-medium block">Run once, late</span>
+                            <span className="text-xs text-muted-foreground">
+                              One execution fires immediately when Forge recovers. Missed
+                              occurrences are skipped, not queued.{" "}
+                              <span className="font-medium text-foreground">Default.</span>
+                            </span>
+                          </div>
+                        </label>
+
+                        <label
+                          htmlFor="catch_up"
+                          className={cn(
+                            "flex items-start space-x-3 rounded-md border border-transparent p-3 mb-3 cursor-pointer",
+                            draft.misfirePolicy === "CATCH_UP"
+                              ? "border-primary bg-background"
+                              : "hover:bg-muted/30",
+                          )}
+                        >
+                          <RadioGroupItem value="CATCH_UP" id="catch_up" className="mt-1" />
+                          <div>
+                            <span className="text-sm font-medium block">
+                              Catch up every missed run
+                            </span>
+                            <span className="text-xs text-muted-foreground">
+                              Replays each missed occurrence, oldest first, up to a limit of 100.
+                              Safe for idempotent jobs; dangerous for ones that charge a card.
+                            </span>
+                          </div>
+                        </label>
+
+                        <label
+                          htmlFor="skip"
+                          className={cn(
+                            "flex items-start space-x-3 rounded-md border border-transparent p-3 cursor-pointer",
+                            draft.misfirePolicy === "SKIP"
+                              ? "border-primary bg-background"
+                              : "hover:bg-muted/30",
+                          )}
+                        >
+                          <RadioGroupItem value="SKIP" id="skip" className="mt-1" />
+                          <div>
+                            <span className="text-sm font-medium block">Skip entirely</span>
+                            <span className="text-xs text-muted-foreground">
+                              The occurrence is discarded. Use when a late run is worse than no run.
+                            </span>
+                          </div>
+                        </label>
+                      </RadioGroup>
+                    </div>
+                  </div>
+                </>
+              ) : null}
             </div>
           )}
 

@@ -80,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.server.allow_open_registration,
         config.limits.max_request_body_bytes,
         config.limits.max_log_bytes,
+        config.server.api_key_hashing_secret.as_bytes(),
     );
 
     let addr = SocketAddr::from((parse_host(&config.server.host), config.server.port));

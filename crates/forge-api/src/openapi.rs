@@ -460,6 +460,31 @@ fn paths() -> Value {
             )
         }),
     );
+    paths.insert(
+        "/schedules/explain".into(),
+        json!({
+            "post": op(
+                "Preview an unsaved schedule expression",
+                "schedules",
+                "explainSchedule",
+                Some("schedules:read"),
+                vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["expression", "timezone"],
+                    "properties": {
+                        "expression": { "type": "string", "description": "Five-field cron expression." },
+                        "timezone": {
+                            "type": "string",
+                            "description": "IANA timezone. Required; never inferred from the server."
+                        },
+                        "count": { "type": "integer", "default": 10, "minimum": 1, "maximum": 50 }
+                    }
+                }))),
+                "200",
+            )
+        }),
+    );
 
     // --- executions (spec 05 endpoints 17-23) ---
     paths.insert(
@@ -504,12 +529,50 @@ fn paths() -> Value {
         json!({ "post": op("Dead-letter an execution", "executions", "deadLetterExecution", Some("executions:retry"), vec![execution_id.clone()], None, "200") }),
     );
     paths.insert(
+        "/executions/{id}/fail".into(),
+        json!({
+            "post": op(
+                "Report execution failure",
+                "executions",
+                "failExecution",
+                Some("executions:write"),
+                vec![execution_id.clone()],
+                Some(json_body(json!({
+                    "type": "object",
+                    "properties": {
+                        "error_message": { "type": "string" },
+                        "error_code": { "type": "string" }
+                    }
+                }))),
+                "200",
+            ),
+        }),
+    );
+    paths.insert(
         "/executions/{id}/attempts".into(),
         json!({ "get": op("List execution attempts", "executions", "listExecutionAttempts", Some("executions:read"), vec![execution_id.clone()], None, "200") }),
     );
     paths.insert(
         "/executions/{id}/logs".into(),
-        json!({ "get": op("Read execution logs", "executions", "getExecutionLogs", Some("executions:read"), vec![execution_id.clone()], None, "200") }),
+        json!({
+            "get": op("Read execution logs", "executions", "getExecutionLogs", Some("executions:read"), vec![execution_id.clone()], None, "200"),
+            "post": op(
+                "Append execution log line",
+                "executions",
+                "appendExecutionLog",
+                Some("executions:write"),
+                vec![execution_id.clone()],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["message"],
+                    "properties": {
+                        "message": { "type": "string" },
+                        "level": { "type": "string" }
+                    }
+                }))),
+                "200",
+            ),
+        }),
     );
 
     // --- workers (spec 05 endpoints 33-38) ---
@@ -602,6 +665,26 @@ fn paths() -> Value {
         "/queues/{id}/resume".into(),
         json!({ "post": op("Resume a queue", "queues", "resumeQueue", Some("queues:write"), vec![queue_id.clone()], None, "200") }),
     );
+    paths.insert(
+        "/queues/{id}/dequeue".into(),
+        json!({
+            "post": op(
+                "Dequeue an execution for worker consumption",
+                "queues",
+                "dequeueQueue",
+                Some("queues:write"),
+                vec![queue_id.clone()],
+                Some(json_body(json!({
+                    "type": "object",
+                    "properties": {
+                        "worker_id": { "type": "string", "format": "uuid" },
+                        "lease_duration_seconds": { "type": "integer" }
+                    }
+                }))),
+                "200",
+            ),
+        }),
+    );
 
     // --- users (spec 05 endpoints 45-48) ---
     paths.insert(
@@ -631,6 +714,61 @@ fn paths() -> Value {
     paths.insert(
         "/users/{id}/disable".into(),
         json!({ "post": op("Disable a user", "users", "disableUser", Some("users:write"), vec![id_param("id")], None, "200") }),
+    );
+
+    paths.insert(
+        "/teams".into(),
+        json!({
+            "get": op(
+                "List teams for this tenant",
+                "users",
+                "listTeams",
+                Some("users:read"),
+                vec![],
+                None,
+                "200",
+            ),
+            "post": op(
+                "Create a team",
+                "users",
+                "createTeam",
+                Some("users:write"),
+                vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }))),
+                "201",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/teams/{id}".into(),
+        json!({
+            "get": op(
+                "Get team details and members",
+                "users",
+                "getTeam",
+                Some("users:read"),
+                vec![id_param("id")],
+                None,
+                "200",
+            ),
+            "delete": op(
+                "Delete a team",
+                "users",
+                "deleteTeam",
+                Some("users:write"),
+                vec![id_param("id")],
+                None,
+                "200",
+            ),
+        }),
     );
 
     // --- API keys (spec 05 endpoints 49-51) ---
@@ -912,6 +1050,41 @@ fn paths() -> Value {
     );
 
     paths.insert(
+        "/alerts/{id}/resolve".into(),
+        json!({
+            "post": op(
+                "Resolve an open alert",
+                "alerts",
+                "resolveAlert",
+                Some("audit:read"),
+                vec![id_param("id")],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/alerts/{id}/snooze".into(),
+        json!({
+            "post": op(
+                "Snooze an alert for a duration",
+                "alerts",
+                "snoozeAlert",
+                Some("audit:read"),
+                vec![id_param("id")],
+                Some(json_body(json!({
+                    "type": "object",
+                    "properties": {
+                        "duration_minutes": { "type": "integer" }
+                    }
+                }))),
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
         "/alerts/summary".into(),
         json!({
             "get": op(
@@ -1139,6 +1312,57 @@ fn paths() -> Value {
                 "incidentsidGet",
                 Some("audit:read"),
                 vec![],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/incidents/{id}/acknowledge".into(),
+        json!({
+            "post": op(
+                "Acknowledge an incident",
+                "incidents",
+                "acknowledgeIncident",
+                Some("audit:read"),
+                vec![id_param("id")],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/incidents/{id}/assign".into(),
+        json!({
+            "post": op(
+                "Assign an incident to an operator",
+                "incidents",
+                "assignIncident",
+                Some("audit:read"),
+                vec![id_param("id")],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["assigned_to"],
+                    "properties": {
+                        "assigned_to": { "type": "string" }
+                    }
+                }))),
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
+        "/incidents/{id}/resolve".into(),
+        json!({
+            "post": op(
+                "Resolve an incident",
+                "incidents",
+                "resolveIncident",
+                Some("audit:read"),
+                vec![id_param("id")],
                 None,
                 "200",
             ),
@@ -1707,6 +1931,21 @@ fn paths() -> Value {
     );
 
     paths.insert(
+        "/workflows/{id}/versions/{version_id}/publish".into(),
+        json!({
+            "post": op(
+                "Publish a specific workflow version",
+                "workflows",
+                "publishWorkflowVersion",
+                Some("workflows:write"),
+                vec![id_param("id"), id_param("version_id")],
+                None,
+                "200",
+            ),
+        }),
+    );
+
+    paths.insert(
         "/workflows/{id}/trigger".into(),
         json!({
             "post": op(
@@ -1746,6 +1985,86 @@ fn paths() -> Value {
                 Some("workflows:read"),
                 vec![],
                 None,
+                "200",
+            ),
+        }),
+    );
+
+    // --- human-in-the-loop approvals (spec 05 §5.7 endpoints 31-32) ---
+    // A workflow run suspends on an APPROVAL node until an authorised user
+    // decides; these are the endpoints the console and the approval queue call.
+    let workflow_execution = id_param("execution_id");
+    let workflow_node = id_param("node_id");
+    paths.insert(
+        "/workflows/executions/{execution_id}".into(),
+        json!({
+            "get": op(
+                "One workflow run with the live state of every node",
+                "workflows",
+                "getWorkflowExecution",
+                Some("workflows:read"),
+                vec![workflow_execution.clone()],
+                None,
+                "200",
+            ),
+        }),
+    );
+    paths.insert(
+        "/workflows/executions/{execution_id}/cancel".into(),
+        json!({
+            "post": op(
+                "Request cancellation of a workflow run and its children",
+                "workflows",
+                "cancelWorkflowExecution",
+                Some("workflows:trigger"),
+                vec![workflow_execution.clone()],
+                None,
+                "200",
+            ),
+        }),
+    );
+    paths.insert(
+        "/workflows/executions/{execution_id}/approvals".into(),
+        json!({
+            "get": op(
+                "List the approval decisions recorded for a workflow run",
+                "workflows",
+                "listWorkflowApprovals",
+                Some("workflows:read"),
+                vec![workflow_execution.clone()],
+                None,
+                "200",
+            ),
+        }),
+    );
+    let approval_decision = Some(json_body(json!({
+        "type": "object",
+        "properties": { "comment": { "type": "string", "maxLength": 2000 } }
+    })));
+    paths.insert(
+        "/workflows/executions/{execution_id}/nodes/{node_id}/approve".into(),
+        json!({
+            "post": op(
+                "Approve a human-in-the-loop node so the run can continue",
+                "workflows",
+                "approveWorkflowNode",
+                Some("workflows:trigger"),
+                vec![workflow_execution.clone(), workflow_node.clone()],
+                approval_decision.clone(),
+                "200",
+            ),
+        }),
+    );
+    paths.insert(
+        "/workflows/executions/{execution_id}/nodes/{node_id}/reject".into(),
+        json!({
+            "post": op(
+                "Reject a human-in-the-loop node, failing that branch",
+                "workflows",
+                "rejectWorkflowNode",
+                Some("workflows:trigger"),
+                vec![workflow_execution, workflow_node],
+                approval_decision,
                 "200",
             ),
         }),

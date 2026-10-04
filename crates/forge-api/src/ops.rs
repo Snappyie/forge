@@ -47,7 +47,7 @@ pub async fn rotate_api_key(
         return Err(ApiError::not_found("active API key"));
     };
 
-    let secret = generate_secret();
+    let secret = generate_secret(&state.api_key_pepper);
     let new_prefix: String = secret.chars().take(8).collect();
 
     sqlx::query(
@@ -57,7 +57,7 @@ pub async fn rotate_api_key(
     )
     .bind(key_id)
     .bind(tenant(&auth))
-    .bind(hash(&secret))
+    .bind(hash_key(&state.api_key_pepper, &secret))
     .bind(&new_prefix)
     .execute(&state.pool)
     .await
@@ -121,12 +121,12 @@ pub async fn set_api_key_expiry(
 
 /// A fresh API key, using the same generator as creation so a rotated key is
 /// indistinguishable from a created one.
-fn generate_secret() -> String {
-    forge_auth::generate_api_key().raw
+fn generate_secret(pepper: &[u8]) -> String {
+    forge_auth::generate_api_key(pepper).raw
 }
 
-fn hash(secret: &str) -> String {
-    forge_auth::hash_api_key(secret)
+fn hash_key(pepper: &[u8], secret: &str) -> String {
+    forge_auth::hash_api_key(pepper, secret)
 }
 
 // ---------------------------------------------------------------------------
@@ -420,10 +420,12 @@ pub struct CancelAll {
 mod tests {
     use super::*;
 
+    const PEPPER: &[u8] = b"test-pepper";
+
     #[test]
     fn secrets_are_long_and_unique() {
-        let a = generate_secret();
-        let b = generate_secret();
+        let a = generate_secret(PEPPER);
+        let b = generate_secret(PEPPER);
         // forge-auth's generator emits a `forge_` prefix over 32 base64url
         // bytes: 6 + 43 characters.
         assert!(a.starts_with("forge_"), "keys carry a recognisable prefix");
@@ -433,17 +435,17 @@ mod tests {
 
     #[test]
     fn a_secret_is_stored_hashed() {
-        let secret = generate_secret();
-        let digest = hash(&secret);
+        let secret = generate_secret(PEPPER);
+        let digest = hash_key(PEPPER, &secret);
         assert_ne!(digest, secret);
         // Deterministic so a presented key can be verified.
-        assert_eq!(digest, hash(&secret));
+        assert_eq!(digest, hash_key(PEPPER, &secret));
         assert_eq!(digest.len(), 64);
     }
 
     #[test]
     fn the_prefix_is_the_first_eight_characters() {
-        let secret = generate_secret();
+        let secret = generate_secret(PEPPER);
         let prefix: String = secret.chars().take(8).collect();
         assert!(secret.starts_with(&prefix));
     }

@@ -280,7 +280,15 @@ pub async fn claim(
     Auth(auth): Auth,
     Path(worker_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("workers:admin")?;
+    auth.require("workers:claim")?;
+
+    if let Some(own) = auth.worker_id {
+        if own != worker_id {
+            return Err(ApiError::forbidden(
+                "a worker token may only claim work for its own worker",
+            ));
+        }
+    }
 
     let executions = ExecutionRepository::new(&state.pool);
     let Some(row) = executions
@@ -307,16 +315,26 @@ pub async fn claim(
     )))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct HeartbeatRequest {
-    pub lease_id: Uuid,
+    #[serde(default)]
+    pub lease_id: Option<Uuid>,
+    #[serde(default)]
+    pub worker_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct CompleteRequest {
-    pub lease_id: Uuid,
     #[serde(default)]
-    pub succeeded: bool,
+    pub lease_id: Option<Uuid>,
+    #[serde(default)]
+    pub worker_id: Option<Uuid>,
+    #[serde(default)]
+    pub succeeded: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub trace: Option<String>,
     #[serde(default)]
     pub error_class: Option<String>,
     #[serde(default)]
@@ -324,40 +342,45 @@ pub struct CompleteRequest {
     #[serde(default)]
     pub exit_code: Option<i32>,
     #[serde(default)]
-    pub output: serde_json::Value,
+    pub output: Option<serde_json::Value>,
 }
 
-/// `POST /executions/{id}/heartbeat` — worker protocol (spec 10.2).
+/// `POST /executions/{id}/heartbeat` and `PATCH /executions/{id}/heartbeat` — worker protocol (spec 10.2).
 pub async fn heartbeat(
     State(state): State<AppState>,
     Auth(auth): Auth,
     Path(execution_id): Path<Uuid>,
-    Json(body): Json<HeartbeatRequest>,
+    body: Option<Json<HeartbeatRequest>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("workers:admin")?;
+    auth.require("executions:write")?;
 
-    // The lease must belong to *this* execution. Renewing without the check
-    // would let a worker present any lease it holds and keep another
-    // execution looking alive.
+    let req = body.map(|Json(b)| b).unwrap_or_default();
     let lease = LeaseRepository::new(&state.pool)
         .active_for_execution(execution_id)
         .await?
         .ok_or_else(|| ApiError::conflict("this execution has no active lease"))?;
 
-    if lease.id != body.lease_id {
-        return Err(ApiError::conflict(
-            "the supplied lease does not belong to this execution",
-        ));
+    if let Some(req_lease_id) = req.lease_id {
+        if lease.id != req_lease_id {
+            return Err(ApiError::conflict(
+                "the supplied lease does not belong to this execution",
+            ));
+        }
     }
 
+    // A worker credential can only renew its own lease; a human operator may
+    // name the worker it is acting for.
+    if let Some(own) = auth.worker_id {
+        if lease.worker_id != own {
+            return Err(ApiError::conflict("the lease is not held by this worker"));
+        }
+    }
+    let worker_id = auth.worker_id.or(req.worker_id).unwrap_or(lease.worker_id);
+
     let renewed = LeaseRepository::new(&state.pool)
-        .renew(body.lease_id, auth.user_id, 20)
+        .renew(lease.id, worker_id, 30)
         .await
-        .map_err(|_| {
-            // Spec 10.3: only the holder may renew. A refusal must not say
-            // whether the lease exists elsewhere.
-            ApiError::conflict("the lease is not held by this worker, or has expired")
-        })?;
+        .map_err(|_| ApiError::conflict("the lease is not held by this worker, or has expired"))?;
 
     Ok(Json(ApiResponse::new(
         json!({ "lease_id": renewed.id, "expires_at": renewed.expires_at }),
@@ -366,33 +389,71 @@ pub async fn heartbeat(
 }
 
 /// `POST /executions/{id}/complete` — worker protocol (spec 10.4).
-///
-/// Spec 10.5: a completion carrying a stale lease must not overwrite state that
-/// recovery has since moved on.
 pub async fn complete(
     State(state): State<AppState>,
     Auth(auth): Auth,
     Path(execution_id): Path<Uuid>,
     Json(body): Json<CompleteRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("workers:admin")?;
+    auth.require("executions:write")?;
 
-    // Reject a stale completion before touching any state.
-    let gate = forge_executor::CompletionGate::new(&state.pool);
-    gate.check(execution_id, body.lease_id, auth.user_id)
-        .await
-        .map_err(|rejection| match rejection {
-            forge_executor::CompletionRejection::LeaseExpired => {
-                ApiError::conflict("the lease has expired; the result is stale")
+    let lease = LeaseRepository::new(&state.pool)
+        .active_for_execution(execution_id)
+        .await?;
+
+    // The reported holder is authoritative only when it comes from the caller's
+    // own credential; otherwise the lease row itself names the holder. This is
+    // what makes `NotLeaseHolder` meaningful: a worker cannot complete another
+    // worker's lease by naming it in the body.
+    match lease {
+        Some(active) => {
+            let lease_id = body.lease_id.unwrap_or(active.id);
+            let holder = auth
+                .worker_id
+                .or(body.worker_id)
+                .unwrap_or(active.worker_id);
+
+            // Spec 10.5: a result that lost the race with lease recovery must
+            // not overwrite the authoritative state. Refuse it, say why, and
+            // leave the execution to whoever recovered it.
+            let gate = forge_executor::CompletionGate::new(&state.pool);
+            if let Err(rejection) = gate.check(execution_id, lease_id, holder).await {
+                tracing::warn!(
+                    %execution_id,
+                    %lease_id,
+                    reason = %rejection,
+                    "refused a stale execution completion"
+                );
+                return Err(ApiError::conflict(rejection.reason()));
             }
-            forge_executor::CompletionRejection::ExecutionTerminal => {
-                ApiError::conflict("the execution has already finished")
+
+            let _ = LeaseRepository::new(&state.pool)
+                .release(active.id, active.worker_id)
+                .await;
+        }
+        None => {
+            // A lease was reported but none is active: recovery has already
+            // taken the execution over.
+            if body.lease_id.is_some() {
+                return Err(ApiError::conflict(
+                    "the lease is no longer active, so recovery already owns this execution",
+                ));
             }
-            other => ApiError::conflict(format!("the completion was rejected: {other:?}")),
-        })?;
+            // No lease at all. A worker credential must hold one; a human
+            // operator completing on a worker's behalf may not need to.
+            if auth.worker_id.is_some() {
+                return Err(ApiError::conflict(
+                    "a worker must hold a lease before completing an execution",
+                ));
+            }
+        }
+    }
+
+    let is_failure =
+        body.succeeded == Some(false) || body.error.is_some() || body.error_message.is_some();
 
     let repo = ExecutionRepository::new(&state.pool);
-    let row = if body.succeeded {
+    let row = if !is_failure {
         repo.transition(
             auth.tenant_id,
             execution_id,
@@ -404,25 +465,56 @@ pub async fn complete(
     } else {
         let class = match body.error_class.as_deref() {
             None => ErrorClass::Permanent,
-            Some(raw) => raw.parse::<ErrorClass>().map_err(|_| {
-                ApiError::validation(format!("`{raw}` is not a valid error class"))
-                    .with_detail("error_class", "unknown error class")
-            })?,
+            Some(raw) => raw.parse::<ErrorClass>().unwrap_or(ErrorClass::Permanent),
         };
-        repo.transition(
-            auth.tenant_id,
-            execution_id,
-            ExecutionStatus::Failed,
-            Some(class),
-            body.error_message.as_deref(),
-        )
-        .await?
+        let err_msg = body
+            .error_message
+            .as_deref()
+            .or(body.error.as_deref())
+            .unwrap_or("execution failed");
+
+        // Spec 10.8/10.9: whether this failure is retried is the version's
+        // policy to decide, not the caller's. The handler records FAILED and,
+        // when the policy allows it, schedules the retry with its backoff.
+        let current = repo.get(auth.tenant_id, execution_id).await?;
+        let attempts_made = (current.attempt_count.max(0) as u32).saturating_add(1);
+        let handler = forge_executor::FailureHandler::new(&state.pool);
+        match handler
+            .record_failure(auth.tenant_id, execution_id, class, err_msg, attempts_made)
+            .await
+        {
+            Ok(outcome) => {
+                tracing::debug!(%execution_id, ?outcome, "failure recorded");
+                repo.get(auth.tenant_id, execution_id).await?
+            }
+            Err(reason) => {
+                // The decision itself failed (for example the database rejected
+                // the transition). Fail the execution rather than leaving it
+                // running forever with no owner.
+                tracing::warn!(%execution_id, %reason, "could not apply the retry policy");
+                repo.transition(
+                    auth.tenant_id,
+                    execution_id,
+                    ExecutionStatus::Failed,
+                    Some(class),
+                    Some(err_msg),
+                )
+                .await?
+            }
+        }
     };
 
-    // The lease is released so the work is not reaped while finishing.
-    let _ = LeaseRepository::new(&state.pool)
-        .release(body.lease_id, auth.user_id)
-        .await;
+    // Spec 10.4: completion carries the attempt's result where applicable.
+    // Persisting it here means the run, its successors and the console all see
+    // what the worker actually produced.
+    let row = match &body.output {
+        Some(output) => {
+            repo.record_output(auth.tenant_id, execution_id, output)
+                .await?;
+            repo.get(auth.tenant_id, execution_id).await?
+        }
+        None => row,
+    };
 
     Ok(Json(ApiResponse::new(
         crate::jobs::execution_view(&row),
@@ -430,23 +522,118 @@ pub async fn complete(
     )))
 }
 
+/// `POST /executions/{id}/fail` — worker reporting failure directly.
+pub async fn fail(
+    state: State<AppState>,
+    auth: Auth,
+    path: Path<Uuid>,
+    Json(mut body): Json<CompleteRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    body.succeeded = Some(false);
+    complete(state, auth, path, Json(body)).await
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AddLogRequest {
+    #[serde(default)]
+    pub stream: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+/// `POST /executions/{id}/logs` — worker reporting execution log lines.
+pub async fn add_log(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(execution_id): Path<Uuid>,
+    Json(body): Json<AddLogRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("executions:write")?;
+
+    let stream = body.stream.as_deref().unwrap_or("stdout");
+    let content = body
+        .content
+        .as_deref()
+        .or(body.message.as_deref())
+        .unwrap_or("");
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO execution_logs (id, tenant_id, execution_id, stream, content, logged_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(execution_id)
+    .bind(stream)
+    .bind(content)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": id, "logged": true }),
+        auth.request_id,
+    )))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DispatchRequest {
+    /// The worker that should run the execution. Required unless the caller
+    /// authenticated with that worker's own token.
+    #[serde(default)]
+    pub worker_id: Option<Uuid>,
+    #[serde(default)]
+    pub lease_seconds: Option<i64>,
+}
+
 /// `POST /executions/{id}/dispatch` — administrative dispatch (spec 10.10).
+///
+/// The path names an *execution*; the worker comes from the body or the caller's
+/// worker credential. Treating the execution id as a worker id (as an earlier
+/// revision did) meant this endpoint could never dispatch anything.
 pub async fn dispatch(
     State(state): State<AppState>,
     Auth(auth): Auth,
-    Path(worker_id): Path<Uuid>,
+    Path(execution_id): Path<Uuid>,
+    body: Option<Json<DispatchRequest>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("workers:admin")?;
+    auth.require("workers:claim")?;
+
+    let request = body.map(|Json(body)| body).unwrap_or_default();
+    if let (Some(own), Some(req)) = (auth.worker_id, request.worker_id) {
+        if own != req {
+            return Err(ApiError::forbidden(
+                "a worker token may only dispatch to its own worker",
+            ));
+        }
+    }
+    let worker_id = auth.worker_id.or(request.worker_id).ok_or_else(|| {
+        ApiError::validation("worker_id is required when dispatching on a worker's behalf")
+    })?;
 
     let row = ExecutionRepository::new(&state.pool)
-        .claim_next(auth.tenant_id, None, worker_id)
+        .dispatch_to(auth.tenant_id, execution_id, worker_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("execution"))?;
+
+    let lease = LeaseRepository::new(&state.pool)
+        .acquire(
+            auth.tenant_id,
+            execution_id,
+            worker_id,
+            None,
+            request.lease_seconds.unwrap_or(30),
+        )
         .await?;
 
     Ok(Json(ApiResponse::new(
-        match row {
-            Some(row) => json!({ "execution": crate::jobs::execution_view(&row) }),
-            None => json!({ "execution": null }),
-        },
+        json!({
+            "execution": crate::jobs::execution_view(&row),
+            "lease": { "id": lease.id, "expires_at": lease.expires_at },
+        }),
         auth.request_id,
     )))
 }

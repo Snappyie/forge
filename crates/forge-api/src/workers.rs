@@ -54,21 +54,178 @@ pub async fn register(
             .with_detail("hostname", "must not be empty"));
     }
 
+    let token = forge_auth::generate_worker_token();
+
     let row = WorkerRepository::new(&state.pool)
-        .register(
+        .register_with_token(
             auth.tenant_id,
             body.name.as_deref().unwrap_or(&body.hostname),
             &body.hostname,
             body.version.as_deref(),
             body.capabilities,
             body.labels,
+            Some(&token.hash),
         )
         .await?;
 
+    let mut view = worker_view(&row);
+    if let Some(obj) = view.as_object_mut() {
+        obj.insert("token".to_string(), json!(token.raw));
+    }
+
     Ok((
         StatusCode::CREATED,
-        Json(ApiResponse::new(worker_view(&row), auth.request_id)),
+        Json(ApiResponse::new(view, auth.request_id)),
     ))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DequeueRequest {
+    #[serde(default)]
+    pub worker_id: Option<String>,
+}
+
+/// `POST /queues/{queue}/dequeue` — dequeue and lease work for a worker.
+pub async fn dequeue(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(queue_name_or_id): Path<String>,
+    Json(body): Json<DequeueRequest>,
+) -> Result<Json<ApiResponse<Option<serde_json::Value>>>, ApiError> {
+    auth.require("workers:claim")?;
+
+    let queue_id = if let Ok(id) = Uuid::parse_str(&queue_name_or_id) {
+        id
+    } else {
+        let row: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM queues WHERE tenant_id = $1 AND name = $2")
+                .bind(auth.tenant_id.into_uuid())
+                .bind(&queue_name_or_id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+
+        match row {
+            Some((id,)) => id,
+            None => {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO queues (id, tenant_id, name) VALUES ($1, $2, $3)
+                     ON CONFLICT (tenant_id, name) DO NOTHING",
+                )
+                .bind(id)
+                .bind(auth.tenant_id.into_uuid())
+                .bind(&queue_name_or_id)
+                .execute(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+
+                let row: Option<(Uuid,)> =
+                    sqlx::query_as("SELECT id FROM queues WHERE tenant_id = $1 AND name = $2")
+                        .bind(auth.tenant_id.into_uuid())
+                        .bind(&queue_name_or_id)
+                        .fetch_optional(&state.pool)
+                        .await
+                        .map_err(ApiError::from)?;
+                row.map(|(id,)| id).unwrap_or(id)
+            }
+        }
+    };
+
+    // A worker credential is bound to exactly one worker: it may dequeue for
+    // itself and nothing else. Otherwise any registered worker could drain work
+    // belonging to another worker's leases (spec 11.1: no implicit trust of
+    // workers; only the lease holder may act on it).
+    if let (Some(own), Some(requested)) = (auth.worker_id, body.worker_id.as_deref()) {
+        let requested = Uuid::parse_str(requested).ok();
+        if requested != Some(own) {
+            return Err(ApiError::forbidden(
+                "a worker token may only dequeue work for its own worker",
+            ));
+        }
+    }
+
+    let worker_uuid = if let Some(own) = auth.worker_id {
+        own
+    } else if let Some(ref wid) = body.worker_id {
+        if let Ok(u) = Uuid::parse_str(wid) {
+            u
+        } else {
+            let mut bytes = [0u8; 16];
+            for (i, b) in wid.as_bytes().iter().enumerate() {
+                bytes[i % 16] ^= *b;
+            }
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        }
+    } else {
+        auth.user_id
+    };
+
+    let worker_exists: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM workers WHERE id = $1 AND tenant_id = $2")
+            .bind(worker_uuid)
+            .bind(auth.tenant_id.into_uuid())
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+
+    if worker_exists.is_none() {
+        // A worker credential must already exist: auto-registering one would let
+        // a token mint further workers. An operator acting for a named worker
+        // may still have it created on the spot, which is the same authority
+        // `POST /workers/register` already grants.
+        if auth.worker_id.is_some() {
+            return Err(ApiError::conflict(
+                "this worker is not registered; register it before dequeuing",
+            ));
+        }
+        let name = body.worker_id.as_deref().unwrap_or("worker");
+        let _ = WorkerRepository::new(&state.pool)
+            .register_with_token(
+                auth.tenant_id,
+                name,
+                name,
+                Some("sdk"),
+                json!(["*"]),
+                json!({}),
+                None,
+            )
+            .await;
+    }
+
+    let executions = forge_storage::ExecutionRepository::new(&state.pool);
+    let row = executions
+        .claim_next(auth.tenant_id, Some(queue_id), worker_uuid)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(Json(ApiResponse::new(None, auth.request_id)));
+    };
+
+    let lease = forge_storage::LeaseRepository::new(&state.pool)
+        .acquire(auth.tenant_id, row.id, worker_uuid, None, 30)
+        .await?;
+
+    let mut view = crate::jobs::execution_view(&row);
+    let job_row: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM jobs WHERE id = $1 AND tenant_id = $2")
+            .bind(row.job_id)
+            .bind(auth.tenant_id.into_uuid())
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+
+    if let Some((job_name,)) = job_row {
+        if let Some(obj) = view.as_object_mut() {
+            obj.insert("job_name".into(), json!(job_name));
+            obj.insert("type".into(), json!(job_name));
+            obj.insert("lease_id".into(), json!(lease.id));
+        }
+    }
+
+    Ok(Json(ApiResponse::new(Some(view), auth.request_id)))
 }
 
 /// `POST /workers/{id}/heartbeat` (spec 05 endpoint 34).
@@ -77,7 +234,15 @@ pub async fn heartbeat(
     Auth(auth): Auth,
     Path(worker_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("workers:admin")?;
+    auth.require("workers:heartbeat")?;
+
+    if let Some(own) = auth.worker_id {
+        if own != worker_id {
+            return Err(ApiError::forbidden(
+                "a worker token may only heartbeat its own worker",
+            ));
+        }
+    }
 
     let row = WorkerRepository::new(&state.pool)
         .heartbeat(auth.tenant_id, worker_id)
@@ -170,6 +335,17 @@ pub async fn drain(
         .drain(auth.tenant_id, worker_id)
         .await?;
 
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "workers:drain",
+            "WORKER",
+            Some(worker_id),
+        ))
+        .await;
+
     Ok(Json(ApiResponse::new(
         json!({ "id": row.id, "status": row.status, "draining": row.draining }),
         auth.request_id,
@@ -187,6 +363,17 @@ pub async fn revoke(
     WorkerRepository::new(&state.pool)
         .revoke(auth.tenant_id, worker_id)
         .await?;
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "workers:revoke",
+            "WORKER",
+            Some(worker_id),
+        ))
+        .await;
 
     Ok(Json(ApiResponse::new(
         json!({ "id": worker_id, "status": "REVOKED" }),

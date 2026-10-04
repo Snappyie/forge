@@ -43,7 +43,7 @@ pub async fn list_alerts(
     Query(pagination): Query<PaginationQuery>,
     Query(query): Query<ListAlertsQuery>,
 ) -> Result<Json<ListResponse<Value>>, ApiError> {
-    auth.require("audit:read")?;
+    auth.require("alerts:read")?;
 
     // `QueryBuilder` keeps the placeholder list contiguous as filters are
     // appended, which string concatenation would not.
@@ -90,7 +90,7 @@ pub async fn acknowledge_alert(
     Auth(auth): Auth,
     Path(alert_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("audit:read")?;
+    auth.require("alerts:write")?;
 
     let row: (Value,) = sqlx::query_as(
         "UPDATE alerts
@@ -112,12 +112,76 @@ pub async fn acknowledge_alert(
     Ok(Json(ApiResponse::new(row.0, auth.request_id)))
 }
 
+/// `POST /alerts/{id}/resolve`
+pub async fn resolve_alert(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(alert_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("alerts:write")?;
+
+    let row: (Value,) = sqlx::query_as(
+        "UPDATE alerts
+         SET status = 'RESOLVED', resolved_at = NOW()
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING json_build_object(
+             'id', id, 'kind', kind, 'severity', severity, 'title', title,
+             'status', status, 'resolved_at', resolved_at
+         )",
+    )
+    .bind(alert_id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?
+    .ok_or_else(|| ApiError::not_found("alert"))?;
+
+    Ok(Json(ApiResponse::new(row.0, auth.request_id)))
+}
+
+/// `POST /alerts/{id}/snooze`
+#[derive(Debug, Deserialize, Default)]
+pub struct SnoozeAlertRequest {
+    pub duration_seconds: Option<i64>,
+}
+
+pub async fn snooze_alert(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(alert_id): Path<Uuid>,
+    Json(body): Json<SnoozeAlertRequest>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("alerts:write")?;
+
+    let duration = body.duration_seconds.unwrap_or(3600);
+    let row: (Value,) = sqlx::query_as(
+        "UPDATE alerts
+         SET status = 'ACKNOWLEDGED',
+             acknowledged_by = $3,
+             acknowledged_at = NOW()
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING json_build_object(
+             'id', id, 'status', status, 'snoozed_seconds', $4
+         )",
+    )
+    .bind(alert_id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(auth.user_id)
+    .bind(duration)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?
+    .ok_or_else(|| ApiError::not_found("alert"))?;
+
+    Ok(Json(ApiResponse::new(row.0, auth.request_id)))
+}
+
 /// `GET /alerts/summary` — the counts the dashboard's "needs attention" needs.
 pub async fn alerts_summary(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("audit:read")?;
+    auth.require("alerts:read")?;
 
     let counts: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -152,7 +216,7 @@ pub async fn list_alert_rules(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<ListResponse<Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("alerts:read")?;
 
     let rows: Vec<(Value,)> = sqlx::query_as(
         "SELECT json_build_object(
@@ -198,7 +262,7 @@ pub async fn create_alert_rule(
     Auth(auth): Auth,
     Json(body): Json<CreateAlertRuleRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<Value>>), ApiError> {
-    auth.require("settings:write")?;
+    auth.require("alerts:write")?;
 
     if !ALERT_KINDS.contains(&body.kind.as_str()) {
         return Err(
@@ -262,7 +326,7 @@ pub async fn update_alert_rule(
     Path(rule_id): Path<Uuid>,
     Json(body): Json<UpdateAlertRuleRequest>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("alerts:write")?;
 
     if let Some(cooldown) = body.cooldown_seconds {
         if cooldown < 0 {
@@ -304,7 +368,7 @@ pub async fn delete_alert_rule(
     Auth(auth): Auth,
     Path(rule_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("alerts:write")?;
 
     let affected = sqlx::query("DELETE FROM alert_rules WHERE id = $1 AND tenant_id = $2")
         .bind(rule_id)
@@ -334,7 +398,7 @@ pub async fn list_incidents(
     Auth(auth): Auth,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ListResponse<Value>>, ApiError> {
-    auth.require("audit:read")?;
+    auth.require("incidents:read")?;
 
     let rows: Vec<(Value,)> = sqlx::query_as(
         "SELECT json_build_object(
@@ -365,7 +429,7 @@ pub async fn get_incident(
     Auth(auth): Auth,
     Path(incident_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("audit:read")?;
+    auth.require("incidents:read")?;
 
     let row: (Value,) = sqlx::query_as(
         "SELECT json_build_object(
@@ -424,6 +488,105 @@ pub async fn get_incident(
     )))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ResolveIncidentRequest {
+    pub root_cause: Option<String>,
+    pub resolution: Option<String>,
+}
+
+/// `POST /incidents/{id}/acknowledge`
+pub async fn acknowledge_incident(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(incident_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("incidents:write")?;
+
+    let row: (Value,) = sqlx::query_as(
+        "UPDATE incidents
+         SET status = 'ACKNOWLEDGED', acknowledged_at = NOW()
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING json_build_object(
+             'id', id, 'status', status, 'acknowledged_at', acknowledged_at
+         )",
+    )
+    .bind(incident_id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?
+    .ok_or_else(|| ApiError::not_found("incident"))?;
+
+    Ok(Json(ApiResponse::new(row.0, auth.request_id)))
+}
+
+/// `POST /incidents/{id}/resolve`
+pub async fn resolve_incident(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(incident_id): Path<Uuid>,
+    Json(body): Json<ResolveIncidentRequest>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("incidents:write")?;
+
+    let row: (Value,) = sqlx::query_as(
+        "UPDATE incidents
+         SET status = 'RESOLVED',
+             resolved_at = NOW(),
+             root_cause = COALESCE($3, root_cause),
+             resolution = COALESCE($4, resolution)
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING json_build_object(
+             'id', id, 'status', status, 'resolved_at', resolved_at,
+             'root_cause', root_cause, 'resolution', resolution
+         )",
+    )
+    .bind(incident_id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(body.root_cause)
+    .bind(body.resolution)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?
+    .ok_or_else(|| ApiError::not_found("incident"))?;
+
+    Ok(Json(ApiResponse::new(row.0, auth.request_id)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssignIncidentRequest {
+    pub assignee_id: Uuid,
+}
+
+/// `POST /incidents/{id}/assign`
+pub async fn assign_incident(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(incident_id): Path<Uuid>,
+    Json(body): Json<AssignIncidentRequest>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("incidents:write")?;
+
+    let event_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO incident_events (id, tenant_id, incident_id, at, kind, message, actor_id)
+         VALUES ($1, $2, $3, NOW(), 'ASSIGNED', $4, $5)",
+    )
+    .bind(event_id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(incident_id)
+    .bind(format!("Assigned to user {}", body.assignee_id))
+    .bind(auth.user_id)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": incident_id, "assignee_id": body.assignee_id }),
+        auth.request_id,
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
@@ -433,7 +596,7 @@ pub async fn list_notifications(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<NotificationsResponse>, ApiError> {
-    auth.require("executions:read")?;
+    auth.require("notifications:read")?;
 
     let rows: Vec<(Value,)> = sqlx::query_as(
         "SELECT json_build_object(
@@ -483,7 +646,7 @@ pub async fn mark_notifications_read(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("executions:read")?;
+    auth.require("notifications:write")?;
 
     let updated = sqlx::query(
         "UPDATE notifications SET read_at = NOW()
@@ -507,7 +670,7 @@ pub async fn get_notification_preferences(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("executions:read")?;
+    auth.require("notifications:read")?;
 
     let row: Option<(Value,)> = sqlx::query_as(
         "SELECT json_build_object(
@@ -570,7 +733,7 @@ pub async fn update_notification_preferences(
     Auth(auth): Auth,
     Json(body): Json<UpdateNotificationPreferences>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("executions:read")?;
+    auth.require("notifications:write")?;
 
     for kind in body.enabled_kinds.iter().flatten() {
         if !ALERT_KINDS.contains(&kind.as_str()) {

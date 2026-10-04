@@ -10,7 +10,7 @@
  */
 
 import Link from "next/link";
-import { use, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   Ban,

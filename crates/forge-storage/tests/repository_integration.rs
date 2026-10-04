@@ -1335,3 +1335,249 @@ async fn outbox_publisher_restart_does_not_lose_events() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Schedule kinds, completion and disabling (migration 015, spec 01.5)
+// ---------------------------------------------------------------------------
+
+/// Inserts a schedule row of any kind, so the kind-specific columns can be
+/// exercised without the API.
+#[allow(clippy::too_many_arguments)]
+async fn insert_kind_schedule(
+    pool: &PgPool,
+    tenant: TenantId,
+    job_id: Uuid,
+    schedule_type: &str,
+    expression: Option<&str>,
+    interval_seconds: Option<i64>,
+    one_time_at: Option<chrono::DateTime<Utc>>,
+    next_run_at: Option<chrono::DateTime<Utc>>,
+    version_policy: &str,
+    pinned_version_id: Option<Uuid>,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO schedules (id, tenant_id, job_id, target_id, target_type,
+                                target_version_policy, pinned_version_id, schedule_type,
+                                cron_expression, interval_seconds, one_time_at, timezone,
+                                next_run_at, enabled)
+         VALUES ($1, $2, $3, $4, 'JOB', $5, $6, $7, $8, $9, $10, 'UTC', $11, TRUE)",
+    )
+    .bind(id)
+    .bind(tenant.into_uuid())
+    .bind(job_id)
+    .bind(job_id)
+    .bind(version_policy)
+    .bind(pinned_version_id)
+    .bind(schedule_type)
+    .bind(expression)
+    .bind(interval_seconds)
+    .bind(one_time_at)
+    .bind(next_run_at)
+    .execute(pool)
+    .await
+    .expect("insert schedule");
+    id
+}
+
+async fn schedule_flags(
+    pool: &PgPool,
+    schedule_id: Uuid,
+) -> (bool, bool, Option<chrono::DateTime<Utc>>, Option<String>) {
+    sqlx::query_as(
+        "SELECT enabled, is_paused, next_run_at, disabled_reason
+         FROM schedules WHERE id = $1",
+    )
+    .bind(schedule_id)
+    .fetch_one(pool)
+    .await
+    .expect("read schedule flags")
+}
+
+/// The claim must carry the configuration that makes a non-cron schedule
+/// recurring; without it the engine has nothing to evaluate.
+#[tokio::test]
+async fn claim_due_carries_interval_and_one_time_configuration() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, version_id) = scaffold(&pool, tenant).await;
+        let now = Utc::now();
+        let due = now - chrono::Duration::minutes(5);
+
+        let interval_id = insert_kind_schedule(
+            &pool,
+            tenant,
+            job_id.into_uuid(),
+            "INTERVAL",
+            None,
+            Some(600),
+            None,
+            Some(due),
+            "LATEST_PUBLISHED",
+            None,
+        )
+        .await;
+        let one_time_id = insert_kind_schedule(
+            &pool,
+            tenant,
+            job_id.into_uuid(),
+            "ONE_TIME",
+            None,
+            None,
+            Some(due),
+            Some(due),
+            "PINNED",
+            Some(version_id.into_uuid()),
+        )
+        .await;
+
+        let claimed = ScheduleRepository::new(&pool)
+            .claim_due(now, 10, Uuid::new_v4(), 30)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+
+        let interval = claimed.iter().find(|row| row.id == interval_id).unwrap();
+        assert_eq!(interval.schedule_type, "INTERVAL");
+        assert_eq!(interval.interval_seconds, Some(600));
+        assert_eq!(interval.one_time_at, None);
+        assert_eq!(
+            interval.cron_expression, None,
+            "a non-cron schedule stores no expression"
+        );
+
+        // The domain shape the engine uses keeps the period.
+        let domain = interval.to_domain(tenant);
+        assert_eq!(domain.schedule_type, forge_domain::ScheduleType::Interval);
+        assert_eq!(domain.interval, Some(chrono::Duration::seconds(600)));
+
+        let one_time = claimed.iter().find(|row| row.id == one_time_id).unwrap();
+        assert_eq!(one_time.schedule_type, "ONE_TIME");
+        assert_eq!(one_time.one_time_at, Some(due));
+        assert_eq!(one_time.target_version_policy, "PINNED");
+        assert_eq!(one_time.pinned_version_id, Some(version_id.into_uuid()));
+        let domain = one_time.to_domain(tenant);
+        assert_eq!(domain.schedule_type, forge_domain::ScheduleType::OneTime);
+        assert_eq!(domain.one_time_at, Some(due));
+    })
+    .await;
+}
+
+/// Completing a one-shot clears its next run, disables it as finished, and
+/// cannot be repeated — the storage half of "never fires twice".
+#[tokio::test]
+async fn completing_a_one_time_schedule_is_terminal_and_conditional() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, _) = scaffold(&pool, tenant).await;
+        let now = Utc::now();
+        let instant = now - chrono::Duration::minutes(1);
+
+        let schedule_id = insert_kind_schedule(
+            &pool,
+            tenant,
+            job_id.into_uuid(),
+            "ONE_TIME",
+            None,
+            None,
+            Some(instant),
+            Some(instant),
+            "LATEST_PUBLISHED",
+            None,
+        )
+        .await;
+
+        let schedules = ScheduleRepository::new(&pool);
+        let claimed = schedules
+            .claim_due(now, 10, Uuid::new_v4(), 30)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "the one-shot is claimable");
+
+        assert!(schedules
+            .complete_one_time(schedule_id, tenant, instant)
+            .await
+            .unwrap());
+
+        let (enabled, is_paused, next_run_at, disabled_reason) =
+            schedule_flags(&pool, schedule_id).await;
+        assert!(!enabled, "a completed one-shot is disabled");
+        assert!(
+            !is_paused,
+            "completion is not an operator pause, and not an error"
+        );
+        assert_eq!(next_run_at, None, "there is no next run");
+        assert_eq!(disabled_reason.as_deref(), Some("COMPLETED_ONE_TIME"));
+
+        // A second completion affects nothing: the UPDATE is conditional on
+        // the claimed occurrence, which has already been cleared.
+        assert!(
+            !schedules
+                .complete_one_time(schedule_id, tenant, instant)
+                .await
+                .unwrap(),
+            "a completed one-shot cannot be completed twice"
+        );
+
+        // And it can never be claimed again.
+        assert!(schedules
+            .claim_due(now, 10, Uuid::new_v4(), 30)
+            .await
+            .unwrap()
+            .is_empty());
+    })
+    .await;
+}
+
+/// An engine disable is distinguishable from an operator pause, and resuming
+/// clears both.
+#[tokio::test]
+async fn disabling_a_schedule_records_a_reason_and_resume_clears_it() {
+    with_db!(|pool: PgPool| async move {
+        let tenant = TenantId::from_uuid(Uuid::new_v4());
+        let (job_id, _) = scaffold(&pool, tenant).await;
+        let now = Utc::now();
+
+        let schedule_id = insert_kind_schedule(
+            &pool,
+            tenant,
+            job_id.into_uuid(),
+            "CRON",
+            Some("0 2 * * *"),
+            None,
+            None,
+            Some(now - chrono::Duration::minutes(1)),
+            "LATEST_PUBLISHED",
+            None,
+        )
+        .await;
+
+        let schedules = ScheduleRepository::new(&pool);
+
+        // Operator pause: `is_paused` records it, no disabled reason.
+        schedules.pause(tenant, schedule_id).await.unwrap();
+        let (enabled, is_paused, _, reason) = schedule_flags(&pool, schedule_id).await;
+        assert!(!enabled);
+        assert!(is_paused, "an operator pause sets is_paused");
+        assert_eq!(reason, None, "a pause is not an engine disable");
+
+        // Engine disable: the reason records it, `is_paused` stays false.
+        schedules
+            .disable(tenant, schedule_id, "INVALID_CONFIGURATION")
+            .await
+            .unwrap();
+        let (enabled, is_paused, _, reason) = schedule_flags(&pool, schedule_id).await;
+        assert!(!enabled);
+        assert!(!is_paused, "an engine disable is not a pause");
+        assert_eq!(reason.as_deref(), Some("INVALID_CONFIGURATION"));
+
+        // Resume clears the engine's reason so the schedule is evaluable
+        // again.
+        schedules.resume(tenant, schedule_id).await.unwrap();
+        let (enabled, is_paused, _, reason) = schedule_flags(&pool, schedule_id).await;
+        assert!(enabled);
+        assert!(!is_paused);
+        assert_eq!(reason, None);
+    })
+    .await;
+}

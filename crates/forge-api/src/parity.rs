@@ -163,7 +163,7 @@ pub async fn list_webhooks(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<ListResponse<Value>>, ApiError> {
-    auth.require("settings:read")?;
+    auth.require("webhooks:read")?;
 
     let rows: Vec<(Value,)> = sqlx::query_as(
         "SELECT json_build_object(
@@ -214,7 +214,7 @@ pub async fn create_webhook(
     Auth(auth): Auth,
     Json(body): Json<CreateWebhook>,
 ) -> Result<(StatusCode, Json<ApiResponse<Value>>), ApiError> {
-    auth.require("settings:write")?;
+    auth.require("webhooks:write")?;
 
     if body.name.trim().is_empty() {
         return Err(
@@ -321,7 +321,7 @@ pub async fn test_webhook(
     Auth(auth): Auth,
     Path(webhook_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("webhooks:write")?;
 
     let row: Option<(String,)> =
         sqlx::query_as("SELECT url FROM webhooks WHERE id = $1 AND tenant_id = $2")
@@ -369,7 +369,7 @@ pub async fn webhook_deliveries(
     Path(webhook_id): Path<Uuid>,
     Query(_pagination): Query<PaginationQuery>,
 ) -> Result<Json<ListResponse<Value>>, ApiError> {
-    auth.require("settings:read")?;
+    auth.require("webhooks:read")?;
 
     let rows: Vec<(Value,)> = sqlx::query_as(
         "SELECT json_build_object(
@@ -401,7 +401,7 @@ pub async fn delete_webhook(
     Auth(auth): Auth,
     Path(webhook_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("webhooks:write")?;
 
     let affected = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
         .bind(webhook_id)

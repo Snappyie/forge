@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use forge_config::Config;
 use forge_events::{EventSink, LogSink, OutboxPublisher};
-use forge_executor::{HeartbeatMonitor, LeaseReaper};
+use forge_executor::{HeartbeatMonitor, LeaseReaper, WorkflowDriver};
 use forge_scheduler::SchedulerEngine;
 use tracing::{error, info, warn};
 
@@ -54,6 +54,7 @@ impl Runtime {
         }
 
         handles.push(("lease-reaper", self.spawn_lease_reaper()));
+        handles.push(("workflow-driver", self.spawn_workflow_driver()));
         handles.push(("outbox-publisher", self.spawn_outbox_publisher()));
         handles.push(("retention", self.spawn_retention()));
         handles.push(("heartbeat-monitor", self.spawn_heartbeat_monitor()));
@@ -137,45 +138,92 @@ impl Runtime {
                     _ = ticker.tick() => {
                         let stats = reaper.reap(chrono::Utc::now(), 100).await;
 
-                        // Retries the operator requested are `RETRY_SCHEDULED`
-                        // until something moves them back to `QUEUED`; without
-                        // this they sat there holding a concurrency slot.
-                        // The reaper above is pool-wide, so the retry sweep
-                        // matches it: a single statement over every tenant,
-                        // which cannot straddle one by construction.
-                        let retried = match sqlx::query(
-                            "UPDATE executions SET status = 'QUEUED', updated_at = NOW()
-                             WHERE id IN (
-                                 SELECT id FROM executions
-                                 WHERE status = 'RETRY_SCHEDULED'
-                                   AND updated_at <= NOW() - INTERVAL '5 seconds'
-                                 ORDER BY updated_at ASC
-                                 FOR UPDATE SKIP LOCKED
-                                 LIMIT 100
-                             )",
-                        )
-                        .execute(&pool)
-                        .await
+                        // A retry becomes eligible when its own backoff elapsed,
+                        // not on a fixed sweep interval (spec 10.9).
+                        let retried = match forge_storage::ExecutionRepository::new(&pool)
+                            .due_retries(100)
+                            .await
                         {
-                            Ok(result) => result.rows_affected() as i64,
+                            Ok(rows) => rows.len() as i64,
                             Err(e) => {
                                 warn!(error = %e, "could not requeue due retries");
                                 0
                             }
                         };
 
-                        if stats.requeued > 0 || stats.dead_lettered > 0 || retried > 0 {
+                        // Spec 10.7: timeouts are enforced by the server, because
+                        // a worker that has stopped reporting cannot be trusted to
+                        // enforce its own ceiling.
+                        let timed_out = sweep_timeouts(&pool, 100).await;
+
+                        if stats.requeued > 0
+                            || stats.dead_lettered > 0
+                            || retried > 0
+                            || timed_out > 0
+                        {
                             info!(
                                 examined = stats.leases_examined,
                                 requeued = stats.requeued,
                                 dead_lettered = stats.dead_lettered,
                                 retries_requeued = retried,
+                                timed_out,
                                 "lease reaper pass"
                             );
                         }
                     }
                     _ = shutdown.recv() => {
                         info!("lease reaper stopping");
+                        return;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Drives workflow DAGs to completion (spec 02.11).
+    ///
+    /// The engine decides what is outstanding; this loop supplies the state from
+    /// the database and performs the resulting work. It runs beside the lease
+    /// reaper rather than inside it, because a DAG node can be waiting on a
+    /// human, a delay or a fan-out — none of which is a lease.
+    fn spawn_workflow_driver(&self) -> tokio::task::JoinHandle<()> {
+        let pool = self.pool.clone();
+        let interval = Duration::from_secs(2);
+        let batch = self.config.scheduler.batch_size.min(200);
+        let max_fanout = self.config.limits.max_fanout;
+        let mut shutdown = self.shutdown.resubscribe();
+
+        tokio::spawn(async move {
+            let driver = WorkflowDriver::new(&pool).with_max_fanout(max_fanout);
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            info!(
+                interval_ms = interval.as_millis() as u64,
+                "workflow driver started"
+            );
+
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        // The soft lease is one interval: a run another server
+                        // advanced this recently is left to that server.
+                        let report = driver.tick(chrono::Utc::now(), batch, 1.0).await;
+                        if !report.is_empty() {
+                            info!(
+                                advanced = report.runs_advanced,
+                                settled = report.runs_settled,
+                                timed_out = report.runs_timed_out,
+                                errors = report.errors.len(),
+                                "workflow driver pass"
+                            );
+                        }
+                        for (run_id, reason) in report.errors {
+                            warn!(%run_id, %reason, "workflow run could not be advanced");
+                        }
+                    }
+                    _ = shutdown.recv() => {
+                        info!("workflow driver stopping");
                         return;
                     }
                 }
@@ -231,6 +279,8 @@ impl Runtime {
                             info!(
                                 executions = report.executions,
                                 attempts = report.attempts,
+                                logs = report.logs,
+                                audit = report.audit,
                                 idempotency = report.idempotency,
                                 "retention pass complete"
                             );
@@ -276,17 +326,60 @@ impl Runtime {
     }
 }
 
+/// Declares executions that outlived their deadline `TIMED_OUT`, then applies the
+/// retry policy exactly as a worker-reported failure would.
+///
+/// Returns how many executions were timed out. A failure to read or write is
+/// logged and reported as zero: the next pass retries, and a transient database
+/// problem must not take the runtime down.
+pub async fn sweep_timeouts(pool: &sqlx::PgPool, limit: i64) -> u64 {
+    let repository = forge_storage::ExecutionRepository::new(pool);
+    let overdue = match repository.overdue(limit).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, "could not load overdue executions");
+            return 0;
+        }
+    };
+
+    let handler = forge_executor::FailureHandler::new(pool);
+    let mut timed_out = 0;
+
+    for execution in overdue {
+        let tenant = forge_domain::TenantId::from_uuid(execution.tenant_id);
+        let attempts_made = (execution.attempt_count.max(0) as u32).saturating_add(1);
+        let message = "execution exceeded the timeout configured on its version";
+
+        match handler
+            .record_timeout(tenant, execution.id, attempts_made, message)
+            .await
+        {
+            Ok(outcome) => {
+                timed_out += 1;
+                info!(execution_id = %execution.id, ?outcome, "execution timed out");
+            }
+            Err(reason) => {
+                warn!(execution_id = %execution.id, %reason, "could not record a timeout")
+            }
+        }
+    }
+
+    timed_out
+}
+
 /// How many rows one retention pass removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetentionReport {
     pub executions: u64,
     pub attempts: u64,
+    pub logs: u64,
+    pub audit: u64,
     pub idempotency: u64,
 }
 
 impl RetentionReport {
     pub fn total(&self) -> u64 {
-        self.executions + self.attempts + self.idempotency
+        self.executions + self.attempts + self.logs + self.audit + self.idempotency
     }
 }
 
@@ -339,6 +432,38 @@ pub async fn run_retention_pass(
         report.attempts = rows.rows_affected();
     }
 
+    let log_cutoff = now - chrono::Duration::from_std(retention.logs).unwrap_or_default();
+    if let Ok(rows) = sqlx::query(
+        "DELETE FROM execution_logs WHERE id IN (
+             SELECT id FROM execution_logs
+             WHERE logged_at < $1
+             LIMIT $2
+         )",
+    )
+    .bind(log_cutoff)
+    .bind(batch)
+    .execute(pool)
+    .await
+    {
+        report.logs = rows.rows_affected();
+    }
+
+    let audit_cutoff = now - chrono::Duration::from_std(retention.audit).unwrap_or_default();
+    if let Ok(rows) = sqlx::query(
+        "DELETE FROM audit_events WHERE id IN (
+             SELECT id FROM audit_events
+             WHERE created_at < $1
+             LIMIT $2
+         )",
+    )
+    .bind(audit_cutoff)
+    .bind(batch)
+    .execute(pool)
+    .await
+    {
+        report.audit = rows.rows_affected();
+    }
+
     if let Ok(rows) = forge_storage::IdempotencyRepository::new(pool)
         .purge_expired(batch)
         .await
@@ -371,9 +496,11 @@ mod tests {
         let report = RetentionReport {
             executions: 2,
             attempts: 3,
+            logs: 4,
+            audit: 1,
             idempotency: 5,
         };
-        assert_eq!(report.total(), 10);
+        assert_eq!(report.total(), 15);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use forge_storage::{AuditFilter, AuditRepository, IdempotencyRepository};
@@ -217,6 +217,53 @@ pub async fn list_audit_events(
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
     pub name: String,
+    /// The role the key acts as (spec 11.4: granular permissions).
+    ///
+    /// Defaults to the creator's own role capped at ADMIN, so a leaked service
+    /// key is never the tenant OWNER and a key cannot be used to escalate.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// How long the key stays valid. Defaults to 365 days, capped at 10 years.
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+/// The role an API key gets when the caller does not name one.
+///
+/// OWNER is deliberately excluded: spec 11.1's least-privilege principle means a
+/// machine credential should not be able to delete the tenant.
+fn default_api_key_role(creator: forge_auth::Role) -> forge_auth::Role {
+    match creator {
+        forge_auth::Role::Owner => forge_auth::Role::Admin,
+        other => other,
+    }
+}
+
+/// Refuses a key that would hold more than the person creating it.
+fn authorize_key_role(
+    creator: forge_auth::Role,
+    requested: forge_auth::Role,
+) -> Result<(), ApiError> {
+    if creator == forge_auth::Role::Owner {
+        return Ok(());
+    }
+    if requested == forge_auth::Role::Owner {
+        return Err(ApiError::forbidden(
+            "only a tenant owner may create an owner-scoped API key",
+        ));
+    }
+    let within_creator = requested
+        .permissions()
+        .iter()
+        .all(|permission| creator.allows(permission));
+    if within_creator {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(format!(
+            "{} may not grant a key the {} role",
+            creator, requested
+        )))
+    }
 }
 
 /// `POST /api-keys` (spec 05 endpoint 49).
@@ -236,25 +283,55 @@ pub async fn create_api_key(
         );
     }
 
-    let key = forge_auth::generate_api_key();
+    let role = match body.role.as_deref() {
+        None => default_api_key_role(auth.role),
+        Some(raw) => forge_auth::Role::parse(raw).ok_or_else(|| {
+            ApiError::validation(format!("`{raw}` is not a valid role"))
+                .with_detail("role", "invalid")
+        })?,
+    };
+    authorize_key_role(auth.role, role)?;
+
+    let days = body.expires_in_days.unwrap_or(365);
+    if !(1..=3650).contains(&days) {
+        return Err(
+            ApiError::validation("expires_in_days must be between 1 and 3650")
+                .with_detail("expires_in_days", "out of range"),
+        );
+    }
+
+    let key = forge_auth::generate_api_key(&state.api_key_pepper);
     let id = Uuid::new_v4();
     // A short prefix so an operator can tell keys apart in a listing without
     // the prefix being enough to authenticate with.
     let prefix: String = key.raw.chars().take(12).collect();
 
     sqlx::query(
-        "INSERT INTO api_keys (id, tenant_id, name, key_hash, prefix, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO api_keys (id, tenant_id, owner_id, role, name, key_hash, prefix, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(id)
     .bind(auth.tenant_id.into_uuid())
+    .bind(auth.user_id)
+    .bind(role.as_str())
     .bind(body.name.trim())
     .bind(&key.hash)
     .bind(&prefix)
-    .bind(Utc::now() + chrono::Duration::days(365))
+    .bind(Utc::now() + chrono::Duration::days(days))
     .execute(&state.pool)
     .await
     .map_err(ApiError::from)?;
+
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "api_keys:create",
+            "API_KEY",
+            Some(id),
+        ))
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -262,6 +339,8 @@ pub async fn create_api_key(
             json!({
                 "id": id,
                 "name": body.name.trim(),
+                "role": role.as_str(),
+                "expires_at": Utc::now() + chrono::Duration::days(days),
                 // Shown once, never again.
                 "key": key.raw,
                 "prefix": prefix,
@@ -322,6 +401,17 @@ pub async fn revoke_api_key(
         return Err(ApiError::not_found("api key"));
     }
 
+    let _ = forge_storage::AuditRepository::new(&state.pool)
+        .record(forge_storage::NewAuditEvent::new(
+            auth.tenant_id,
+            "USER",
+            Some(auth.user_id),
+            "api_keys:revoke",
+            "API_KEY",
+            Some(key_id),
+        ))
+        .await;
+
     Ok(Json(ApiResponse::new(
         json!({ "id": key_id, "revoked": true }),
         auth.request_id,
@@ -337,7 +427,7 @@ pub async fn list_integrations(
     State(state): State<AppState>,
     Auth(auth): Auth,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("integrations:read")?;
 
     // One JSON column, so the rows are plain values rather than 1-tuples.
     let rows: Vec<serde_json::Value> = sqlx::query_scalar(
@@ -413,7 +503,7 @@ pub async fn create_integration(
     Auth(auth): Auth,
     Json(body): Json<CreateIntegrationRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<serde_json::Value>>), ApiError> {
-    auth.require("settings:write")?;
+    auth.require("integrations:write")?;
 
     if body.kind.trim().is_empty() || body.name.trim().is_empty() {
         return Err(
@@ -476,7 +566,7 @@ pub async fn update_integration(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateIntegrationRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("integrations:write")?;
 
     let affected = sqlx::query(
         "UPDATE integration_configurations SET
@@ -512,7 +602,7 @@ pub async fn delete_integration(
     Auth(auth): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("integrations:write")?;
 
     let affected =
         sqlx::query("DELETE FROM integration_configurations WHERE id = $1 AND tenant_id = $2")
@@ -544,7 +634,7 @@ pub async fn test_integration(
     Auth(auth): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("settings:write")?;
+    auth.require("integrations:write")?;
 
     let row: Option<(serde_json::Value,)> = sqlx::query_as(
         "SELECT json_build_object('id', id, 'name', name, 'kind', kind)
@@ -599,6 +689,142 @@ pub async fn purge_idempotency(
 
     Ok(Json(ApiResponse::new(
         json!({ "purged": purged }),
+        auth.request_id,
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Teams
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTeamRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub on_call_email: Option<String>,
+}
+
+/// `GET /teams`
+pub async fn list_teams(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+) -> Result<Json<ListResponse<Value>>, ApiError> {
+    auth.require("users:read")?;
+
+    let rows: Vec<(Value,)> = sqlx::query_as(
+        "SELECT json_build_object(
+             'id', t.id,
+             'name', t.name,
+             'description', t.description,
+             'on_call', t.on_call_email,
+             'members', (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id),
+             'created_at', t.created_at
+         )
+         FROM teams t
+         WHERE t.tenant_id = $1
+         ORDER BY t.name ASC",
+    )
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let items = rows.into_iter().map(|(v,)| v).collect();
+    Ok(Json(ListResponse::new(
+        items,
+        Default::default(),
+        auth.request_id,
+    )))
+}
+
+/// `POST /teams`
+pub async fn create_team(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Json(body): Json<CreateTeamRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<Value>>), ApiError> {
+    auth.require("users:write")?;
+
+    if body.name.trim().is_empty() {
+        return Err(ApiError::validation("name must not be empty"));
+    }
+
+    let id = Uuid::new_v4();
+    let row: (Value,) = sqlx::query_as(
+        "INSERT INTO teams (id, tenant_id, name, description, on_call_email)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING json_build_object(
+             'id', id, 'name', name, 'description', description,
+             'on_call', on_call_email, 'created_at', created_at
+         )",
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(body.name.trim())
+    .bind(body.description)
+    .bind(body.on_call_email)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(row.0, auth.request_id)),
+    ))
+}
+
+/// `GET /teams/{id}`
+pub async fn get_team(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(team_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("users:read")?;
+
+    let row: (Value,) = sqlx::query_as(
+        "SELECT json_build_object(
+             'id', t.id,
+             'name', t.name,
+             'description', t.description,
+             'on_call', t.on_call_email,
+             'members', (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id),
+             'created_at', t.created_at
+         )
+         FROM teams t
+         WHERE t.id = $1 AND t.tenant_id = $2",
+    )
+    .bind(team_id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?
+    .ok_or_else(|| ApiError::not_found("team"))?;
+
+    Ok(Json(ApiResponse::new(row.0, auth.request_id)))
+}
+
+/// `DELETE /teams/{id}`
+pub async fn delete_team(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(team_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("users:write")?;
+
+    let affected = sqlx::query("DELETE FROM teams WHERE id = $1 AND tenant_id = $2")
+        .bind(team_id)
+        .bind(auth.tenant_id.into_uuid())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::not_found("team"));
+    }
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": team_id, "deleted": true }),
         auth.request_id,
     )))
 }

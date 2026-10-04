@@ -1,22 +1,9 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
 import { AuthProvider } from "@/lib/auth";
 import { ShellProvider } from "@/lib/shell";
 import { AppShell } from "@/components/layout/AppShell";
 import { Toaster } from "@/components/ui/toast";
 import "./globals.css";
-
-const inter = Inter({
-  variable: "--font-sans",
-  subsets: ["latin"],
-  display: "swap",
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  variable: "--font-mono",
-  subsets: ["latin"],
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "Forge | Execution Engine",
@@ -27,7 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     // No `dark` class here: `ShellProvider` applies it, so the theme selector
     // can actually switch palettes without a full reload.
-    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased font-sans`}>
+    <html lang="en" className="h-full antialiased font-sans">
       <body className="min-h-full bg-background text-foreground">
         {/*
           The shell lives here rather than in the root body so the sign-in and

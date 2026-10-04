@@ -403,3 +403,13 @@ export function formatDuration(ms: number | null | undefined): string {
   const seconds = Math.round((ms % 60_000) / 1000);
   return `${minutes}m ${seconds}s`;
 }
+
+export interface Team {
+  id: string;
+  name: string;
+  description: string | null;
+  on_call: string | null;
+  members: number;
+  created_at: string;
+}
+

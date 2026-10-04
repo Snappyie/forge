@@ -14,7 +14,7 @@ license = "MIT"
 tokio = { version = "1.32", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.4", features = ["v4", "serde"] }
+uuid = { version = "1.4", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono", "uuid", "macros", "json", "migrate"] }

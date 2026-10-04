@@ -52,6 +52,34 @@ pub enum CompletionRejection {
     ExecutionTerminal,
 }
 
+impl CompletionRejection {
+    /// A stable, operator-facing reason. Spec 10.5 requires a stale result to be
+    /// *rejected and explained*, not silently dropped, so this is what the API
+    /// returns to the worker and what the caller logs.
+    pub fn reason(self) -> &'static str {
+        match self {
+            CompletionRejection::StaleLease => {
+                "the lease is not the execution's active lease, or the execution no longer exists"
+            }
+            CompletionRejection::NotLeaseHolder => {
+                "the lease is held by a different worker, so this result is stale"
+            }
+            CompletionRejection::LeaseExpired => {
+                "the lease expired before this result arrived; recovery already owns the execution"
+            }
+            CompletionRejection::ExecutionTerminal => {
+                "the execution already reached a terminal state"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for CompletionRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 /// Statistics for observability (spec 12 / AT-OBS-002).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryStats {

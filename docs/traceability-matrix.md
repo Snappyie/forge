@@ -62,3 +62,11 @@ in `22-architecture-decisions.md`:
 - ADR-0016 — cancellation is cooperative only.
 - ADR-0017 — runtime SQL queries instead of compile-time macros.
 - ADR-0018 — status vocabularies use CHECK constraints, not native enums.
+
+## Parity evaluation
+
+A detailed comparative assessment against Apache Airflow and PowerJob is maintained in
+[PowerJob + Airflow Parity Matrix](file:///Users/neel/Downloads/forge-specification/docs/powerjob-airflow-parity.md).
+
+Complete system architecture and sequence diagrams for all core flows are detailed in
+[Architecture & Complete Execution Flows](file:///Users/neel/Downloads/forge-specification/docs/architecture-and-flows.md).

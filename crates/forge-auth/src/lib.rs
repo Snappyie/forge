@@ -84,10 +84,31 @@ impl Role {
                 "queues:write",
                 "workers:read",
                 "workers:admin",
+                // The worker protocol itself. `workers:claim` and
+                // `workers:heartbeat` are also the only permissions a worker
+                // token carries (see `forge-api`'s `WORKER_PERMISSIONS`), so an
+                // administrator can drive the protocol for diagnostics.
+                "workers:claim",
+                "workers:heartbeat",
                 "users:read",
                 "users:write",
                 "audit:read",
+                "settings:read",
                 "settings:write",
+                // Operational writes the server itself performs on behalf of a
+                // tenant: recording scheduler heartbeats, execution metrics and
+                // bulk cancellation.
+                "executions:write",
+                "alerts:read",
+                "alerts:write",
+                "incidents:read",
+                "incidents:write",
+                "webhooks:read",
+                "webhooks:write",
+                "integrations:read",
+                "integrations:write",
+                "notifications:read",
+                "notifications:write",
             ],
 
             // Spec 01.12 separates running work from changing definitions.
@@ -97,12 +118,23 @@ impl Role {
                 "executions:read",
                 "executions:cancel",
                 "executions:retry",
+                "executions:write",
                 "workflows:read",
                 "workflows:trigger",
                 "schedules:read",
                 "queues:read",
                 "workers:read",
                 "audit:read",
+                "settings:read",
+                "alerts:read",
+                "alerts:write",
+                "incidents:read",
+                "incidents:write",
+                "webhooks:read",
+                "webhooks:write",
+                "integrations:read",
+                "notifications:read",
+                "notifications:write",
             ],
 
             Role::Developer => &[
@@ -113,6 +145,7 @@ impl Role {
                 "job_versions:write",
                 "executions:read",
                 "executions:cancel",
+                "executions:retry",
                 "workflows:read",
                 "workflows:write",
                 "workflows:trigger",
@@ -120,6 +153,12 @@ impl Role {
                 "schedules:write",
                 "queues:read",
                 "workers:read",
+                "settings:read",
+                "alerts:read",
+                "incidents:read",
+                "webhooks:read",
+                "integrations:read",
+                "notifications:read",
             ],
 
             Role::Auditor => &[
@@ -131,6 +170,10 @@ impl Role {
                 "queues:read",
                 "workers:read",
                 "audit:read",
+                "settings:read",
+                "alerts:read",
+                "incidents:read",
+                "notifications:read",
             ],
 
             Role::Viewer => &[
@@ -139,6 +182,9 @@ impl Role {
                 "workflows:read",
                 "queues:read",
                 "workers:read",
+                "alerts:read",
+                "incidents:read",
+                "notifications:read",
             ],
         }
     }
@@ -322,24 +368,87 @@ pub fn hash_token(token: &str) -> String {
 pub struct GeneratedApiKey {
     /// The raw key. Returned once at creation and never recoverable afterwards.
     pub raw: String,
-    /// SHA-256 of `raw`, stored in `api_keys.key_hash`.
+    /// Keyed digest of `raw`, stored in `api_keys.key_hash`.
     pub hash: String,
 }
 
+/// Keyed digest for API keys (spec 11.3).
+///
+/// Spec 11.3 requires API tokens to be stored "hashed using SHA-256 or
+/// stronger". A bare SHA-256 of a 256-bit random token is already infeasible to
+/// invert, but `FORGE_API_KEY_HASHING_SECRET` exists so that a database dump
+/// alone is not enough to *test candidate keys* — for instance a key an operator
+/// pasted into a ticket. HMAC-SHA256 makes that required secret load-bearing
+/// instead of decorative.
+pub fn hash_api_key_with(pepper: &[u8], raw: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    // HMAC accepts a key of any length, so this cannot fail.
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(pepper).expect("HMAC accepts keys of any length");
+    mac.update(raw.as_bytes());
+    hex(&mac.finalize().into_bytes())
+}
+
 /// Generates an API key with a recognisable prefix.
-pub fn generate_api_key() -> GeneratedApiKey {
+pub fn generate_api_key(pepper: &[u8]) -> GeneratedApiKey {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     let raw = format!("forge_{}", base64_url_encode(&bytes));
     GeneratedApiKey {
-        hash: hash_token(&raw),
+        hash: hash_api_key_with(pepper, &raw),
         raw,
     }
 }
 
 /// Hashes an API key for lookup.
-pub fn hash_api_key(raw: &str) -> String {
+pub fn hash_api_key(pepper: &[u8], raw: &str) -> String {
+    hash_api_key_with(pepper, raw)
+}
+
+// ---------------------------------------------------------------------------
+// Worker credentials
+// ---------------------------------------------------------------------------
+
+/// A worker token, shown once at registration (spec 10.2).
+///
+/// A worker needs a credential that identifies *the worker*, not the person who
+/// registered it: only the lease holder may renew (spec 10.3) or complete
+/// (spec 10.4) an execution, and a worker's operator is a different identity.
+/// Hashing follows `generate_api_key` so a leaked database row cannot be used to
+/// claim work.
+#[derive(Debug, Clone)]
+pub struct GeneratedWorkerToken {
+    /// The raw token. Returned once at registration and never recoverable.
+    pub raw: String,
+    /// SHA-256 of `raw`, stored in `workers.token_hash`.
+    pub hash: String,
+}
+
+/// Generates a worker token.
+///
+/// The `forge_wkr_` prefix is deliberately distinct from `forge_` so a worker
+/// token pasted into an API-key field is rejected by the prefix check rather
+/// than silently treated as a valid API key.
+pub fn generate_worker_token() -> GeneratedWorkerToken {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let raw = format!("forge_wkr_{}", base64_url_encode(&bytes));
+    GeneratedWorkerToken {
+        hash: hash_token(&raw),
+        raw,
+    }
+}
+
+/// Hashes a worker token for lookup and comparison.
+pub fn hash_worker_token(raw: &str) -> String {
     hash_token(raw)
+}
+
+/// Whether a presented token is shaped like a worker token.
+pub fn is_worker_token(raw: &str) -> bool {
+    raw.starts_with("forge_wkr_")
 }
 
 // ---------------------------------------------------------------------------
@@ -754,9 +863,13 @@ mod tests {
 
     // --- API keys ---
 
+    /// The pepper used by these tests. Any non-empty value works; the point is
+    /// that it must be *used*.
+    const PEPPER: &[u8] = b"test-pepper";
+
     #[test]
     fn an_api_key_is_prefixed_and_shown_once() {
-        let key = generate_api_key();
+        let key = generate_api_key(PEPPER);
         assert!(key.raw.starts_with("forge_"), "keys are recognisable");
         assert_ne!(key.hash, key.raw, "only the hash is stored");
         assert_eq!(key.hash.len(), 64);
@@ -764,13 +877,33 @@ mod tests {
 
     #[test]
     fn api_keys_are_unique() {
-        assert_ne!(generate_api_key().raw, generate_api_key().raw);
+        assert_ne!(generate_api_key(PEPPER).raw, generate_api_key(PEPPER).raw);
     }
 
     #[test]
     fn an_api_key_can_be_looked_up_by_its_hash() {
-        let key = generate_api_key();
-        assert_eq!(hash_api_key(&key.raw), key.hash);
+        let key = generate_api_key(PEPPER);
+        assert_eq!(hash_api_key(PEPPER, &key.raw), key.hash);
+    }
+
+    /// `FORGE_API_KEY_HASHING_SECRET` must actually protect the stored hash: a
+    /// database dump plus a candidate key is not enough without the pepper.
+    #[test]
+    fn a_different_pepper_does_not_verify_the_same_key() {
+        let key = generate_api_key(PEPPER);
+        assert_ne!(hash_api_key(b"another-pepper", &key.raw), key.hash);
+        assert_ne!(hash_api_key(b"", &key.raw), key.hash);
+    }
+
+    /// RFC 4231 test case 2, so the HMAC construction is verified against the
+    /// standard rather than only against itself.
+    #[test]
+    fn keyed_hashing_matches_rfc_4231() {
+        let digest = hash_api_key_with(b"Jefe", "what do ya want for nothing?");
+        assert_eq!(
+            digest,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
     }
 
     // --- SSRF (AT-SEC-002) ---

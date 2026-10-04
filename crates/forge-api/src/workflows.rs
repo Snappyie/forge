@@ -437,13 +437,141 @@ pub async fn publish(
     auth.require("workflows:write")?;
     load(&state.pool, auth.tenant_id, id).await?;
 
-    let version = publish_version(&state.pool, auth.tenant_id, id, None).await?;
+    // Publish the newest existing version rather than minting a fresh one.
+    //
+    // A version carries the graph, so a newly created version is empty. Creating
+    // one here meant every publish replaced a runnable definition with a graph
+    // of zero nodes, and a run started against it could never do anything — it
+    // simply stayed RUNNING forever with no node states.
+    let latest: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM workflow_versions
+         WHERE workflow_id = $1 AND tenant_id = $2
+         ORDER BY version_number DESC LIMIT 1",
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let Some((version,)) = latest else {
+        return Err(ApiError::conflict(
+            "this workflow has no version to publish; save a definition first",
+        ));
+    };
+
+    activate_version(&state.pool, auth.tenant_id, id, version).await?;
     audit(&state, auth.tenant_id, "workflow.publish", "workflow", id).await;
 
     Ok(Json(ApiResponse::new(
         json!({ "id": id, "current_version_id": version }),
         auth.request_id,
     )))
+}
+
+/// `POST /workflows/{id}/versions/{version_id}/publish` (spec 05 endpoint 28).
+///
+/// This is the shape the CLI and the documented API use; without it `forge
+/// workflows publish` returned 404 against a route that was never registered.
+pub async fn publish_specific_version(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path((id, version_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    auth.require("workflows:write")?;
+    load(&state.pool, auth.tenant_id, id).await?;
+
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM workflow_versions WHERE id = $1 AND workflow_id = $2 AND tenant_id = $3",
+    )
+    .bind(version_id)
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    if exists.is_none() {
+        return Err(ApiError::not_found("workflow version"));
+    }
+
+    let nodes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workflow_nodes WHERE workflow_version_id = $1")
+            .bind(version_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+
+    if nodes == 0 {
+        return Err(ApiError::validation(
+            "this version has no nodes, so a run against it could never do anything",
+        )
+        .with_detail("version_id", "empty graph"));
+    }
+
+    activate_version(&state.pool, auth.tenant_id, id, version_id).await?;
+    audit(
+        &state,
+        auth.tenant_id,
+        "workflow.publish",
+        "workflow_version",
+        version_id,
+    )
+    .await;
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": id, "current_version_id": version_id }),
+        auth.request_id,
+    )))
+}
+
+/// Marks a version published and points the workflow at it.
+async fn activate_version(
+    pool: &sqlx::PgPool,
+    tenant: forge_domain::TenantId,
+    workflow_id: Uuid,
+    version_id: Uuid,
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await.map_err(ApiError::from)?;
+
+    let result = async {
+        // `COALESCE` keeps the original publication time when a version is
+        // re-published, so the history does not silently rewrite itself.
+        sqlx::query(
+            "UPDATE workflow_versions SET published_at = COALESCE(published_at, NOW())
+             WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(version_id)
+        .bind(tenant.into_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+
+        sqlx::query(
+            "UPDATE workflows SET current_version_id = $2, status = 'ACTIVE', updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $3",
+        )
+        .bind(workflow_id)
+        .bind(version_id)
+        .bind(tenant.into_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+
+        Ok::<(), ApiError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await.map_err(ApiError::from)?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
 }
 
 /// `POST /workflows/{id}/trigger` (spec 05 endpoint 30).
@@ -473,27 +601,48 @@ pub async fn trigger(
         &request_body,
         &auth.request_id,
         || async {
-            // A workflow run is represented as a workflow execution row, which
-            // owns the node graph and drives it to completion.
-            let execution_id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO executions
-                     (id, tenant_id, workflow_id, status, trigger_source, correlation_id, input)
-                 VALUES ($1, $2, $3, 'QUEUED', 'WORKFLOW', $4, $5)",
+            // A workflow run is an execution that names the workflow and the
+            // definition version it was started from. The version is pinned here
+            // so publishing a new one cannot change a run already in flight
+            // (spec 01.22 invariant 6).
+            let Some(version_id) = workflow.current_version_id else {
+                return Err(ApiError::conflict(
+                    "this workflow has no published version to run",
+                ));
+            };
+
+            let timeout_seconds: i32 = sqlx::query_scalar::<_, i32>(
+                "SELECT timeout_seconds FROM workflow_versions WHERE id = $1 AND tenant_id = $2",
             )
-            .bind(execution_id)
+            .bind(version_id)
             .bind(auth.tenant_id.into_uuid())
-            .bind(id)
-            .bind(auth.request_id.clone())
-            .bind(&body)
-            .execute(&state.pool)
+            .fetch_optional(&state.pool)
             .await
-            .map_err(ApiError::from)?;
+            .map_err(ApiError::from)?
+            .unwrap_or(86_400);
+
+            let execution_id = forge_storage::WorkflowRunRepository::new(&state.pool)
+                .start_run(forge_storage::NewWorkflowRun {
+                    tenant_id: auth.tenant_id,
+                    workflow_id: id,
+                    workflow_version_id: version_id,
+                    trigger_source: "WORKFLOW".to_string(),
+                    correlation_id: Some(auth.request_id.clone()),
+                    input: body.clone(),
+                    timeout_seconds,
+                })
+                .await
+                .map_err(ApiError::from)?;
 
             audit(&state, auth.tenant_id, "workflow.trigger", "workflow", id).await;
             Ok((
                 StatusCode::ACCEPTED,
-                json!({ "execution_id": execution_id, "workflow_id": id, "status": "QUEUED" }),
+                json!({
+                    "execution_id": execution_id,
+                    "workflow_id": id,
+                    "workflow_version_id": version_id,
+                    "status": "RUNNING",
+                }),
                 Some(execution_id),
             ))
         },
@@ -804,6 +953,279 @@ fn to_domain_workflow(
     }
 
     Ok(workflow)
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ApprovalDecisionRequest {
+    pub comment: Option<String>,
+}
+
+/// Whether `actor` may satisfy an approval node that requires `required`.
+///
+/// The node names a role; a caller satisfies it when their own role grants at
+/// least everything that role grants. OWNER trivially does. An unrecognised
+/// role name fails closed rather than waving the approval through.
+fn actor_satisfies(actor: forge_auth::Role, required: &str) -> bool {
+    match forge_auth::Role::parse(required) {
+        None => false,
+        Some(required) => required
+            .permissions()
+            .iter()
+            .all(|permission| actor.allows(permission)),
+    }
+}
+
+/// The response shape shared by approve and reject.
+async fn record_approval(
+    state: &AppState,
+    auth: &crate::extract::AuthContext,
+    execution_id: Uuid,
+    node_id: Uuid,
+    decision: &str,
+    comment: Option<String>,
+) -> Result<serde_json::Value, ApiError> {
+    let repository = forge_storage::WorkflowRunRepository::new(&state.pool);
+
+    // The run must exist in this tenant, and the node must actually be waiting:
+    // approving a node that already ran (or never started) would silently do
+    // nothing, which is worse than a refusal.
+    repository
+        .get_run(auth.tenant_id, execution_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    let node = repository
+        .node_state_by_id(execution_id, node_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("workflow node"))?;
+
+    let awaiting =
+        node.state == "SUSPENDED" && node.suspension_reason.as_deref() == Some("AWAITING_APPROVAL");
+    if !awaiting {
+        return Err(ApiError::conflict(format!(
+            "node `{}` is not awaiting approval (state {})",
+            node.node_key, node.state
+        )));
+    }
+
+    let required = node.required_role.as_deref().unwrap_or("ADMIN");
+    if !actor_satisfies(auth.role, required) {
+        return Err(ApiError::forbidden(format!(
+            "this approval node requires the {required} role"
+        )));
+    }
+
+    let id = Uuid::new_v4();
+    let row: (serde_json::Value,) = sqlx::query_as(
+        "INSERT INTO manual_approvals
+             (id, tenant_id, workflow_execution_id, node_id, status, required_role,
+              decided_by, decided_at, comment)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+         ON CONFLICT (workflow_execution_id, node_id)
+         DO UPDATE SET
+             status = EXCLUDED.status,
+             decided_by = EXCLUDED.decided_by,
+             decided_at = NOW(),
+             comment = COALESCE(EXCLUDED.comment, manual_approvals.comment)
+         RETURNING json_build_object(
+             'id', id,
+             'workflow_execution_id', workflow_execution_id,
+             'node_id', node_id,
+             'node_key', $9,
+             'status', status,
+             'decided_at', decided_at,
+             'comment', comment
+         )",
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .bind(execution_id)
+    .bind(node_id)
+    .bind(decision)
+    .bind(required)
+    .bind(auth.user_id)
+    .bind(comment)
+    .bind(&node.node_key)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    // The runtime reads the decision on its next pass and resumes the node.
+    Ok(row.0)
+}
+
+/// `POST /workflows/executions/:execution_id/nodes/:node_id/approve` (spec 05 endpoint 31).
+pub async fn approve_node(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path((execution_id, node_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ApprovalDecisionRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("workflows:trigger")?;
+
+    let decision = record_approval(
+        &state,
+        &auth,
+        execution_id,
+        node_id,
+        "APPROVED",
+        body.comment,
+    )
+    .await?;
+
+    audit(&state, auth.tenant_id, "APPROVE", "workflow_node", node_id).await;
+
+    Ok(Json(ApiResponse::new(decision, auth.request_id)))
+}
+
+/// `POST /workflows/executions/:execution_id/nodes/:node_id/reject` (spec 05 endpoint 32).
+pub async fn reject_node(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path((execution_id, node_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ApprovalDecisionRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("workflows:trigger")?;
+
+    let decision = record_approval(
+        &state,
+        &auth,
+        execution_id,
+        node_id,
+        "REJECTED",
+        body.comment,
+    )
+    .await?;
+
+    audit(&state, auth.tenant_id, "REJECT", "workflow_node", node_id).await;
+
+    Ok(Json(ApiResponse::new(decision, auth.request_id)))
+}
+
+/// `GET /workflows/executions/:execution_id` — the run and its node states.
+///
+/// Spec 01.8 requires execution-graph visualisation, which needs the live state
+/// of every node, not just the run's overall status.
+pub async fn get_execution(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(execution_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("workflows:read")?;
+
+    let repository = forge_storage::WorkflowRunRepository::new(&state.pool);
+    let run = repository
+        .get_run(auth.tenant_id, execution_id)
+        .await
+        .map_err(ApiError::from)?;
+    let nodes = repository
+        .node_states(execution_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    let nodes: Vec<serde_json::Value> = nodes
+        .into_iter()
+        .map(|node| {
+            json!({
+                "node_key": node.node_key,
+                "node_id": node.node_id,
+                "node_type": node.node_type,
+                "state": node.state,
+                "suspension_reason": node.suspension_reason,
+                "resume_at": node.resume_at,
+                "child_execution_id": node.child_execution_id,
+                "required_role": node.required_role,
+                "output": node.output,
+                "failure_reason": node.failure_reason,
+                "attempt_count": node.attempt_count,
+            })
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "id": run.id,
+            "workflow_id": run.workflow_id,
+            "workflow_version_id": run.workflow_version_id,
+            "status": run.status,
+            "correlation_id": run.correlation_id,
+            "created_at": run.created_at,
+            "nodes": nodes,
+        }),
+        auth.request_id,
+    )))
+}
+
+/// `POST /workflows/executions/:execution_id/cancel` — stop a run.
+pub async fn cancel_execution(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(execution_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("workflows:trigger")?;
+
+    let cancelled = forge_storage::WorkflowRunRepository::new(&state.pool)
+        .cancel_run(auth.tenant_id, execution_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    if !cancelled {
+        return Err(ApiError::conflict(
+            "this workflow run is not running, so it cannot be cancelled",
+        ));
+    }
+
+    audit(
+        &state,
+        auth.tenant_id,
+        "workflow.cancel",
+        "workflow_execution",
+        execution_id,
+    )
+    .await;
+
+    Ok(Json(ApiResponse::new(
+        json!({ "id": execution_id, "status": "CANCEL_REQUESTED" }),
+        auth.request_id,
+    )))
+}
+
+/// `GET /workflows/executions/:execution_id/approvals`.
+pub async fn list_approvals(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(execution_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, ApiError> {
+    auth.require("workflows:read")?;
+
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT json_build_object(
+             'id', id,
+             'workflow_execution_id', workflow_execution_id,
+             'node_id', node_id,
+             'status', status,
+             'required_role', required_role,
+             'requested_by', requested_by,
+             'decided_by', decided_by,
+             'decided_at', decided_at,
+             'comment', comment,
+             'created_at', created_at
+         )
+         FROM manual_approvals
+         WHERE workflow_execution_id = $1 AND tenant_id = $2
+         ORDER BY created_at ASC",
+    )
+    .bind(execution_id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(ApiResponse::new(
+        rows.into_iter().map(|(v,)| v).collect(),
+        auth.request_id,
+    )))
 }
 
 #[cfg(test)]
