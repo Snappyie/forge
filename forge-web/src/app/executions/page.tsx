@@ -11,7 +11,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 
-import { useQuery } from "@/lib/useQuery";
+import { useList } from "@/lib/useQuery";
 import {
   formatRelative,
   formatTimestamp,
@@ -56,9 +56,9 @@ export default function ExecutionsPage() {
   const [status, setStatus] = useState("ALL");
   const path =
     status === "ALL" ? "/executions?limit=50" : `/executions?limit=50&status=${status}`;
-  const query = useQuery<{ data: Execution[] }>(path);
+  const query = useList<Execution>(path);
 
-  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const rows = query.rows;
 
   return (
     <div className="flex flex-col gap-4 p-6">

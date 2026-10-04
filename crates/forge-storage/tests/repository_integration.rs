@@ -188,7 +188,11 @@ async fn scaffold(pool: &PgPool, tenant: TenantId) -> (JobId, JobVersionId) {
         .await
         .expect("create version");
     versions
-        .publish(tenant, forge_domain::JobId::from_uuid(job.id), forge_domain::JobVersionId::from_uuid(version.id))
+        .publish(
+            tenant,
+            forge_domain::JobId::from_uuid(job.id),
+            forge_domain::JobVersionId::from_uuid(version.id),
+        )
         .await
         .expect("publish version");
 
@@ -210,13 +214,23 @@ async fn job_round_trips_through_the_repository() {
         let jobs = JobRepository::new(&pool);
 
         let created = jobs
-            .create(tenant, Some("settle-daily".into()), "Settle Daily", None, Priority::High, None)
+            .create(
+                tenant,
+                Some("settle-daily".into()),
+                "Settle Daily",
+                None,
+                Priority::High,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(created.status, "DRAFT");
         assert_eq!(created.priority, "HIGH");
 
-        let fetched = jobs.get(tenant, JobId::from_uuid(created.id)).await.unwrap();
+        let fetched = jobs
+            .get(tenant, JobId::from_uuid(created.id))
+            .await
+            .unwrap();
         assert_eq!(fetched.name, "Settle Daily");
         assert_eq!(fetched.key.as_deref(), Some("settle-daily"));
     })
@@ -234,7 +248,14 @@ async fn cross_tenant_job_read_is_not_found() {
 
         let jobs = JobRepository::new(&pool);
         let job = jobs
-            .create(tenant_a, Some("secret".into()), "Tenant A Job", None, Priority::Normal, None)
+            .create(
+                tenant_a,
+                Some("secret".into()),
+                "Tenant A Job",
+                None,
+                Priority::Normal,
+                None,
+            )
             .await
             .unwrap();
 
@@ -257,17 +278,38 @@ async fn job_key_is_unique_within_a_tenant_but_across_tenants() {
         seed_tenant(&pool, tenant_b).await;
         let jobs = JobRepository::new(&pool);
 
-        jobs.create(tenant_a, Some("shared-key".into()), "A1", None, Priority::Normal, None)
-            .await
-            .unwrap();
+        jobs.create(
+            tenant_a,
+            Some("shared-key".into()),
+            "A1",
+            None,
+            Priority::Normal,
+            None,
+        )
+        .await
+        .unwrap();
         // Same key, different tenant: allowed.
-        jobs.create(tenant_b, Some("shared-key".into()), "B1", None, Priority::Normal, None)
-            .await
-            .expect("the same key may exist in another tenant");
+        jobs.create(
+            tenant_b,
+            Some("shared-key".into()),
+            "B1",
+            None,
+            Priority::Normal,
+            None,
+        )
+        .await
+        .expect("the same key may exist in another tenant");
 
         // Same key, same tenant: rejected.
         let dup = jobs
-            .create(tenant_a, Some("shared-key".into()), "A2", None, Priority::Normal, None)
+            .create(
+                tenant_a,
+                Some("shared-key".into()),
+                "A2",
+                None,
+                Priority::Normal,
+                None,
+            )
             .await;
         assert!(matches!(dup, Err(StorageError::Conflict(_))), "got {dup:?}");
     })
@@ -282,7 +324,10 @@ async fn job_status_transitions_enforce_the_domain_machine() {
         let jobs = JobRepository::new(&pool);
 
         // DRAFT -> ACTIVE is allowed now that a version is published.
-        let active = jobs.set_status(tenant, job_id, JobStatus::Active).await.unwrap();
+        let active = jobs
+            .set_status(tenant, job_id, JobStatus::Active)
+            .await
+            .unwrap();
         assert_eq!(active.status, "ACTIVE");
 
         // A job cannot jump from ACTIVE back to DRAFT.
@@ -300,7 +345,14 @@ async fn stale_update_is_rejected_by_optimistic_concurrency() {
         seed_tenant(&pool, tenant).await;
         let jobs = JobRepository::new(&pool);
         let created = jobs
-            .create(tenant, Some("k".into()), "Original", None, Priority::Normal, None)
+            .create(
+                tenant,
+                Some("k".into()),
+                "Original",
+                None,
+                Priority::Normal,
+                None,
+            )
             .await
             .unwrap();
 
@@ -310,16 +362,29 @@ async fn stale_update_is_rejected_by_optimistic_concurrency() {
             ..Default::default()
         };
         let updated = jobs
-            .update(tenant, JobId::from_uuid(created.id), created.updated_at, &patch)
+            .update(
+                tenant,
+                JobId::from_uuid(created.id),
+                created.updated_at,
+                &patch,
+            )
             .await
             .unwrap();
         assert_eq!(updated.name, "Renamed");
 
         // A second update using the stale timestamp is rejected.
         let stale = jobs
-            .update(tenant, JobId::from_uuid(created.id), created.updated_at, &patch)
+            .update(
+                tenant,
+                JobId::from_uuid(created.id),
+                created.updated_at,
+                &patch,
+            )
             .await;
-        assert!(matches!(stale, Err(StorageError::Conflict(_))), "got {stale:?}");
+        assert!(
+            matches!(stale, Err(StorageError::Conflict(_))),
+            "got {stale:?}"
+        );
     })
     .await;
 }
@@ -331,7 +396,14 @@ async fn archiving_is_soft_and_idempotent() {
         seed_tenant(&pool, tenant).await;
         let jobs = JobRepository::new(&pool);
         let created = jobs
-            .create(tenant, Some("k".into()), "Doomed", None, Priority::Normal, None)
+            .create(
+                tenant,
+                Some("k".into()),
+                "Doomed",
+                None,
+                Priority::Normal,
+                None,
+            )
             .await
             .unwrap();
         let job_id = JobId::from_uuid(created.id);
@@ -359,7 +431,14 @@ async fn version_numbers_increment_and_publishing_is_idempotent() {
         let versions = JobVersionRepository::new(&pool);
 
         let job = jobs
-            .create(tenant, Some("k".into()), "Versioned", None, Priority::Normal, None)
+            .create(
+                tenant,
+                Some("k".into()),
+                "Versioned",
+                None,
+                Priority::Normal,
+                None,
+            )
             .await
             .unwrap();
         let job_id = JobId::from_uuid(job.id);
@@ -375,17 +454,32 @@ async fn version_numbers_increment_and_publishing_is_idempotent() {
         let v1 = versions.list(tenant, job_id).await.unwrap();
         let first = v1.last().unwrap();
         let published = versions
-            .publish(tenant, job_id, forge_domain::JobVersionId::from_uuid(first.id))
+            .publish(
+                tenant,
+                job_id,
+                forge_domain::JobVersionId::from_uuid(first.id),
+            )
             .await
             .unwrap();
         assert!(published.published_at.is_some());
 
         // A published version cannot be mutated afterwards.
-        assert!(versions.ensure_draft(tenant, job_id, forge_domain::JobVersionId::from_uuid(first.id)).await.is_err());
+        assert!(versions
+            .ensure_draft(
+                tenant,
+                job_id,
+                forge_domain::JobVersionId::from_uuid(first.id)
+            )
+            .await
+            .is_err());
 
         // Publishing again keeps the original timestamp (one-way).
         let again = versions
-            .publish(tenant, job_id, forge_domain::JobVersionId::from_uuid(first.id))
+            .publish(
+                tenant,
+                job_id,
+                forge_domain::JobVersionId::from_uuid(first.id),
+            )
             .await
             .unwrap();
         assert_eq!(again.published_at, published.published_at);
@@ -445,28 +539,47 @@ async fn execution_transitions_replay_through_the_domain_machine() {
         let executions = ExecutionRepository::new(&pool);
         let row = executions
             .create(NewExecution {
-                tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+                tenant_id: tenant,
+                job_id,
+                job_version_id: version_id,
+                queue_id: None,
                 schedule_id: None,
-                trigger_source: forge_domain::TriggerSource::Manual, priority: Priority::Normal,
-                scheduled_for: None, correlation_id: None, input: json!({}),
+                trigger_source: forge_domain::TriggerSource::Manual,
+                priority: Priority::Normal,
+                scheduled_for: None,
+                correlation_id: None,
+                input: json!({}),
             })
             .await
             .unwrap();
 
         // Illegal: QUEUED -> SUCCEEDED.
-        let bad = executions.transition(tenant, row.id, ExecutionStatus::Succeeded, None, None).await;
+        let bad = executions
+            .transition(tenant, row.id, ExecutionStatus::Succeeded, None, None)
+            .await;
         assert!(bad.is_err(), "storage must reject an illegal transition");
 
         // Legal path.
-        executions.transition(tenant, row.id, ExecutionStatus::Dispatched, None, None).await.unwrap();
-        let running = executions.transition(tenant, row.id, ExecutionStatus::Running, None, None).await.unwrap();
+        executions
+            .transition(tenant, row.id, ExecutionStatus::Dispatched, None, None)
+            .await
+            .unwrap();
+        let running = executions
+            .transition(tenant, row.id, ExecutionStatus::Running, None, None)
+            .await
+            .unwrap();
         assert!(running.started_at.is_some());
 
-        let done = executions.transition(tenant, row.id, ExecutionStatus::Succeeded, None, None).await.unwrap();
+        let done = executions
+            .transition(tenant, row.id, ExecutionStatus::Succeeded, None, None)
+            .await
+            .unwrap();
         assert!(done.ended_at.is_some());
 
         // Terminal: no going back.
-        let back = executions.transition(tenant, row.id, ExecutionStatus::Running, None, None).await;
+        let back = executions
+            .transition(tenant, row.id, ExecutionStatus::Running, None, None)
+            .await;
         assert!(back.is_err());
     })
     .await;
@@ -500,10 +613,16 @@ async fn duplicate_schedule_occurrence_is_rejected() {
         let occurrence = Utc::now();
 
         let base = NewExecution {
-            tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+            tenant_id: tenant,
+            job_id,
+            job_version_id: version_id,
+            queue_id: None,
             schedule_id: Some(schedule_id),
-            trigger_source: forge_domain::TriggerSource::Schedule, priority: Priority::Normal,
-            scheduled_for: Some(occurrence), correlation_id: None, input: json!({}),
+            trigger_source: forge_domain::TriggerSource::Schedule,
+            priority: Priority::Normal,
+            scheduled_for: Some(occurrence),
+            correlation_id: None,
+            input: json!({}),
         };
         executions.create(base.clone()).await.unwrap();
 
@@ -518,9 +637,15 @@ async fn duplicate_schedule_occurrence_is_rejected() {
                 schedule_id: Some(schedule_id),
                 scheduled_for: Some(occurrence + chrono::Duration::days(1)),
                 ..NewExecution {
-                    tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
-                    schedule_id: None, trigger_source: forge_domain::TriggerSource::Schedule,
-                    priority: Priority::Normal, scheduled_for: None, correlation_id: None,
+                    tenant_id: tenant,
+                    job_id,
+                    job_version_id: version_id,
+                    queue_id: None,
+                    schedule_id: None,
+                    trigger_source: forge_domain::TriggerSource::Schedule,
+                    priority: Priority::Normal,
+                    scheduled_for: None,
+                    correlation_id: None,
                     input: json!({}),
                 }
             })
@@ -543,28 +668,55 @@ async fn concurrency_limit_admits_up_to_the_bound() {
         assert_eq!(policy.scope, forge_domain::ConcurrencyScope::Job);
 
         let mk = |corr: &str| NewExecution {
-            tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+            tenant_id: tenant,
+            job_id,
+            job_version_id: version_id,
+            queue_id: None,
             schedule_id: None,
-            trigger_source: forge_domain::TriggerSource::Manual, priority: Priority::Normal,
-            scheduled_for: None, correlation_id: Some(corr.into()), input: json!({}),
+            trigger_source: forge_domain::TriggerSource::Manual,
+            priority: Priority::Normal,
+            scheduled_for: None,
+            correlation_id: Some(corr.into()),
+            input: json!({}),
         };
 
         // One active execution: room for another.
-        assert!(executions.concurrency_admits(tenant, job_id.into_uuid(), None, &policy).await.unwrap());
+        assert!(executions
+            .concurrency_admits(tenant, job_id.into_uuid(), None, &policy)
+            .await
+            .unwrap());
 
         executions.create(mk("a")).await.unwrap();
         executions.create(mk("b")).await.unwrap();
         // Two active: at the bound.
-        assert!(!executions.concurrency_admits(tenant, job_id.into_uuid(), None, &policy).await.unwrap());
+        assert!(!executions
+            .concurrency_admits(tenant, job_id.into_uuid(), None, &policy)
+            .await
+            .unwrap());
 
         // Finishing one frees the slot (AT-CON-004).
-        let active = executions.list(tenant, &ExecutionFilter::default(), None, 10).await.unwrap();
+        let active = executions
+            .list(tenant, &ExecutionFilter::default(), None, 10)
+            .await
+            .unwrap();
         let first = active.items[0].id;
-        executions.transition(tenant, first, ExecutionStatus::Dispatched, None, None).await.unwrap();
-        executions.transition(tenant, first, ExecutionStatus::Running, None, None).await.unwrap();
-        executions.transition(tenant, first, ExecutionStatus::Succeeded, None, None).await.unwrap();
+        executions
+            .transition(tenant, first, ExecutionStatus::Dispatched, None, None)
+            .await
+            .unwrap();
+        executions
+            .transition(tenant, first, ExecutionStatus::Running, None, None)
+            .await
+            .unwrap();
+        executions
+            .transition(tenant, first, ExecutionStatus::Succeeded, None, None)
+            .await
+            .unwrap();
 
-        assert!(executions.concurrency_admits(tenant, job_id.into_uuid(), None, &policy).await.unwrap());
+        assert!(executions
+            .concurrency_admits(tenant, job_id.into_uuid(), None, &policy)
+            .await
+            .unwrap());
     })
     .await;
 }
@@ -582,9 +734,16 @@ async fn cursor_pagination_walks_every_row_exactly_once() {
 
         for i in 0..7 {
             let name = format!("Job {i}");
-            jobs.create(tenant, Some(format!("k{i}")), &name, None, Priority::Normal, None)
-                .await
-                .unwrap();
+            jobs.create(
+                tenant,
+                Some(format!("k{i}")),
+                &name,
+                None,
+                Priority::Normal,
+                None,
+            )
+            .await
+            .unwrap();
         }
 
         let mut seen = Vec::new();
@@ -617,20 +776,77 @@ async fn job_filters_narrow_results() {
         seed_tenant(&pool, tenant).await;
         let jobs = JobRepository::new(&pool);
 
-        jobs.create(tenant, Some("alpha".into()), "Alpha", None, Priority::Normal, None).await.unwrap();
-        jobs.create(tenant, Some("beta".into()), "Beta", None, Priority::Critical, None).await.unwrap();
+        jobs.create(
+            tenant,
+            Some("alpha".into()),
+            "Alpha",
+            None,
+            Priority::Normal,
+            None,
+        )
+        .await
+        .unwrap();
+        jobs.create(
+            tenant,
+            Some("beta".into()),
+            "Beta",
+            None,
+            Priority::Critical,
+            None,
+        )
+        .await
+        .unwrap();
 
-        let by_status = jobs.list(tenant, &JobFilter { status: Some(JobStatus::Draft), ..Default::default() }, None, 10).await.unwrap();
+        let by_status = jobs
+            .list(
+                tenant,
+                &JobFilter {
+                    status: Some(JobStatus::Draft),
+                    ..Default::default()
+                },
+                None,
+                10,
+            )
+            .await
+            .unwrap();
         assert_eq!(by_status.items.len(), 2);
 
-        let active = jobs.set_status(tenant, JobId::from_uuid(by_status.items[0].id), JobStatus::Archived).await;
+        let active = jobs
+            .set_status(
+                tenant,
+                JobId::from_uuid(by_status.items[0].id),
+                JobStatus::Archived,
+            )
+            .await;
         // DRAFT -> ARCHIVED is allowed.
         active.unwrap();
 
-        let archived = jobs.list(tenant, &JobFilter { status: Some(JobStatus::Archived), ..Default::default() }, None, 10).await.unwrap();
+        let archived = jobs
+            .list(
+                tenant,
+                &JobFilter {
+                    status: Some(JobStatus::Archived),
+                    ..Default::default()
+                },
+                None,
+                10,
+            )
+            .await
+            .unwrap();
         assert_eq!(archived.items.len(), 1);
 
-        let search = jobs.list(tenant, &JobFilter { search: Some("alph".into()), ..Default::default() }, None, 10).await.unwrap();
+        let search = jobs
+            .list(
+                tenant,
+                &JobFilter {
+                    search: Some("alph".into()),
+                    ..Default::default()
+                },
+                None,
+                10,
+            )
+            .await
+            .unwrap();
         assert_eq!(search.items.len(), 1);
         assert_eq!(search.items[0].key.as_deref(), Some("alpha"));
     })
@@ -648,7 +864,17 @@ async fn worker_registration_and_heartbeat() {
         seed_tenant(&pool, tenant).await;
         let workers = WorkerRepository::new(&pool);
 
-        let w = workers.register(tenant, "worker-1", "host-1", Some("0.1.0"), json!(["linux"]), json!({"region":"us-east-1"})).await.unwrap();
+        let w = workers
+            .register(
+                tenant,
+                "worker-1",
+                "host-1",
+                Some("0.1.0"),
+                json!(["linux"]),
+                json!({"region":"us-east-1"}),
+            )
+            .await
+            .unwrap();
         assert_eq!(w.status, "READY");
         assert!(!w.draining);
 
@@ -668,7 +894,10 @@ async fn revoked_worker_cannot_heartbeat_or_receive_work() {
         let tenant = TenantId::from_uuid(Uuid::new_v4());
         seed_tenant(&pool, tenant).await;
         let workers = WorkerRepository::new(&pool);
-        let w = workers.register(tenant, "worker-2", "host-2", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "worker-2", "host-2", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         workers.revoke(tenant, w.id).await.unwrap();
         // AT-SEC-003 style: revocation is effective immediately.
@@ -686,20 +915,35 @@ async fn lease_ownership_is_exclusive_and_renewable_by_its_holder_only() {
         let executions = ExecutionRepository::new(&pool);
         let row = executions
             .create(NewExecution {
-                tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+                tenant_id: tenant,
+                job_id,
+                job_version_id: version_id,
+                queue_id: None,
                 schedule_id: None,
-                trigger_source: forge_domain::TriggerSource::Manual, priority: Priority::Normal,
-                scheduled_for: None, correlation_id: None, input: json!({}),
+                trigger_source: forge_domain::TriggerSource::Manual,
+                priority: Priority::Normal,
+                scheduled_for: None,
+                correlation_id: None,
+                input: json!({}),
             })
             .await
             .unwrap();
 
         let workers = WorkerRepository::new(&pool);
-        let w1 = workers.register(tenant, "w1", "h1", None, json!([]), json!({})).await.unwrap();
-        let w2 = workers.register(tenant, "w2", "h2", None, json!([]), json!({})).await.unwrap();
+        let w1 = workers
+            .register(tenant, "w1", "h1", None, json!([]), json!({}))
+            .await
+            .unwrap();
+        let w2 = workers
+            .register(tenant, "w2", "h2", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         let leases = LeaseRepository::new(&pool);
-        let lease = leases.acquire(tenant, row.id, w1.id, None, 20).await.unwrap();
+        let lease = leases
+            .acquire(tenant, row.id, w1.id, None, 20)
+            .await
+            .unwrap();
 
         // A second worker cannot take the same execution's lease.
         let second = leases.acquire(tenant, row.id, w2.id, None, 20).await;
@@ -714,7 +958,10 @@ async fn lease_ownership_is_exclusive_and_renewable_by_its_holder_only() {
 
         // Releasing frees the lease for re-acquisition.
         leases.release(lease.id, w1.id).await.unwrap();
-        leases.acquire(tenant, row.id, w2.id, None, 20).await.expect("lease is reusable after release");
+        leases
+            .acquire(tenant, row.id, w2.id, None, 20)
+            .await
+            .expect("lease is reusable after release");
     })
     .await;
 }
@@ -727,24 +974,38 @@ async fn expired_leases_are_claimable_by_the_reaper() {
         let executions = ExecutionRepository::new(&pool);
         let row = executions
             .create(NewExecution {
-                tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+                tenant_id: tenant,
+                job_id,
+                job_version_id: version_id,
+                queue_id: None,
                 schedule_id: None,
-                trigger_source: forge_domain::TriggerSource::Manual, priority: Priority::Normal,
-                scheduled_for: None, correlation_id: None, input: json!({}),
+                trigger_source: forge_domain::TriggerSource::Manual,
+                priority: Priority::Normal,
+                scheduled_for: None,
+                correlation_id: None,
+                input: json!({}),
             })
             .await
             .unwrap();
         let workers = WorkerRepository::new(&pool);
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
         let leases = LeaseRepository::new(&pool);
 
         // Not yet expired: nothing to reap.
-        leases.acquire(tenant, row.id, w.id, None, 3600).await.unwrap();
+        leases
+            .acquire(tenant, row.id, w.id, None, 3600)
+            .await
+            .unwrap();
         assert!(leases.claim_expired(10).await.unwrap().is_empty());
 
         // Force expiry, then the reaper sees it.
         sqlx::query("UPDATE worker_leases SET expires_at = NOW() - INTERVAL '1 minute'")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         let expired = leases.claim_expired(10).await.unwrap();
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].execution_id, row.id);
@@ -763,27 +1024,54 @@ async fn dispatch_claims_high_priority_work_first() {
         let (job_id, version_id) = scaffold(&pool, tenant).await;
         let executions = ExecutionRepository::new(&pool);
         let workers = WorkerRepository::new(&pool);
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         let mk = |priority: Priority, corr: &str| NewExecution {
-            tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+            tenant_id: tenant,
+            job_id,
+            job_version_id: version_id,
+            queue_id: None,
             schedule_id: None,
-            trigger_source: forge_domain::TriggerSource::Manual, priority,
-            scheduled_for: None, correlation_id: Some(corr.into()), input: json!({}),
+            trigger_source: forge_domain::TriggerSource::Manual,
+            priority,
+            scheduled_for: None,
+            correlation_id: Some(corr.into()),
+            input: json!({}),
         };
-        executions.create(mk(Priority::Background, "low")).await.unwrap();
-        executions.create(mk(Priority::Critical, "high")).await.unwrap();
+        executions
+            .create(mk(Priority::Background, "low"))
+            .await
+            .unwrap();
+        executions
+            .create(mk(Priority::Critical, "high"))
+            .await
+            .unwrap();
 
-        let first = executions.claim_next(tenant, None, w.id).await.unwrap().unwrap();
+        let first = executions
+            .claim_next(tenant, None, w.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(first.priority, "CRITICAL");
         assert_eq!(first.status, "DISPATCHED");
         assert_eq!(first.worker_id, Some(w.id));
 
-        let second = executions.claim_next(tenant, None, w.id).await.unwrap().unwrap();
+        let second = executions
+            .claim_next(tenant, None, w.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(second.priority, "BACKGROUND");
 
         // Queue drained.
-        assert!(executions.claim_next(tenant, None, w.id).await.unwrap().is_none());
+        assert!(executions
+            .claim_next(tenant, None, w.id)
+            .await
+            .unwrap()
+            .is_none());
     })
     .await;
 }
@@ -800,10 +1088,16 @@ async fn concurrent_claimers_never_receive_the_same_execution() {
         for i in 0..total {
             executions
                 .create(NewExecution {
-                    tenant_id: tenant, job_id, job_version_id: version_id, queue_id: None,
+                    tenant_id: tenant,
+                    job_id,
+                    job_version_id: version_id,
+                    queue_id: None,
                     schedule_id: None,
-                    trigger_source: forge_domain::TriggerSource::Manual, priority: Priority::Normal,
-                    scheduled_for: None, correlation_id: Some(format!("c{i}")), input: json!({}),
+                    trigger_source: forge_domain::TriggerSource::Manual,
+                    priority: Priority::Normal,
+                    scheduled_for: None,
+                    correlation_id: Some(format!("c{i}")),
+                    input: json!({}),
                 })
                 .await
                 .unwrap();
@@ -813,7 +1107,18 @@ async fn concurrent_claimers_never_receive_the_same_execution() {
         let mut handles = Vec::new();
         for n in 0..4 {
             let pool = pool.clone();
-            let worker = workers.register(tenant, &format!("w{n}"), &format!("h{n}"), None, json!([]), json!({})).await.unwrap().id;
+            let worker = workers
+                .register(
+                    tenant,
+                    &format!("w{n}"),
+                    &format!("h{n}"),
+                    None,
+                    json!([]),
+                    json!({}),
+                )
+                .await
+                .unwrap()
+                .id;
             handles.push(tokio::spawn(async move {
                 let repo = ExecutionRepository::new(&pool);
                 let mut claimed = Vec::new();
@@ -849,13 +1154,28 @@ async fn idempotency_replays_the_same_request_and_rejects_a_different_one() {
         let idem = IdempotencyRepository::new(&pool);
         let expires = Utc::now() + chrono::Duration::hours(24);
 
-        let outcome = idem.reserve(tenant, "key-1", "POST /jobs", "fp-a", expires).await.unwrap();
+        let outcome = idem
+            .reserve(tenant, "key-1", "POST /jobs", "fp-a", expires)
+            .await
+            .unwrap();
         assert!(matches!(outcome, IdempotencyOutcome::Fresh));
 
-        idem.complete(tenant, "key-1", "POST /jobs", 201, &json!({"id":"job-1"}), None).await.unwrap();
+        idem.complete(
+            tenant,
+            "key-1",
+            "POST /jobs",
+            201,
+            &json!({"id":"job-1"}),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Same key, same fingerprint: replay the stored response.
-        let replay = idem.reserve(tenant, "key-1", "POST /jobs", "fp-a", expires).await.unwrap();
+        let replay = idem
+            .reserve(tenant, "key-1", "POST /jobs", "fp-a", expires)
+            .await
+            .unwrap();
         match replay {
             IdempotencyOutcome::Replay { status, body } => {
                 assert_eq!(status, 201);
@@ -865,14 +1185,19 @@ async fn idempotency_replays_the_same_request_and_rejects_a_different_one() {
         }
 
         // Same key, different fingerprint: conflict.
-        let conflict = idem.reserve(tenant, "key-1", "POST /jobs", "fp-b", expires).await.unwrap();
+        let conflict = idem
+            .reserve(tenant, "key-1", "POST /jobs", "fp-b", expires)
+            .await
+            .unwrap();
         assert!(matches!(conflict, IdempotencyOutcome::Conflict));
 
         // A different tenant may use the same key independently.
         let other = TenantId::from_uuid(Uuid::new_v4());
         seed_tenant(&pool, other).await;
         assert!(matches!(
-            idem.reserve(other, "key-1", "POST /jobs", "fp-a", expires).await.unwrap(),
+            idem.reserve(other, "key-1", "POST /jobs", "fp-a", expires)
+                .await
+                .unwrap(),
             IdempotencyOutcome::Fresh
         ));
     })
@@ -891,11 +1216,29 @@ async fn audit_events_are_recorded_and_queryable() {
         seed_tenant(&pool, tenant).await;
         let audit = AuditRepository::new(&pool);
 
-        audit.record(NewAuditEvent::new(tenant, "USER", None, "job.create", "job", Some(Uuid::new_v4())))
+        audit
+            .record(NewAuditEvent::new(
+                tenant,
+                "USER",
+                None,
+                "job.create",
+                "job",
+                Some(Uuid::new_v4()),
+            ))
             .await
             .unwrap();
         audit
-            .record(NewAuditEvent::new(tenant, "USER", None, "job.archive", "job", Some(Uuid::new_v4())).denied())
+            .record(
+                NewAuditEvent::new(
+                    tenant,
+                    "USER",
+                    None,
+                    "job.archive",
+                    "job",
+                    Some(Uuid::new_v4()),
+                )
+                .denied(),
+            )
             .await
             .unwrap();
 
@@ -936,7 +1279,14 @@ async fn outbox_claims_each_event_once_and_records_publication() {
         let outbox = OutboxRepository::new(&pool);
 
         for _ in 0..3 {
-            outbox.enqueue(Some(tenant), "execution.completed", "execution", Uuid::new_v4(), json!({"ok":true}))
+            outbox
+                .enqueue(
+                    Some(tenant),
+                    "execution.completed",
+                    "execution",
+                    Uuid::new_v4(),
+                    json!({"ok":true}),
+                )
                 .await
                 .unwrap();
         }
@@ -962,11 +1312,17 @@ async fn outbox_publisher_restart_does_not_lose_events() {
         seed_tenant(&pool, tenant).await;
         let outbox = OutboxRepository::new(&pool);
 
-        let first = outbox.enqueue(Some(tenant), "a", "execution", Uuid::new_v4(), json!({})).await.unwrap();
+        let first = outbox
+            .enqueue(Some(tenant), "a", "execution", Uuid::new_v4(), json!({}))
+            .await
+            .unwrap();
         // Simulate a publisher that claimed but crashed before marking it.
         let claimed = outbox.claim_unpublished(10).await.unwrap();
         assert_eq!(claimed.len(), 1);
-        outbox.mark_failed(claimed[0].id, "publisher crashed").await.unwrap();
+        outbox
+            .mark_failed(claimed[0].id, "publisher crashed")
+            .await
+            .unwrap();
 
         // A new publisher must find the event again.
         let retried = outbox.claim_unpublished(10).await.unwrap();

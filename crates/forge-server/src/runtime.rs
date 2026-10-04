@@ -58,10 +58,7 @@ impl Runtime {
         handles.push(("retention", self.spawn_retention()));
         handles.push(("heartbeat-monitor", self.spawn_heartbeat_monitor()));
 
-        info!(
-            tasks = handles.len(),
-            "background tasks started"
-        );
+        info!(tasks = handles.len(), "background tasks started");
 
         // Any task that ends unexpectedly ends the process: a half-running
         // platform is worse than a restart, because the supervisor cannot tell

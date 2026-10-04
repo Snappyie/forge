@@ -100,7 +100,7 @@ export interface AccessToken {
 }
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   /** Makes the request idempotent when retried (spec 02.15). */
   idempotencyKey?: string;
@@ -182,7 +182,9 @@ export async function request<T = unknown>(
     throw error;
   }
 
-  // Success responses wrap their payload in `data`.
+  // Success responses wrap their payload in `data` (spec 05 §5.1). Unwrapping
+  // it here means callers receive the resource itself; a list endpoint yields
+  // the array of rows directly, not an object with a `data` property.
   const envelope = (parsed ?? {}) as { data?: T };
   return (envelope.data ?? (parsed as T)) as T;
 }
@@ -194,5 +196,88 @@ export const api = {
     request<T>(path, { method: "POST", body, idempotencyKey }),
   patch: <T,>(path: string, body?: unknown) =>
     request<T>(path, { method: "PATCH", body }),
+  put: <T,>(path: string, body?: unknown) =>
+    request<T>(path, { method: "PUT", body }),
   delete: <T,>(path: string) => request<T>(path, { method: "DELETE" }),
 };
+
+/**
+ * A list payload with its cursor metadata.
+ *
+ * The server sends `{ data: [...], page: {...}, request_id }` inside the
+ * envelope, so after unwrapping the caller receives the rows and the page
+ * together rather than having to re-read the envelope.
+ */
+export interface Paged<T> {
+  rows: T[];
+  page: PageInfo;
+}
+
+/** Fetches a list, preserving the page metadata alongside the rows. */
+export async function getList<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<Paged<T>> {
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: buildHeaders(),
+    signal,
+    cache: "no-store",
+  });
+
+  const text = await response.text();
+  const parsed = text ? (JSON.parse(text) as unknown) : null;
+
+  if (!response.ok) {
+    throw toApiError(response.status, parsed);
+  }
+
+  const envelope = (parsed ?? {}) as {
+    data?: T[] | Paged<T>;
+    page?: PageInfo;
+  };
+  const payload = envelope.data;
+
+  if (Array.isArray(payload)) {
+    return { rows: payload, page: envelope.page ?? emptyPage() };
+  }
+  // The API may return the paged shape directly.
+  if (payload && Array.isArray(payload.rows)) {
+    return payload;
+  }
+  return { rows: [], page: envelope.page ?? emptyPage() };
+}
+
+function emptyPage(): PageInfo {
+  return { next_cursor: null, has_more: false };
+}
+
+function buildHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const token = readToken();
+  if (token?.accessToken) {
+    headers.authorization = `Bearer ${token.accessToken}`;
+  }
+  return headers;
+}
+
+function toApiError(status: number, parsed: unknown): ApiError {
+  const envelope = (parsed ?? {}) as {
+    error?: {
+      code?: string;
+      message?: string;
+      details?: { field: string; message: string }[];
+      request_id?: string;
+    };
+  };
+  const error = new ApiError(
+    status,
+    envelope.error?.code ?? "INTERNAL_ERROR",
+    envelope.error?.message ?? `request failed with ${status}`,
+    envelope.error?.details ?? [],
+    envelope.error?.request_id,
+  );
+  if (error.isAuthFailure) {
+    void onUnauthorized();
+  }
+  return error;
+}

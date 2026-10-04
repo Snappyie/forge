@@ -220,7 +220,10 @@ pub enum IdempotencyOutcome {
     Fresh,
     /// The same key was replayed with the same request; `body` is the stored
     /// response.
-    Replay { status: i32, body: serde_json::Value },
+    Replay {
+        status: i32,
+        body: serde_json::Value,
+    },
     /// The same key was reused with a different request (spec 02.15).
     Conflict,
 }
@@ -417,11 +420,13 @@ impl<'a> OutboxRepository<'a> {
     }
 
     pub async fn mark_published(&self, id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE outbox_events SET published_at = NOW(), last_error = NULL WHERE id = $1")
-            .bind(id)
-            .execute(self.pool)
-            .await
-            .map_err(StorageError::from_sqlx)?;
+        sqlx::query(
+            "UPDATE outbox_events SET published_at = NOW(), last_error = NULL WHERE id = $1",
+        )
+        .bind(id)
+        .execute(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?;
         Ok(())
     }
 

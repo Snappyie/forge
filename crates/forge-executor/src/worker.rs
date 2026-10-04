@@ -221,7 +221,9 @@ pub struct CompletionReport {
 /// How a task finished.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TaskOutcome {
-    Succeeded { exit_code: i32 },
+    Succeeded {
+        exit_code: i32,
+    },
     Failed {
         class: forge_domain::ErrorClass,
         message: Option<String>,
@@ -287,11 +289,11 @@ mod tests {
     /// Spec 10.13: capability matching.
     #[test]
     fn capability_matching_requires_every_needed_capability() {
-        let mut worker = Worker::new(TenantId::new(), "h".into(), vec![
-            "linux".into(),
-            "docker".into(),
-            "arm64".into(),
-        ]);
+        let mut worker = Worker::new(
+            TenantId::new(),
+            "h".into(),
+            vec!["linux".into(), "docker".into(), "arm64".into()],
+        );
 
         assert!(worker.satisfies(&[]), "no requirement matches anything");
         assert!(worker.satisfies(&["linux".to_string()]));

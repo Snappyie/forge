@@ -182,9 +182,7 @@ impl<'a> LeaseReaper<'a> {
                 // not increment the counter itself, so without this a worker
                 // that always dies would be retried forever and the recovery
                 // budget would never deplete.
-                executions
-                    .increment_attempt(tenant, current.id)
-                    .await?;
+                executions.increment_attempt(tenant, current.id).await?;
                 // Spec 02.6: recovery re-queues the abandoned work.
                 executions
                     .transition(tenant, current.id, ExecutionStatus::Queued, None, None)
@@ -201,7 +199,13 @@ impl<'a> LeaseReaper<'a> {
                     )
                     .await?;
                 executions
-                    .transition(tenant, current.id, ExecutionStatus::DeadLettered, None, None)
+                    .transition(
+                        tenant,
+                        current.id,
+                        ExecutionStatus::DeadLettered,
+                        None,
+                        None,
+                    )
                     .await?;
                 RecoveryAction::DeadLettered
             }
@@ -321,7 +325,10 @@ impl<'a> HeartbeatMonitor<'a> {
 
     /// Marks workers offline once their heartbeat is older than
     /// `stale_after_secs`.
-    pub async fn reap_stale(&self, stale_after_secs: i64) -> Result<u64, forge_storage::StorageError> {
+    pub async fn reap_stale(
+        &self,
+        stale_after_secs: i64,
+    ) -> Result<u64, forge_storage::StorageError> {
         let workers = WorkerRepository::new(self.pool);
         workers.reap_stale(stale_after_secs).await
     }

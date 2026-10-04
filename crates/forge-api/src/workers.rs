@@ -201,9 +201,23 @@ pub async fn list_queues(
 ) -> Result<Json<ListResponse<serde_json::Value>>, ApiError> {
     auth.require("queues:read")?;
 
+    // Depth, oldest wait, and pause state are what UI.md section 27 asks the
+    // queue screen to show, so they are computed here rather than left for the
+    // console to guess.
     let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT json_build_object('id', id, 'name', name, 'max_concurrency', max_concurrency)
-         FROM queues WHERE tenant_id = $1 ORDER BY name",
+        "SELECT json_build_object(
+             'id', q.id,
+             'name', q.name,
+             'max_concurrency', q.max_concurrency,
+             'paused', q.paused,
+             'depth', (SELECT COUNT(*) FROM executions e
+                        WHERE e.queue_id = q.id AND e.status = 'QUEUED'),
+             'running', (SELECT COUNT(*) FROM executions e
+                         WHERE e.queue_id = q.id AND e.status IN ('DISPATCHED','RUNNING')),
+             'oldest_queued_at', (SELECT MIN(e.created_at) FROM executions e
+                                   WHERE e.queue_id = q.id AND e.status = 'QUEUED')
+         )
+         FROM queues q WHERE q.tenant_id = $1 ORDER BY q.name",
     )
     .bind(auth.tenant_id.into_uuid())
     .fetch_all(&state.pool)
@@ -234,8 +248,9 @@ pub async fn create_queue(
     auth.require("queues:write")?;
 
     if body.name.trim().is_empty() {
-        return Err(ApiError::validation("name must not be empty")
-            .with_detail("name", "must not be empty"));
+        return Err(
+            ApiError::validation("name must not be empty").with_detail("name", "must not be empty")
+        );
     }
     if let Some(limit) = body.max_concurrency {
         if limit <= 0 {
@@ -338,15 +353,13 @@ pub async fn pause_queue(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     auth.require("queues:write")?;
 
-    let affected = sqlx::query(
-        "UPDATE queues SET paused = TRUE WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(queue_id)
-    .bind(auth.tenant_id.into_uuid())
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::from)?
-    .rows_affected();
+    let affected = sqlx::query("UPDATE queues SET paused = TRUE WHERE id = $1 AND tenant_id = $2")
+        .bind(queue_id)
+        .bind(auth.tenant_id.into_uuid())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?
+        .rows_affected();
 
     if affected == 0 {
         return Err(ApiError::not_found("queue"));
@@ -366,15 +379,13 @@ pub async fn resume_queue(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     auth.require("queues:write")?;
 
-    let affected = sqlx::query(
-        "UPDATE queues SET paused = FALSE WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(queue_id)
-    .bind(auth.tenant_id.into_uuid())
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::from)?
-    .rows_affected();
+    let affected = sqlx::query("UPDATE queues SET paused = FALSE WHERE id = $1 AND tenant_id = $2")
+        .bind(queue_id)
+        .bind(auth.tenant_id.into_uuid())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?
+        .rows_affected();
 
     if affected == 0 {
         return Err(ApiError::not_found("queue"));

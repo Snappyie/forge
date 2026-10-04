@@ -5,6 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Settings2, Webhook, Key, Database, RefreshCw, Download, GitBranch } from "lucide-react";
 
+import { MaintenanceControl } from "@/components/ui/maintenance-control";
+import { NotificationPreferences } from "@/components/ui/notification-preferences";
+
 export default function SettingsPage() {
   return (
     <main className="p-8 relative min-h-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-50/50 via-background to-background dark:from-slate-900/10 dark:via-background dark:to-background">
@@ -20,6 +23,15 @@ export default function SettingsPage() {
           <p className="text-muted-foreground">Manage global configurations, integrations, and security.</p>
         </div>
       </header>
+
+      {/*
+        The controls that change stored state live above the reference cards
+        below: maintenance mode (UI.md 71) and notification preferences (51).
+      */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        <MaintenanceControl />
+        <NotificationPreferences />
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>

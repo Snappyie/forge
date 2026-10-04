@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { GitBranch, GitCommit, Github, RefreshCw } from "lucide-react";
+import { GitBranch, GitCommit, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function GitIntegrationPanel() {
@@ -10,7 +10,7 @@ export function GitIntegrationPanel() {
         <div className="flex justify-between items-start">
           <div>
             <CardTitle className="text-base flex items-center gap-2">
-              <Github className="w-4 h-4" /> Git & IaC Integration
+              <GitBranch className="w-4 h-4" /> Git & IaC Integration
             </CardTitle>
             <CardDescription className="mt-1">
               This job is managed via Configuration-as-Code.
@@ -24,7 +24,7 @@ export function GitIntegrationPanel() {
           <div>
             <p className="text-xs text-muted-foreground mb-1">Repository</p>
             <p className="text-sm font-medium flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
-              <Github className="w-3 h-3" /> acme-corp/forge-configs
+              <GitBranch className="w-3 h-3" /> acme-corp/forge-configs
             </p>
           </div>
           <div>

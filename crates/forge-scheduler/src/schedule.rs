@@ -237,8 +237,8 @@ impl OccurrencePlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Datelike, Timelike};
     use crate::clock::FixedClock;
+    use chrono::{Datelike, Timelike};
 
     fn daily_two_am() -> CronSchedule {
         CronSchedule::parse("0 2 * * *", "UTC").unwrap()
@@ -264,7 +264,7 @@ mod tests {
         );
     }
 
-/// Weekdays are numbered from Sunday (`0` = Sunday, `1` = Monday), matching the
+    /// Weekdays are numbered from Sunday (`0` = Sunday, `1` = Monday), matching the
     /// `cron` crate. This differs from the Unix convention, so it is pinned here
     /// (spec 09.4 requires the parser behaviour to be documented).
     #[test]
@@ -382,7 +382,7 @@ mod tests {
     fn malformed_expression_is_rejected() {
         assert!(CronSchedule::parse("not a cron", "UTC").is_err());
         assert!(CronSchedule::parse("", "UTC").is_err());
-        }
+    }
 
     #[test]
     fn impossible_expression_yields_no_occurrence() {
@@ -425,17 +425,16 @@ mod tests {
     #[test]
     fn nonexistent_local_time_is_classified() {
         let s = CronSchedule::parse("0 2 * * *", "America/New_York").unwrap();
-        let naive = NaiveDateTime::parse_from_str("2026-03-08T02:30:00", "%Y-%m-%dT%H:%M:%S").unwrap();
-        assert_eq!(
-            s.classify_local(naive),
-            LocalTimeKind::Nonexistent
-        );
+        let naive =
+            NaiveDateTime::parse_from_str("2026-03-08T02:30:00", "%Y-%m-%dT%H:%M:%S").unwrap();
+        assert_eq!(s.classify_local(naive), LocalTimeKind::Nonexistent);
     }
 
     #[test]
     fn nonexistent_local_time_resolves_forward_by_one_hour() {
         let s = CronSchedule::parse("0 2 * * *", "America/New_York").unwrap();
-        let naive = NaiveDateTime::parse_from_str("2026-03-08T02:30:00", "%Y-%m-%dT%H:%M:%S").unwrap();
+        let naive =
+            NaiveDateTime::parse_from_str("2026-03-08T02:30:00", "%Y-%m-%dT%H:%M:%S").unwrap();
         let resolved = s.resolve_local(naive).unwrap();
         // 02:30 does not exist, so the clock reads 03:30 local; that instant is
         // 07:30 UTC (EDT, UTC-4).
@@ -447,13 +446,13 @@ mod tests {
     #[test]
     fn ambiguous_local_time_is_classified() {
         let s = CronSchedule::parse("30 1 * * *", "America/New_York").unwrap();
-        let naive = NaiveDateTime::parse_from_str("2026-11-01T01:30:00", "%Y-%m-%dT%H:%M:%S").unwrap();
+        let naive =
+            NaiveDateTime::parse_from_str("2026-11-01T01:30:00", "%Y-%m-%dT%H:%M:%S").unwrap();
         let kind = s.classify_local(naive);
         assert!(
             matches!(
                 kind,
-                LocalTimeKind::AmbiguousFirst
-                    | LocalTimeKind::AmbiguousSecond
+                LocalTimeKind::AmbiguousFirst | LocalTimeKind::AmbiguousSecond
             ),
             "an ambiguous time must be reported as such, got {kind:?}"
         );
@@ -551,7 +550,10 @@ mod tests {
         let occurrences = s.occurrences_between(from, to, 20);
 
         // Four distinct local days, one occurrence each.
-        assert!(occurrences.len() >= 3 && occurrences.len() <= 5, "{occurrences:?}");
+        assert!(
+            occurrences.len() >= 3 && occurrences.len() <= 5,
+            "{occurrences:?}"
+        );
         let mut sorted = occurrences.clone();
         sorted.dedup();
         assert_eq!(sorted.len(), occurrences.len(), "no duplicate instants");
@@ -560,7 +562,8 @@ mod tests {
     #[test]
     fn unique_local_time_is_classified_as_unique() {
         let s = CronSchedule::parse("0 12 * * *", "America/New_York").unwrap();
-        let naive = NaiveDateTime::parse_from_str("2026-06-15T12:00:00", "%Y-%m-%dT%H:%M:%S").unwrap();
+        let naive =
+            NaiveDateTime::parse_from_str("2026-06-15T12:00:00", "%Y-%m-%dT%H:%M:%S").unwrap();
         assert_eq!(s.classify_local(naive), LocalTimeKind::Unique);
     }
 
@@ -572,9 +575,6 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(planner.intended_occurrence(due), due);
-        assert_eq!(
-            planner.now().to_rfc3339(),
-            "2026-10-03T12:00:00+00:00"
-        );
+        assert_eq!(planner.now().to_rfc3339(), "2026-10-03T12:00:00+00:00");
     }
 }

@@ -1,94 +1,183 @@
 "use client";
 
+/**
+ * Execution comparison (UI.md section 18).
+ *
+ * Side-by-side diff of two real executions: status, timing, attempts, and any
+ * failure. When a field differs it is marked, so an operator can see at a glance
+ * which run went wrong.
+ */
+
+import { useMemo, useState } from "react";
+import { ArrowRight } from "lucide-react";
+
+import { useQuery } from "@/lib/useQuery";
+import { formatDuration, formatTimestamp, type Execution } from "@/lib/types";
+import { AsyncBoundary, EmptyState } from "@/components/states";
+import { StatusBadge } from "@/components/status-badge";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { GitCompare, Clock, CheckCircle, XCircle } from "lucide-react";
-import { ResourceShell } from "@/components/ui/resource-shell";
+import { Label } from "@/components/ui/label";
+import { cn } from "cn";
+
+interface Field {
+  label: string;
+  left: string;
+  right: string;
+}
 
 export default function CompareExecutionsPage() {
+  const [leftId, setLeftId] = useState("");
+  const [rightId, setRightId] = useState("");
+
+  const left = useQuery<Execution>(leftId ? `/executions/${leftId}` : null);
+  const right = useQuery<Execution>(rightId ? `/executions/${rightId}` : null);
+
+  const ready = left.state === "ready" && right.state === "ready";
+  const loading = (leftId && left.state === "loading") || (rightId && right.state === "loading");
+  const error = left.error ?? right.error;
+
+  const fields = useMemo<Field[]>(() => {
+    const a = left.data;
+    const b = right.data;
+    if (!a || !b) return [];
+    return [
+      { label: "Status", left: a.status, right: b.status },
+      { label: "Job", left: a.job_id, right: b.job_id },
+      { label: "Trigger", left: a.trigger_source, right: b.trigger_source },
+      { label: "Attempts", left: String(a.attempt_count), right: String(b.attempt_count) },
+      { label: "Priority", left: a.priority, right: b.priority },
+      { label: "Queue", left: a.queue_id ?? "—", right: b.queue_id ?? "—" },
+      { label: "Worker", left: a.worker_id ?? "—", right: b.worker_id ?? "—" },
+      { label: "Created", left: formatTimestamp(a.created_at), right: formatTimestamp(b.created_at) },
+      { label: "Started", left: formatTimestamp(a.started_at), right: formatTimestamp(b.started_at) },
+      { label: "Ended", left: formatTimestamp(a.ended_at), right: formatTimestamp(b.ended_at) },
+      { label: "Duration", left: span(a), right: span(b) },
+      { label: "Error class", left: a.error_class ?? "—", right: b.error_class ?? "—" },
+      { label: "Error", left: a.error_message ?? "—", right: b.error_message ?? "—" },
+    ];
+  }, [left.data, right.data]);
+
+  const differences = fields.filter((f) => f.left !== f.right).length;
+
   return (
-    <ResourceShell
-      title="Compare Executions"
-      subtitle="Comparing ex_19281 against ex_19302"
-      backUrl="/jobs"
-    >
-      <div className="grid grid-cols-2 gap-6">
-        {/* Left Side: Execution A */}
-        <Card className="border-border/50">
-          <CardHeader className="bg-muted/30 border-b border-border/50">
-            <div className="flex justify-between items-center">
-              <CardTitle className="text-lg">Execution #19281</CardTitle>
-              <Badge className="bg-green-100 text-green-700 hover:bg-green-100 shadow-none border-none">
-                <CheckCircle className="w-3 h-3 mr-1" /> SUCCESS
-              </Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">Oct 2, 2026 - 02:00:00</p>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="flex justify-between p-4 border-b border-border/50">
-              <span className="text-sm text-muted-foreground">Duration</span>
-              <span className="text-sm font-mono font-medium">8m 34s</span>
-            </div>
-            <div className="flex justify-between p-4 border-b border-border/50">
-              <span className="text-sm text-muted-foreground">Worker Node</span>
-              <span className="text-sm font-mono text-indigo-600 dark:text-indigo-400">worker-17 (ip-10-0-1-44)</span>
-            </div>
-            <div className="flex justify-between p-4 border-b border-border/50">
-              <span className="text-sm text-muted-foreground">Max Memory</span>
-              <span className="text-sm font-mono">1.2 GB</span>
-            </div>
-            <div className="flex justify-between p-4 border-b border-border/50">
-              <span className="text-sm text-muted-foreground">Parameters</span>
-              <pre className="text-xs bg-muted p-2 rounded text-muted-foreground">
-                {"{\n  \"batch_size\": 1000,\n  \"dry_run\": false\n}"}
-              </pre>
-            </div>
-          </CardContent>
-        </Card>
+    <div className="flex flex-col gap-4 p-6">
+      <header>
+        <h1 className="text-lg font-semibold">Compare executions</h1>
+        <p className="text-xs text-muted-foreground">
+          Paste two execution IDs. Fields that differ are highlighted.
+        </p>
+      </header>
 
-        {/* Right Side: Execution B */}
-        <Card className="border-red-200 dark:border-red-900/50 relative">
-          {/* Highlight Diff Indicator */}
-          <div className="absolute -left-3 top-24 bottom-24 flex flex-col items-center justify-center gap-16 z-10 w-6">
-            <div className="w-6 h-6 rounded-full bg-red-100 dark:bg-red-900/50 flex items-center justify-center text-red-600 dark:text-red-400 shadow-sm border border-red-200">
-              <GitCompare className="w-3 h-3" />
-            </div>
-            <div className="w-6 h-6 rounded-full bg-red-100 dark:bg-red-900/50 flex items-center justify-center text-red-600 dark:text-red-400 shadow-sm border border-red-200">
-              <GitCompare className="w-3 h-3" />
-            </div>
-          </div>
-
-          <CardHeader className="bg-red-50/50 dark:bg-red-900/10 border-b border-red-100 dark:border-red-900/50">
-            <div className="flex justify-between items-center">
-              <CardTitle className="text-lg">Execution #19302</CardTitle>
-              <Badge variant="destructive" className="shadow-none border-none">
-                <XCircle className="w-3 h-3 mr-1" /> FAILED
-              </Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">Oct 3, 2026 - 02:00:00</p>
-          </CardHeader>
-          <CardContent className="p-0">
-            <div className="flex justify-between p-4 border-b border-border/50 bg-red-50/30 dark:bg-red-900/10">
-              <span className="text-sm text-muted-foreground">Duration</span>
-              <span className="text-sm font-mono font-medium text-red-600">21m 42s <span className="text-xs ml-1">(+13m 8s)</span></span>
-            </div>
-            <div className="flex justify-between p-4 border-b border-border/50">
-              <span className="text-sm text-muted-foreground">Worker Node</span>
-              <span className="text-sm font-mono text-indigo-600 dark:text-indigo-400">worker-17 (ip-10-0-1-44)</span>
-            </div>
-            <div className="flex justify-between p-4 border-b border-border/50 bg-red-50/30 dark:bg-red-900/10">
-              <span className="text-sm text-muted-foreground">Max Memory</span>
-              <span className="text-sm font-mono text-red-600">4.8 GB <span className="text-xs ml-1">(+3.6 GB)</span></span>
-            </div>
-            <div className="flex justify-between p-4 border-b border-border/50">
-              <span className="text-sm text-muted-foreground">Parameters</span>
-              <pre className="text-xs bg-muted p-2 rounded text-muted-foreground">
-                {"{\n  \"batch_size\": 1000,\n  \"dry_run\": false\n}"}
-              </pre>
-            </div>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto_1fr] md:items-end">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="left-id">First execution</Label>
+          <Input
+            id="left-id"
+            value={leftId}
+            onChange={(e) => setLeftId(e.target.value.trim())}
+            placeholder="execution id"
+            className="font-mono text-xs"
+          />
+        </div>
+        <ArrowRight className="hidden size-4 text-muted-foreground md:block" aria-hidden />
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="right-id">Second execution</Label>
+          <Input
+            id="right-id"
+            value={rightId}
+            onChange={(e) => setRightId(e.target.value.trim())}
+            placeholder="execution id"
+            className="font-mono text-xs"
+          />
+        </div>
       </div>
-    </ResourceShell>
+
+      {!leftId || !rightId ? (
+        <EmptyState
+          title="Enter two execution IDs"
+          description="Both must belong to a tenant you can read."
+        />
+      ) : (
+        <AsyncBoundary
+          state={loading ? "loading" : error ? "error" : "ready"}
+          error={error}
+          forbidden={left.forbidden || right.forbidden}
+          empty={false}
+          onRetry={() => {
+            left.reload();
+            right.reload();
+          }}
+          loadingLabel="Loading executions"
+        >
+          {ready ? (
+            <Card>
+              <CardHeader className="flex-row items-center justify-between">
+                <CardTitle className="text-sm">
+                  {differences === 0
+                    ? "No differences"
+                    : `${differences} field${differences === 1 ? "" : "s"} differ`}
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <StatusBadge status={left.data!.status} />
+                  <StatusBadge status={right.data!.status} />
+                </div>
+              </CardHeader>
+              <CardContent>
+                <table className="w-full text-xs">
+                  <caption className="sr-only">
+                    Field-by-field comparison of two executions
+                  </caption>
+                  <thead>
+                    <tr className="text-left text-muted-foreground">
+                      <th scope="col" className="py-1 pr-3 font-medium">Field</th>
+                      <th scope="col" className="py-1 pr-3 font-mono">{leftId.slice(0, 8)}</th>
+                      <th scope="col" className="py-1 font-mono">{rightId.slice(0, 8)}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fields.map((field) => {
+                      const differs = field.left !== field.right;
+                      return (
+                        <tr
+                          key={field.label}
+                          className={cn(
+                            "border-t border-border/60",
+                            differs && "bg-amber-500/5",
+                          )}
+                        >
+                          <th
+                            scope="row"
+                            className="py-1.5 pr-3 text-left font-normal text-muted-foreground"
+                          >
+                            {field.label}
+                            {differs ? (
+                              <span className="sr-only"> (differs)</span>
+                            ) : null}
+                          </th>
+                          <td className={cn("py-1.5 pr-3 font-mono", differs && "font-medium")}>
+                            {field.left}
+                          </td>
+                          <td className={cn("py-1.5 font-mono", differs && "font-medium")}>
+                            {field.right}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          ) : null}
+        </AsyncBoundary>
+      )}
+    </div>
   );
+}
+
+/** Wall-clock span of an execution, or "—". */
+function span(execution: Execution): string {
+  if (!execution.started_at) return "—";
+  const end = execution.ended_at ? Date.parse(execution.ended_at) : Date.now();
+  return formatDuration(Math.max(0, end - Date.parse(execution.started_at)));
 }

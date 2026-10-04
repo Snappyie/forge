@@ -107,7 +107,11 @@ pub struct Page<T> {
 impl<T> Page<T> {
     /// Builds a page from one extra row fetched beyond `limit`, which is how
     /// `has_more` is determined without a second COUNT query.
-    pub fn from_overfetch(mut rows: Vec<T>, limit: usize, to_cursor: impl Fn(&T) -> Cursor) -> Self {
+    pub fn from_overfetch(
+        mut rows: Vec<T>,
+        limit: usize,
+        to_cursor: impl Fn(&T) -> Cursor,
+    ) -> Self {
         let has_more = rows.len() > limit;
         if has_more {
             rows.truncate(limit);
@@ -162,9 +166,8 @@ mod tests {
         let rows: Vec<(String, uuid::Uuid)> = (0..5)
             .map(|i| (format!("row{i}"), uuid::Uuid::new_v4()))
             .collect();
-        let page = Page::from_overfetch(rows.clone(), 3, |(name, id)| {
-            Cursor::new(name.clone(), *id)
-        });
+        let page =
+            Page::from_overfetch(rows.clone(), 3, |(name, id)| Cursor::new(name.clone(), *id));
 
         assert_eq!(page.items.len(), 3, "limit is enforced");
         assert!(page.has_more);
@@ -217,9 +220,7 @@ mod tests {
             fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
                 self
             }
-            fn as_error_mut(
-                &mut self,
-            ) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
                 self
             }
             fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
@@ -235,7 +236,10 @@ mod tests {
 
         // A foreign-key violation maps to a conflict too.
         let fk = sqlx::Error::Database(Box::new(FakeDbError("23503")));
-        assert!(matches!(StorageError::from_sqlx(fk), StorageError::Conflict(_)));
+        assert!(matches!(
+            StorageError::from_sqlx(fk),
+            StorageError::Conflict(_)
+        ));
 
         // An unrelated code stays a database error.
         let other = sqlx::Error::Database(Box::new(FakeDbError("42P01")));

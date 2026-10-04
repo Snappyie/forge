@@ -67,8 +67,8 @@ impl ApiClient {
             .await
             .map_err(|e| CliError::Network(format!("could not read the response: {e}")))?;
 
-        let parsed: Value = serde_json::from_str(&raw)
-            .unwrap_or_else(|_| Value::String(raw.clone()));
+        let parsed: Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| Value::String(raw.clone()));
 
         if !status.is_success() {
             return Err(from_status(status.as_u16(), &parsed));
@@ -107,7 +107,8 @@ impl ApiClient {
     }
 
     pub async fn delete(&self, path: &str) -> Result<Value> {
-        self.request(reqwest::Method::DELETE, path, None, None).await
+        self.request(reqwest::Method::DELETE, path, None, None)
+            .await
     }
 }
 

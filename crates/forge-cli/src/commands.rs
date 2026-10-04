@@ -15,7 +15,11 @@ use crate::{
 // 16.2 Authentication
 // ---------------------------------------------------------------------------
 
-pub async fn auth(config: &Config, action: &AuthCommands, format: OutputFormat) -> Result<Option<String>> {
+pub async fn auth(
+    config: &Config,
+    action: &AuthCommands,
+    format: OutputFormat,
+) -> Result<Option<String>> {
     match action {
         AuthCommands::Login {
             email,
@@ -89,7 +93,9 @@ pub async fn auth(config: &Config, action: &AuthCommands, format: OutputFormat) 
             let context = active_context(config)?;
             if context.is_authenticated() {
                 // Best effort: the local credential is discarded either way.
-                let _ = ApiClient::new(&context)?.post("/auth/logout", json!({})).await;
+                let _ = ApiClient::new(&context)?
+                    .post("/auth/logout", json!({}))
+                    .await;
             }
 
             let mut updated = config.clone();
@@ -145,7 +151,11 @@ pub async fn auth(config: &Config, action: &AuthCommands, format: OutputFormat) 
 // 16.3 Jobs
 // ---------------------------------------------------------------------------
 
-pub async fn jobs(config: &Config, action: &JobCommands, format: OutputFormat) -> Result<Option<String>> {
+pub async fn jobs(
+    config: &Config,
+    action: &JobCommands,
+    format: OutputFormat,
+) -> Result<Option<String>> {
     let client = crate::authenticated_client(config)?;
 
     let view = match action {
@@ -256,7 +266,12 @@ pub async fn jobs(config: &Config, action: &JobCommands, format: OutputFormat) -
             let data = client.get(&format!("/jobs/{id}/versions")).await?;
             Renderable::List(list_from(
                 &["VERSION", "TYPE", "PUBLISHED", "CREATED"],
-                &["version_number", "execution_type", "published_at", "created_at"],
+                &[
+                    "version_number",
+                    "execution_type",
+                    "published_at",
+                    "created_at",
+                ],
                 data,
             ))
         }
@@ -266,15 +281,13 @@ pub async fn jobs(config: &Config, action: &JobCommands, format: OutputFormat) -
             // version id the endpoint expects.
             let versions = client.get(&format!("/jobs/{id}/versions")).await?;
             let list = versions.as_array().cloned().unwrap_or_default();
-            let wanted: i64 = version.parse().map_err(|_| {
-                CliError::Usage(format!("`{version}` is not a version number"))
-            })?;
+            let wanted: i64 = version
+                .parse()
+                .map_err(|_| CliError::Usage(format!("`{version}` is not a version number")))?;
             let target = list
                 .iter()
                 .find(|v| v["version_number"].as_i64() == Some(wanted))
-                .ok_or_else(|| {
-                    CliError::NotFound(format!("version {wanted} of job {id}"))
-                })?;
+                .ok_or_else(|| CliError::NotFound(format!("version {wanted} of job {id}")))?;
 
             let version_id = target["id"].as_str().unwrap_or_default();
             let data = client
@@ -298,7 +311,11 @@ pub async fn jobs(config: &Config, action: &JobCommands, format: OutputFormat) -
                 }
             });
             let data = match idempotency_key {
-                Some(key) => client.post_idempotent(&format!("/jobs/{id}/trigger"), body, key).await?,
+                Some(key) => {
+                    client
+                        .post_idempotent(&format!("/jobs/{id}/trigger"), body, key)
+                        .await?
+                }
                 None => client.post(&format!("/jobs/{id}/trigger"), body).await?,
             };
             Renderable::Detail(detail("execution created", data))
@@ -320,11 +337,7 @@ pub async fn jobs(config: &Config, action: &JobCommands, format: OutputFormat) -
 }
 
 /// Pauses or resumes every schedule belonging to a job.
-async fn pause_schedule(
-    client: &ApiClient,
-    job_id: &str,
-    action: &str,
-) -> Result<DetailView> {
+async fn pause_schedule(client: &ApiClient, job_id: &str, action: &str) -> Result<DetailView> {
     let schedules = client
         .get("/schedules?limit=200")
         .await
@@ -397,9 +410,8 @@ pub async fn workflows(
             Renderable::Detail(detail("workflow created", data))
         }
         WorkflowCommands::Validate { file } => {
-            let contents = std::fs::read_to_string(file).map_err(|e| {
-                CliError::Usage(format!("could not read {}: {e}", file.display()))
-            })?;
+            let contents = std::fs::read_to_string(file)
+                .map_err(|e| CliError::Usage(format!("could not read {}: {e}", file.display())))?;
             let document = serde_json::from_str::<Value>(&contents).map_err(|e| {
                 CliError::Usage(format!("{} is not valid JSON: {e}", file.display()))
             })?;
@@ -437,7 +449,11 @@ pub async fn workflows(
                         .post_idempotent(&format!("/workflows/{id}/trigger"), body, key)
                         .await?
                 }
-                None => client.post(&format!("/workflows/{id}/trigger"), body).await?,
+                None => {
+                    client
+                        .post(&format!("/workflows/{id}/trigger"), body)
+                        .await?
+                }
             };
             Renderable::Detail(detail("workflow execution created", data))
         }
@@ -481,7 +497,14 @@ pub async fn executions(
             let data = client.get(&path).await?;
             Renderable::List(list_from(
                 &["ID", "JOB", "STATUS", "WORKER", "ATTEMPTS", "CREATED"],
-                &["id", "job_id", "status", "worker_id", "attempt_count", "created_at"],
+                &[
+                    "id",
+                    "job_id",
+                    "status",
+                    "worker_id",
+                    "attempt_count",
+                    "created_at",
+                ],
                 data,
             ))
         }
@@ -504,7 +527,9 @@ pub async fn executions(
             Renderable::Custom(Box::new(LogsView { lines, table }))
         }
         ExecutionCommands::Cancel { id } => {
-            let data = client.post(&format!("/executions/{id}/cancel"), json!({})).await?;
+            let data = client
+                .post(&format!("/executions/{id}/cancel"), json!({}))
+                .await?;
             Renderable::Detail(detail("cancellation requested", data))
         }
         ExecutionCommands::Retry {
@@ -519,7 +544,9 @@ pub async fn executions(
             if let Some(reason) = reason {
                 body["reason"] = json!(reason);
             }
-            let data = client.post(&format!("/executions/{id}/retry"), body).await?;
+            let data = client
+                .post(&format!("/executions/{id}/retry"), body)
+                .await?;
             Renderable::Detail(detail("retry scheduled", data))
         }
         ExecutionCommands::DeadLetter { id } => {
@@ -548,8 +575,6 @@ impl Render for LogsView {
         json!({ "lines": self.lines, "count": self.lines.len() })
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // 16.6 Workers
@@ -591,11 +616,15 @@ pub async fn workers(
             Renderable::Detail(detail("worker", data))
         }
         WorkerCommands::Drain { id } => {
-            let data = client.post(&format!("/workers/{id}/drain"), json!({})).await?;
+            let data = client
+                .post(&format!("/workers/{id}/drain"), json!({}))
+                .await?;
             Renderable::Detail(detail("worker draining", data))
         }
         WorkerCommands::Revoke { id } => {
-            let data = client.post(&format!("/workers/{id}/revoke"), json!({})).await?;
+            let data = client
+                .post(&format!("/workers/{id}/revoke"), json!({}))
+                .await?;
             Renderable::Detail(detail("worker revoked", data))
         }
     };
@@ -639,11 +668,15 @@ pub async fn queues(
             Renderable::Detail(detail("queue created", data))
         }
         QueueCommands::Pause { id } => {
-            let data = client.post(&format!("/queues/{id}/pause"), json!({})).await?;
+            let data = client
+                .post(&format!("/queues/{id}/pause"), json!({}))
+                .await?;
             Renderable::Detail(detail("queue paused", data))
         }
         QueueCommands::Resume { id } => {
-            let data = client.post(&format!("/queues/{id}/resume"), json!({})).await?;
+            let data = client
+                .post(&format!("/queues/{id}/resume"), json!({}))
+                .await?;
             Renderable::Detail(detail("queue resumed", data))
         }
     };

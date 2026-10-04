@@ -100,10 +100,7 @@ mod tests {
     fn fixed_clock_advances_only_when_told() {
         let clock = FixedClock::at("2026-10-03T12:00:00Z");
         clock.advance(chrono::Duration::minutes(90));
-        assert_eq!(
-            clock.now().to_rfc3339(),
-            "2026-10-03T13:30:00+00:00"
-        );
+        assert_eq!(clock.now().to_rfc3339(), "2026-10-03T13:30:00+00:00");
     }
 
     #[test]

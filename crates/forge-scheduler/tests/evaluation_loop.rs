@@ -54,14 +54,22 @@ impl TestDb {
         let (server, _) = base.rsplit_once('/').unwrap_or((base.as_str(), ""));
         let admin_url = format!("{}/postgres", server.trim_end_matches('/'));
 
-        let admin = match PgPoolOptions::new().max_connections(1).connect(&admin_url).await {
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping scheduler integration tests: cannot connect ({e})");
                 return None;
             }
         };
-        if admin.execute(format!(r#"CREATE DATABASE "{db_name}""#).as_str()).await.is_err() {
+        if admin
+            .execute(format!(r#"CREATE DATABASE "{db_name}""#).as_str())
+            .await
+            .is_err()
+        {
             eprintln!("skipping scheduler integration tests: cannot create database");
             return None;
         }
@@ -86,7 +94,11 @@ impl TestDb {
             return None;
         }
 
-        Some(TestDb { pool, admin_url, db_name })
+        Some(TestDb {
+            pool,
+            admin_url,
+            db_name,
+        })
     }
 }
 
@@ -123,18 +135,32 @@ async fn scaffold_job(db: &PgPool, tenant: forge_domain::TenantId) -> uuid::Uuid
 
     let jobs = JobRepository::new(db);
     let job = jobs
-        .create(tenant, Some(format!("j{}", Uuid::new_v4().simple())), "Scheduled Job", None,
-                forge_domain::Priority::Normal, None)
+        .create(
+            tenant,
+            Some(format!("j{}", Uuid::new_v4().simple())),
+            "Scheduled Job",
+            None,
+            forge_domain::Priority::Normal,
+            None,
+        )
         .await
         .unwrap();
 
     let versions = JobVersionRepository::new(db);
     let v = versions
-        .create(tenant, forge_domain::JobId::from_uuid(job.id), &NewJobVersion::default())
+        .create(
+            tenant,
+            forge_domain::JobId::from_uuid(job.id),
+            &NewJobVersion::default(),
+        )
         .await
         .unwrap();
     versions
-        .publish(tenant, forge_domain::JobId::from_uuid(job.id), forge_domain::JobVersionId::from_uuid(v.id))
+        .publish(
+            tenant,
+            forge_domain::JobId::from_uuid(job.id),
+            forge_domain::JobVersionId::from_uuid(v.id),
+        )
         .await
         .unwrap();
 
@@ -218,7 +244,13 @@ async fn a_due_schedule_produces_one_execution() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -248,7 +280,13 @@ async fn a_second_tick_creates_nothing_new() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -265,7 +303,11 @@ async fn a_second_tick_creates_nothing_new() {
             .list(tenant, &ExecutionFilter::default(), None, 50)
             .await
             .unwrap();
-        assert_eq!(all.items.len(), 1, "the occurrence must not be created twice");
+        assert_eq!(
+            all.items.len(),
+            1,
+            "the occurrence must not be created twice"
+        );
     })
     .await;
 }
@@ -278,9 +320,18 @@ async fn a_disabled_schedule_is_never_claimed() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        let id = insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::hours(1)).misfire("CATCH_UP")).await;
+        let id = insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::hours(1)).misfire("CATCH_UP"),
+        )
+        .await;
 
-        ScheduleRepository::new(&pool).pause(tenant, id).await.unwrap();
+        ScheduleRepository::new(&pool)
+            .pause(tenant, id)
+            .await
+            .unwrap();
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -308,7 +359,13 @@ async fn a_resumed_schedule_fires_again() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        let id = insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        let id = insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let schedules = ScheduleRepository::new(&pool);
         schedules.pause(tenant, id).await.unwrap();
@@ -332,7 +389,13 @@ async fn concurrent_schedulers_create_one_execution_per_occurrence() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         // Four schedulers tick at the same instant.
         let shared = FixedClock::at(&now.to_rfc3339()).shared();
@@ -365,7 +428,11 @@ async fn concurrent_schedulers_create_one_execution_per_occurrence() {
             .list(tenant, &ExecutionFilter::default(), None, 50)
             .await
             .unwrap();
-        assert_eq!(all.items.len(), 1, "exactly one execution for the occurrence");
+        assert_eq!(
+            all.items.len(),
+            1,
+            "exactly one execution for the occurrence"
+        );
     })
     .await;
 }
@@ -384,7 +451,13 @@ async fn the_database_rejects_a_duplicate_occurrence() {
             .unwrap();
 
         let now = Utc::now();
-        let schedule_id = insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        let schedule_id = insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let executions = ExecutionRepository::new(&pool);
         let base = NewExecution {
@@ -419,17 +492,29 @@ async fn catch_up_creates_at_most_the_configured_number() {
 
         let now = Utc::now();
         // Hourly, due six hours ago, ceiling of 3.
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::hours(6)).misfire("CATCH_UP").catch_up(3)).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::hours(6))
+                .misfire("CATCH_UP")
+                .catch_up(3),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
         let report = engine.tick().await;
 
-        assert_eq!(report.executions_created, 3, "capped at the configured ceiling");
+        assert_eq!(
+            report.executions_created, 3,
+            "capped at the configured ceiling"
+        );
         assert!(
-            report.skipped.iter().any(|(_, _, r)| {
-                *r == forge_scheduler::SkipReason::CatchUpLimit
-            }),
+            report
+                .skipped
+                .iter()
+                .any(|(_, _, r)| { *r == forge_scheduler::SkipReason::CatchUpLimit }),
             "occurrences beyond the ceiling must be reported, not silently dropped"
         );
 
@@ -455,7 +540,13 @@ async fn fire_once_collapses_a_long_outage() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::days(3)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::days(3)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -485,7 +576,13 @@ async fn a_job_with_no_published_version_is_skipped() {
             .unwrap();
 
         let now = Utc::now();
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -507,7 +604,13 @@ async fn an_invalid_cron_disables_rather_than_blocking() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        let id = insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("not a cron", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        let id = insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("not a cron", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -536,7 +639,14 @@ async fn a_timezone_schedule_fires_at_its_local_time() {
 
         let now = Utc::now();
         // 02:00 Asia/Kolkata, due a minute ago.
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::tz("0 2 * * *", "Asia/Kolkata", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::tz("0 2 * * *", "Asia/Kolkata", now - Duration::minutes(1))
+                .misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -560,7 +670,13 @@ async fn scheduling_does_not_claim_dispatchable_work() {
         let job_id = scaffold_job(&pool, tenant).await;
 
         let now = Utc::now();
-        insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+        insert_schedule(
+            &pool,
+            tenant,
+            job_id,
+            ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+        )
+        .await;
 
         let clock = FixedClock::at(&now.to_rfc3339());
         let engine = SchedulerEngine::new(pool.clone(), 100).with_clock(Arc::new(clock));
@@ -592,7 +708,13 @@ async fn the_batch_size_bounds_a_tick() {
 
         let now = Utc::now();
         for _ in 0..5 {
-            insert_schedule(&pool, tenant, job_id, ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE")).await;
+            insert_schedule(
+                &pool,
+                tenant,
+                job_id,
+                ScheduleSpec::cron("0 * * * *", now - Duration::minutes(1)).misfire("FIRE_ONCE"),
+            )
+            .await;
         }
 
         let clock = FixedClock::at(&now.to_rfc3339());

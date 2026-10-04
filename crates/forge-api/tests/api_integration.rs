@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use chrono::{DateTime, Timelike};
 use axum::extract::ConnectInfo;
+use chrono::{DateTime, Timelike};
 use forge_api::create_router;
 use http::Request;
 use serde_json::{json, Value};
@@ -73,7 +73,11 @@ impl TestDb {
         let (server, _) = base.rsplit_once('/').unwrap_or((base.as_str(), ""));
         let admin_url = format!("{}/postgres", server.trim_end_matches('/'));
 
-        let admin = match PgPoolOptions::new().max_connections(1).connect(&admin_url).await {
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping API integration tests: cannot connect ({e})");
@@ -109,7 +113,11 @@ impl TestDb {
             return None;
         }
 
-        Some(TestDb { pool, admin_url, db_name })
+        Some(TestDb {
+            pool,
+            admin_url,
+            db_name,
+        })
     }
 }
 
@@ -134,11 +142,7 @@ macro_rules! with_db {
 const SECRET: &str = "integration-test-secret-not-for-production";
 
 fn router(pool: PgPool) -> axum::Router {
-    create_router(
-        pool,
-        SECRET,
-        "http://localhost:3000/api/v1",
-    )
+    create_router(pool, SECRET, "http://localhost:3000/api/v1")
 }
 
 /// Issues a request, attaching `ConnectInfo` so the rate limiter works.
@@ -230,11 +234,7 @@ async fn register_user(pool: &PgPool, email: &str, password: &str) -> (String, U
 /// Registers through the public endpoint, for tests that exercise it directly.
 ///
 /// Returns `(access_token, refresh_token, tenant_id)`.
-async fn register_via_api(
-    pool: &PgPool,
-    email: &str,
-    password: &str,
-) -> (String, String, Uuid) {
+async fn register_via_api(pool: &PgPool, email: &str, password: &str) -> (String, String, Uuid) {
     let app = router(pool.clone());
     let (status, body) = send(
         &app,
@@ -281,7 +281,10 @@ async fn register_login_and_use_a_token() {
         assert_eq!(body["data"]["role"], "OWNER");
         assert!(body["data"]["access_token"].is_string());
         assert!(body["data"]["refresh_token"].is_string());
-        assert!(body["request_id"].is_string(), "the envelope carries a request id");
+        assert!(
+            body["request_id"].is_string(),
+            "the envelope carries a request id"
+        );
 
         let token = body["data"]["access_token"].as_str().unwrap();
 
@@ -417,7 +420,10 @@ async fn a_refresh_token_is_single_use() {
             &[],
         )
         .await;
-        assert_eq!(status, 401, "a replayed refresh token must be refused: {second}");
+        assert_eq!(
+            status, 401,
+            "a replayed refresh token must be refused: {second}"
+        );
     })
     .await;
 }
@@ -437,8 +443,12 @@ async fn one_tenant_cannot_read_another_tents_job() {
         }
 
         let jwt = forge_auth::JwtService::new(SECRET.as_bytes());
-        let token_a = jwt.issue(Uuid::new_v4(), tenant_a, forge_auth::Role::Admin).unwrap();
-        let token_b = jwt.issue(Uuid::new_v4(), tenant_b, forge_auth::Role::Admin).unwrap();
+        let token_a = jwt
+            .issue(Uuid::new_v4(), tenant_a, forge_auth::Role::Admin)
+            .unwrap();
+        let token_b = jwt
+            .issue(Uuid::new_v4(), tenant_b, forge_auth::Role::Admin)
+            .unwrap();
         let app = router(pool.clone());
 
         // A creates a job.
@@ -464,7 +474,10 @@ async fn one_tenant_cannot_read_another_tents_job() {
             &[],
         )
         .await;
-        assert_eq!(status, 404, "a cross-tenant read must be not-found: {denied}");
+        assert_eq!(
+            status, 404,
+            "a cross-tenant read must be not-found: {denied}"
+        );
         assert_eq!(
             denied["error"]["code"], "NOT_FOUND",
             "the error must not reveal the resource exists elsewhere"
@@ -493,8 +506,12 @@ async fn one_tenant_cannot_trigger_another_tents_job() {
         }
 
         let jwt = forge_auth::JwtService::new(SECRET.as_bytes());
-        let token_a = jwt.issue(Uuid::new_v4(), tenant_a, forge_auth::Role::Admin).unwrap();
-        let token_b = jwt.issue(Uuid::new_v4(), tenant_b, forge_auth::Role::Admin).unwrap();
+        let token_a = jwt
+            .issue(Uuid::new_v4(), tenant_a, forge_auth::Role::Admin)
+            .unwrap();
+        let token_b = jwt
+            .issue(Uuid::new_v4(), tenant_b, forge_auth::Role::Admin)
+            .unwrap();
         let app = router(pool.clone());
 
         let (_, created) = send(
@@ -721,7 +738,10 @@ async fn a_manual_trigger_does_not_disturb_the_schedule() {
         )
         .await;
         assert_eq!(status, 201, "{schedule}");
-        let next_run_before = schedule["data"]["next_run_at"].as_str().unwrap().to_string();
+        let next_run_before = schedule["data"]["next_run_at"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Trigger the job manually several times.
         for _ in 0..3 {
@@ -740,7 +760,10 @@ async fn a_manual_trigger_does_not_disturb_the_schedule() {
         let (status, after) = send(
             &app,
             "GET",
-            &format!("/api/v1/schedules/{}", schedule["data"]["id"].as_str().unwrap()),
+            &format!(
+                "/api/v1/schedules/{}",
+                schedule["data"]["id"].as_str().unwrap()
+            ),
             Some(&token),
             None,
             &[],
@@ -749,10 +772,9 @@ async fn a_manual_trigger_does_not_disturb_the_schedule() {
         assert_eq!(status, 200, "{after}");
         // Compare as instants: the response renders an offset (`+00:00`) while
         // the stored value may round-trip as `Z`, and both denote the same time.
-        let now_after = chrono::DateTime::parse_from_rfc3339(
-            after["data"]["next_run_at"].as_str().unwrap(),
-        )
-        .unwrap();
+        let now_after =
+            chrono::DateTime::parse_from_rfc3339(after["data"]["next_run_at"].as_str().unwrap())
+                .unwrap();
         let before = chrono::DateTime::parse_from_rfc3339(&next_run_before).unwrap();
         assert_eq!(
             now_after, before,
@@ -905,7 +927,10 @@ async fn an_idempotent_mutation_replays() {
         )
         .await;
         assert_eq!(second_status, 201);
-        assert_eq!(first["data"]["id"], second["data"]["id"], "the replay created no new job");
+        assert_eq!(
+            first["data"]["id"], second["data"]["id"],
+            "the replay created no new job"
+        );
 
         let (_, list) = send(&app, "GET", "/api/v1/jobs", Some(&token), None, &[]).await;
         assert_eq!(list["data"].as_array().unwrap().len(), 1);
@@ -959,8 +984,12 @@ async fn idempotency_keys_are_tenant_scoped() {
                 .unwrap();
         }
         let jwt = forge_auth::JwtService::new(SECRET.as_bytes());
-        let token_a = jwt.issue(Uuid::new_v4(), tenants[0], forge_auth::Role::Admin).unwrap();
-        let token_b = jwt.issue(Uuid::new_v4(), tenants[1], forge_auth::Role::Admin).unwrap();
+        let token_a = jwt
+            .issue(Uuid::new_v4(), tenants[0], forge_auth::Role::Admin)
+            .unwrap();
+        let token_b = jwt
+            .issue(Uuid::new_v4(), tenants[1], forge_auth::Role::Admin)
+            .unwrap();
         let app = router(pool.clone());
 
         let headers = [("idempotency-key", "shared-key")];
@@ -985,7 +1014,10 @@ async fn idempotency_keys_are_tenant_scoped() {
 
         assert_eq!(status_a, 201, "{a}");
         assert_eq!(status_b, 201, "{b}");
-        assert_ne!(a["data"]["id"], b["data"]["id"], "each tenant made its own job");
+        assert_ne!(
+            a["data"]["id"], b["data"]["id"],
+            "each tenant made its own job"
+        );
     })
     .await;
 }
@@ -1318,7 +1350,10 @@ async fn the_openapi_document_describes_the_api() {
             "/auth/login",
             "/health/live",
         ] {
-            assert!(paths.contains_key(expected), "openapi is missing {expected}");
+            assert!(
+                paths.contains_key(expected),
+                "openapi is missing {expected}"
+            );
         }
 
         // Spec 09.4/09.6: the choices are published.
@@ -1326,4 +1361,3 @@ async fn the_openapi_document_describes_the_api() {
     })
     .await;
 }
-

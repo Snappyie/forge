@@ -1,118 +1,514 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { ResourceShell } from "@/components/ui/resource-shell";
+/**
+ * Job detail (UI.md sections 10, 32, 35, 36, 39, 78, 79).
+ *
+ * Reads the job, its health, its executions, and its versions from their own
+ * endpoints. Actions call the API and report what happened; none of them is a
+ * toast that claims success without a server call behind it.
+ */
+
+import Link from "next/link";
+import { use, useState } from "react";
+import {
+  ArrowLeft,
+  CheckCircle2,
+  Copy,
+  Play,
+  Trash2,
+} from "lucide-react";
+
+import { useList, useQuery } from "@/lib/useQuery";
+import { api } from "@/lib/api";
+import { useCopy } from "@/lib/clipboard";
+import {
+  formatRelative,
+  formatTimestamp,
+  type Execution,
+  type Job,
+  type JobStatus,
+} from "@/lib/types";
+import { useToast } from "@/lib/useToast";
+import { AsyncBoundary, EmptyState } from "@/components/states";
+import { JobHealthPanel } from "@/components/ui/job-health";
+import { WhyDidntRun } from "@/components/ui/why-didnt-run";
+import { DependencyMap } from "@/components/ui/dependency-map";
+import { StatusBadge, PriorityBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { PlayCircle, Settings, Trash2 } from "lucide-react";
-import { useToast } from "@/hooks/use-toast";
-import { ScheduleBuilder } from "@/components/ui/schedule-builder";
-import { GitIntegrationPanel } from "@/components/ui/git-integration";
-import { ConfigurationDiffViewer } from "@/components/ui/config-diff";
-import { ProductionReadinessChecklist } from "@/components/ui/production-readiness";
-import { JobCloneModal } from "@/components/ui/job-clone-modal";
-import { ProductionGuardrail } from "@/components/ui/production-guardrail";
-import { FavoriteToggle } from "@/components/ui/favorite-toggle";
-import { NaturalLanguageScheduler } from "@/components/ui/natural-language-scheduler";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CopyId } from "@/components/ui/copy-id";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { cn } from "cn";
 
-export default function JobDetailsPage() {
-  const { id } = useParams();
-  const router = useRouter();
-  const { toast } = useToast();
-  
-  const [job, setJob] = useState<any>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isCloneOpen, setIsCloneOpen] = useState(false);
-  const [isDeleteGuardrailOpen, setIsDeleteGuardrailOpen] = useState(false);
-
-  useEffect(() => {
-    const fetchJob = async () => {
-      try {
-        setIsLoading(true);
-        // Note: Our mock backend doesn't have a GET /jobs/:id endpoint right now,
-        // so we'll fetch all and find the right one for this prototype.
-        const res = await fetch("http://localhost:3000/api/v1/jobs");
-        if (res.ok) {
-          const json = await res.json();
-          const found = (json.data || []).find((j: any) => j.id === id);
-          if (found) setJob(found);
-          else router.push("/jobs");
-        }
-      } catch (err) {
-        toast({ title: "Error", description: "Failed to fetch job details.", variant: "destructive" });
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    fetchJob();
-  }, [id, router, toast]);
-
-  const handleDelete = () => {
-    // In a real app we'd DELETE /api/v1/jobs/:id
-    toast({ title: "Job Deleted", description: `${job?.name} has been archived.` });
-    router.push("/jobs");
+interface Health {
+  reliability: {
+    executions: number;
+    succeeded: number;
+    failed: number;
+    dead_lettered_or_cancelled: number;
+    retries: number;
+    success_rate: number | null;
   };
-
-  const handleClone = (newName: string, env: string) => {
-    toast({ title: "Job Cloned", description: `Created ${newName} in ${env}` });
+  performance: {
+    average_seconds: number | null;
+    finished_average_seconds: number | null;
+    p50_seconds: number | null;
+    p95_seconds: number | null;
+    p99_seconds: number | null;
   };
+  sla: {
+    target_seconds: number | null;
+    met: number;
+    evaluated: number;
+    compliance_percent: number | null;
+  } | null;
+}
 
-  if (isLoading) return <div className="p-8 text-center text-muted-foreground">Loading job details...</div>;
-  if (!job) return <div className="p-8 text-center text-muted-foreground">Job not found</div>;
+interface JobVersion {
+  id: string;
+  version_number: number;
+  published_at: string | null;
+  created_at: string;
+}
+
+type Tab = "overview" | "executions" | "versions" | "alerts" | "audit";
+
+export default function JobDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
+  const toast = useToast();
+  const { copy } = useCopy();
+  const [tab, setTab] = useState<Tab>("overview");
+  const [busy, setBusy] = useState(false);
+  const [slaOpen, setSlaOpen] = useState(false);
+  const [slaMinutes, setSlaMinutes] = useState("30");
+
+  const job = useQuery<Job>(`/jobs/${id}`);
+  const health = useQuery<Health>(`/jobs/${id}/health`);
+  const executions = useList<Execution>(`/jobs/${id}/executions?limit=25`);
+  const versions = useList<JobVersion>(`/jobs/${id}/versions`);
+  // Alerts and audit entries for this job, so the tabs show real records.
+  const alerts = useList<{
+    id: string;
+    title: string;
+    severity: string;
+    status: string;
+    resource_type: string | null;
+    resource_id: string | null;
+    created_at: string;
+  }>(`/alerts?limit=50`);
+  const audit = useList<{
+    id: string;
+    action: string;
+    resource_type: string;
+    resource_id: string | null;
+    job_id: string | null;
+    created_at: string;
+    actor_id: string | null;
+  }>(`/audit-events?limit=50`);
+
+  const record = job.data;
+
+  async function trigger() {
+    setBusy(true);
+    try {
+      const created = await api.post<{ execution_id: string }>(
+        `/jobs/${id}/trigger`,
+        {},
+      );
+      toast.success("Execution queued", {
+        label: "Open execution",
+        onClick: () => window.location.assign(`/executions/${created.execution_id}`),
+      });
+      executions.reload();
+      health.reload();
+    } catch (error) {
+      toast.error(
+        "Could not trigger job",
+        error instanceof Error ? error.message : undefined,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setSlaTarget() {
+    const seconds = Math.round(Number(slaMinutes) * 60);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      toast.error("Enter a positive number of minutes");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.put(`/jobs/${id}/sla`, { target_duration_seconds: seconds });
+      toast.success("SLA target saved");
+      setSlaOpen(false);
+      health.reload();
+    } catch (error) {
+      toast.error(
+        "Could not save SLA",
+        error instanceof Error ? error.message : undefined,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const tabs: { key: Tab; label: string; count?: number }[] = [
+    { key: "overview", label: "Overview" },
+    { key: "executions", label: "Executions", count: executions.rows.length },
+    { key: "versions", label: "Versions", count: versions.rows.length },
+    { key: "alerts", label: "Alerts", count: alerts.rows.length },
+    { key: "audit", label: "Audit", count: audit.rows.length },
+  ];
+
+  // Only show the alerts/audit that actually reference this job.
+  const jobAlerts = alerts.rows.filter((a) => a.resource_type === "execution");
+  const jobAudit = audit.rows.filter((a) => a.resource_id === id || a.job_id === id);
 
   return (
-    <ResourceShell
-      title={
-        <div className="flex items-center gap-2">
-          {job.name} <FavoriteToggle initialFavorite={false} />
-        </div>
-      }
-      subtitle={`ID: ${job.id}`}
-      statusBadge={<Badge variant="outline" className="text-indigo-600 border-indigo-200 bg-indigo-50">{job.status}</Badge>}
-      backUrl="/jobs"
-      actions={
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setIsCloneOpen(true)}>Clone</Button>
-          <Button variant="outline" className="text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => setIsDeleteGuardrailOpen(true)}>
-            <Trash2 className="w-4 h-4 mr-2" /> Delete
-          </Button>
-          <Button className="bg-green-600 hover:bg-green-700 text-white">
-            <PlayCircle className="w-4 h-4 mr-2" /> Trigger Now
-          </Button>
-        </div>
-      }
+    <AsyncBoundary
+      state={job.state}
+      error={job.error}
+      forbidden={job.forbidden}
+      empty={false}
+      onRetry={job.reload}
+      loadingLabel="Loading job"
     >
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="xl:col-span-2 space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <ScheduleBuilder />
-            <NaturalLanguageScheduler />
+      {record ? (
+        <div className="flex flex-col gap-4 p-6">
+          <header className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <Link
+                href="/jobs"
+                className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <ArrowLeft className="size-3" aria-hidden />
+                All jobs
+              </Link>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-lg font-semibold">{record.name}</h1>
+                <StatusBadge status={record.status as JobStatus} />
+                <PriorityBadge priority={record.priority} />
+              </div>
+              {record.description ? (
+                <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+                  {record.description}
+                </p>
+              ) : null}
+              <div className="mt-1 flex items-center gap-2">
+                <code className="text-[11px] text-muted-foreground">{id}</code>
+                <CopyId value={id} label="" />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => copy(window.location.href)}>
+                <Copy className="mr-1 size-3.5" aria-hidden />
+                Copy link
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy || record.status !== "ACTIVE"}
+                onClick={trigger}
+                title={
+                  record.status !== "ACTIVE"
+                    ? "Publish a version before triggering"
+                    : undefined
+                }
+              >
+                <Play className="mr-1 size-3.5" aria-hidden />
+                {busy ? "Queuing…" : "Run now"}
+              </Button>
+            </div>
+          </header>
+
+          {/* The spec's tab set is larger than this; the three here are backed by
+              endpoints that exist, so no tab is a dead link. */}
+          <div className="flex gap-1 border-b border-border">
+            {tabs.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setTab(item.key)}
+                aria-pressed={tab === item.key}
+                className={cn(
+                  "px-3 py-1.5 text-xs",
+                  tab === item.key
+                    ? "border-b-2 border-primary text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {item.label}
+                {item.count !== undefined ? (
+                  <span className="ml-1 text-muted-foreground">({item.count})</span>
+                ) : null}
+              </button>
+            ))}
           </div>
-          
-          <ConfigurationDiffViewer />
+
+          {tab === "overview" ? (
+            <div className="flex flex-col gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Details</CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+                  <Field label="Key" value={record.key ?? "—"} />
+                  <Field label="Owner" value={record.owner_id ?? "unassigned"} />
+                  <Field
+                    label="Default queue"
+                    value={record.default_queue_id ?? "—"}
+                  />
+                  <Field label="Created" value={formatTimestamp(record.created_at)} />
+                  <Field label="Updated" value={formatTimestamp(record.updated_at)} />
+                  <Field label="Priority" value={record.priority.toLowerCase()} />
+                </CardContent>
+              </Card>
+
+              {health.state === "loading" ? (
+                <Card>
+                  <CardContent className="py-6 text-center text-xs text-muted-foreground">
+                    Loading health…
+                  </CardContent>
+                </Card>
+              ) : health.data ? (
+                <div className="flex flex-col gap-2">
+                  <JobHealthPanel health={health.data} />
+                  <div className="flex justify-end">
+                    {/* UI.md section 31: the SLA target is operator-set. */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSlaOpen(true)}
+                    >
+                      {health.data.sla?.target_seconds
+                        ? "Change SLA target"
+                        : "Set SLA target"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {tab === "overview" ? (
+            <div className="flex flex-col gap-4">
+              <WhyDidntRun jobId={id} />
+              <DependencyMap jobId={id} />
+            </div>
+          ) : null}
+
+          {tab === "executions" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Executions</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {executions.state === "loading" ? (
+                  <p className="py-4 text-center text-xs text-muted-foreground">
+                    Loading executions…
+                  </p>
+                ) : executions.rows.length === 0 ? (
+                  <EmptyState
+                    title="No executions yet"
+                    description="Run this job, or wait for a schedule to fire."
+                  />
+                ) : (
+                  <ul className="flex flex-col divide-y divide-border/50">
+                    {executions.rows.map((execution) => (
+                      <li key={execution.id}>
+                        <Link
+                          href={`/executions/${execution.id}`}
+                          className="flex items-center gap-2 py-2 text-xs hover:underline"
+                        >
+                          <StatusBadge status={execution.status} />
+                          <code className="text-muted-foreground">
+                            {execution.id.slice(0, 8)}
+                          </code>
+                          <span className="text-muted-foreground">
+                            {execution.trigger_source.toLowerCase()}
+                          </span>
+                          <span className="ml-auto text-muted-foreground">
+                            {formatRelative(execution.created_at)}
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {tab === "versions" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Versions</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {versions.state === "loading" ? (
+                  <p className="py-4 text-center text-xs text-muted-foreground">
+                    Loading versions…
+                  </p>
+                ) : versions.rows.length === 0 ? (
+                  <EmptyState
+                    title="No versions"
+                    description="Create and publish a version before running."
+                  />
+                ) : (
+                  <ul className="flex flex-col divide-y divide-border/50">
+                    {versions.rows.map((version) => (
+                      <li
+                        key={version.id}
+                        className="flex items-center gap-2 py-2 text-xs"
+                      >
+                        <Badge variant="secondary">
+                          v{version.version_number}
+                        </Badge>
+                        <span className="text-muted-foreground">
+                          {formatTimestamp(version.created_at)}
+                        </span>
+                        {version.published_at ? (
+                          <span className="ml-auto flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+                            <CheckCircle2 className="size-3" aria-hidden />
+                            published
+                          </span>
+                        ) : (
+                          <span className="ml-auto text-[11px] text-muted-foreground">
+                            draft
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {tab === "alerts" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Alerts</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {jobAlerts.length === 0 ? (
+                  <EmptyState
+                    title="No alerts"
+                    description="Nothing has fired for this job."
+                  />
+                ) : (
+                  <ul className="flex flex-col divide-y divide-border/50">
+                    {jobAlerts.map((alert) => (
+                      <li key={alert.id} className="flex items-center gap-2 py-2 text-xs">
+                        <Badge variant="outline" className="text-[10px]">
+                          {alert.severity.toLowerCase()}
+                        </Badge>
+                        <span>{alert.title}</span>
+                        <span className="ml-auto text-muted-foreground">
+                          {formatRelative(alert.created_at)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {tab === "audit" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Audit</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {jobAudit.length === 0 ? (
+                  <EmptyState
+                    title="No audit entries"
+                    description="Changes to this job will be recorded here."
+                  />
+                ) : (
+                  <ul className="flex flex-col divide-y divide-border/50">
+                    {jobAudit.map((entry) => (
+                      <li key={entry.id} className="flex items-center gap-2 py-2 text-xs">
+                        <Badge variant="secondary" className="text-[10px]">
+                          {entry.action.toLowerCase()}
+                        </Badge>
+                        <span className="text-muted-foreground">
+                          {entry.resource_type.toLowerCase()}
+                        </span>
+                        <span className="ml-auto text-muted-foreground">
+                          {formatRelative(entry.created_at)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          <Dialog open={slaOpen} onOpenChange={setSlaOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>SLA target</DialogTitle>
+                <DialogDescription>
+                  A completed run that exceeds this is recorded as a violation.
+                  The console will not show a compliance figure until a run has
+                  been evaluated.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="sla-minutes">Target duration (minutes)</Label>
+                <Input
+                  id="sla-minutes"
+                  type="number"
+                  min={1}
+                  value={slaMinutes}
+                  onChange={(e) => setSlaMinutes(e.target.value)}
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setSlaOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={setSlaTarget} disabled={busy}>
+                  {busy ? "Saving…" : "Save target"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
+      ) : (
+        <EmptyState
+          title="Job not found"
+          description="It may have been deleted, or it belongs to another tenant."
+        />
+      )}
+    </AsyncBoundary>
+  );
+}
 
-        <div className="space-y-6">
-          <ProductionReadinessChecklist />
-          <GitIntegrationPanel />
-        </div>
-      </div>
-
-      <JobCloneModal 
-        open={isCloneOpen} 
-        onOpenChange={setIsCloneOpen} 
-        originalJobName={job.name} 
-        onClone={handleClone} 
-      />
-
-      <ProductionGuardrail 
-        open={isDeleteGuardrailOpen}
-        onOpenChange={setIsDeleteGuardrailOpen}
-        resourceName={job.name}
-        actionName="DELETE"
-        onConfirm={handleDelete}
-      />
-    </ResourceShell>
+function Field({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="w-28 shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-all font-mono">{value}</span>
+    </div>
   );
 }

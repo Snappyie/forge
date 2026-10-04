@@ -4,7 +4,9 @@ use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::error::{Result, StorageError};
-use forge_domain::{CatchUpPolicy, MisfirePolicy, Schedule, ScheduleType, TargetType, TargetVersionPolicy, TenantId};
+use forge_domain::{
+    CatchUpPolicy, MisfirePolicy, Schedule, ScheduleType, TargetType, TargetVersionPolicy, TenantId,
+};
 
 /// A due schedule claimed by one scheduler instance.
 ///
@@ -533,12 +535,7 @@ impl<'a> LeaseRepository<'a> {
     ///
     /// Only the current holder can renew; a stale holder's renewal affects zero
     /// rows and is reported as a conflict rather than silently succeeding.
-    pub async fn renew(
-        &self,
-        lease_id: Uuid,
-        worker_id: Uuid,
-        ttl_secs: i64,
-    ) -> Result<LeaseRow> {
+    pub async fn renew(&self, lease_id: Uuid, worker_id: Uuid, ttl_secs: i64) -> Result<LeaseRow> {
         sqlx::query_as::<_, LeaseRow>(
             "UPDATE worker_leases
              SET expires_at = NOW() + make_interval(secs => $3), renewed_at = NOW()
@@ -589,10 +586,7 @@ impl<'a> LeaseRepository<'a> {
     }
 
     /// The active lease on an execution, if any.
-    pub async fn active_for_execution(
-        &self,
-        execution_id: Uuid,
-    ) -> Result<Option<LeaseRow>> {
+    pub async fn active_for_execution(&self, execution_id: Uuid) -> Result<Option<LeaseRow>> {
         sqlx::query_as::<_, LeaseRow>(
             "SELECT id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
                     renewed_at, released_at

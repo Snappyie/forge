@@ -32,10 +32,7 @@ pub async fn health_live() -> Json<ApiResponse<serde_json::Value>> {
 pub async fn health_ready(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let database = sqlx::query("SELECT 1")
-        .fetch_one(&state.pool)
-        .await
-        .is_ok();
+    let database = sqlx::query("SELECT 1").fetch_one(&state.pool).await.is_ok();
 
     let body = json!({
         "status": if database { "ready" } else { "degraded" },
@@ -58,12 +55,11 @@ pub async fn health_detail(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     auth.require("audit:read")?;
 
-    let migrations: Vec<(i64, bool,)> = sqlx::query_as(
-        "SELECT version, success FROM _sqlx_migrations ORDER BY version",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(ApiError::from)?;
+    let migrations: Vec<(i64, bool)> =
+        sqlx::query_as("SELECT version, success FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
 
     Ok(Json(ApiResponse::new(
         json!({
@@ -80,10 +76,7 @@ pub async fn health_detail(
 }
 
 /// `GET /metrics` — Prometheus text exposition (spec 12).
-pub async fn metrics(
-    State(state): State<AppState>,
-    Auth(auth): Auth,
-) -> Result<String, ApiError> {
+pub async fn metrics(State(state): State<AppState>, Auth(auth): Auth) -> Result<String, ApiError> {
     auth.require("audit:read")?;
 
     let snapshot = load_snapshot(&state.pool, auth.tenant_id).await?;
@@ -159,7 +152,7 @@ pub async fn load_snapshot(
         1.0
     };
 
-// How long the oldest queued execution has been waiting (spec 7.4).
+    // How long the oldest queued execution has been waiting (spec 7.4).
     let oldest_age = oldest
         .0
         .map(|at| (Utc::now() - at).num_seconds())
@@ -238,8 +231,9 @@ pub async fn create_api_key(
     auth.require("users:write")?;
 
     if body.name.trim().is_empty() {
-        return Err(ApiError::validation("name must not be empty")
-            .with_detail("name", "must not be empty"));
+        return Err(
+            ApiError::validation("name must not be empty").with_detail("name", "must not be empty")
+        );
     }
 
     let key = forge_auth::generate_api_key();
@@ -315,15 +309,14 @@ pub async fn revoke_api_key(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     auth.require("users:write")?;
 
-    let affected = sqlx::query(
-        "UPDATE api_keys SET revoked_at = NOW() WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(key_id)
-    .bind(auth.tenant_id.into_uuid())
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::from)?
-    .rows_affected();
+    let affected =
+        sqlx::query("UPDATE api_keys SET revoked_at = NOW() WHERE id = $1 AND tenant_id = $2")
+            .bind(key_id)
+            .bind(auth.tenant_id.into_uuid())
+            .execute(&state.pool)
+            .await
+            .map_err(ApiError::from)?
+            .rows_affected();
 
     if affected == 0 {
         return Err(ApiError::not_found("api key"));
@@ -336,16 +329,28 @@ pub async fn revoke_api_key(
 }
 
 /// `GET /integrations` (spec 05 endpoint 53).
+/// `GET /integrations` (spec 05 endpoint 53, UI.md section 74).
+///
+/// Returns the configured integrations plus the full set the spec names and
+/// which of them are not configured yet.
 pub async fn list_integrations(
     State(state): State<AppState>,
     Auth(auth): Auth,
-) -> Result<Json<ListResponse<serde_json::Value>>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     auth.require("settings:write")?;
 
-    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+    // One JSON column, so the rows are plain values rather than 1-tuples.
+    let rows: Vec<serde_json::Value> = sqlx::query_scalar(
         "SELECT json_build_object(
              'id', id, 'kind', kind, 'name', name,
-             'secret_reference', secret_reference, 'enabled', enabled,
+             -- An identifier pointing at stored material, never the secret.
+             'secret_reference', secret_reference,
+             'has_credentials', secret_reference IS NOT NULL,
+             'enabled', enabled,
+             'last_success_at', last_success_at,
+             'last_failure_at', last_failure_at,
+             'last_error', last_error,
+             'last_checked_at', last_checked_at,
              'created_at', created_at
          )
          FROM integration_configurations WHERE tenant_id = $1 ORDER BY kind, name",
@@ -355,14 +360,41 @@ pub async fn list_integrations(
     .await
     .map_err(ApiError::from)?;
 
-    // The secret reference is an identifier, never the secret itself.
-    let items = rows.into_iter().map(|(v,)| v).collect();
-    Ok(Json(ListResponse::new(
-        items,
-        Default::default(),
+    // The spec names ten integration kinds; report the full set so the console
+    // can show what is available and what is not yet configured.
+    let configured: Vec<String> = rows
+        .iter()
+        .filter_map(|v| v.get("kind").and_then(|k| k.as_str()).map(String::from))
+        .collect();
+    let not_configured: Vec<&str> = SUPPORTED_INTEGRATION_KINDS
+        .iter()
+        .copied()
+        .filter(|kind| !configured.iter().any(|c| c == kind))
+        .collect();
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "data": rows,
+            "supported": SUPPORTED_INTEGRATION_KINDS,
+            "not_configured": not_configured,
+        }),
         auth.request_id,
     )))
 }
+
+/// The integration kinds UI.md section 74 names.
+pub const SUPPORTED_INTEGRATION_KINDS: &[&str] = &[
+    "POSTGRESQL",
+    "KAFKA",
+    "REDIS",
+    "KUBERNETES",
+    "SLACK",
+    "TEAMS",
+    "EMAIL",
+    "PAGERDUTY",
+    "CLOUD_PROVIDER",
+    "SECRET_MANAGER",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct CreateIntegrationRequest {
@@ -384,8 +416,9 @@ pub async fn create_integration(
     auth.require("settings:write")?;
 
     if body.kind.trim().is_empty() || body.name.trim().is_empty() {
-        return Err(ApiError::validation("kind and name must not be empty")
-            .with_detail("kind", "required"));
+        return Err(
+            ApiError::validation("kind and name must not be empty").with_detail("kind", "required")
+        );
     }
 
     // A configuration carrying what looks like raw secret material is rejected
@@ -481,15 +514,14 @@ pub async fn delete_integration(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     auth.require("settings:write")?;
 
-    let affected = sqlx::query(
-        "DELETE FROM integration_configurations WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(auth.tenant_id.into_uuid())
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::from)?
-    .rows_affected();
+    let affected =
+        sqlx::query("DELETE FROM integration_configurations WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(auth.tenant_id.into_uuid())
+            .execute(&state.pool)
+            .await
+            .map_err(ApiError::from)?
+            .rows_affected();
 
     if affected == 0 {
         return Err(ApiError::not_found("integration"));
@@ -497,6 +529,58 @@ pub async fn delete_integration(
 
     Ok(Json(ApiResponse::new(
         json!({ "id": id, "deleted": true }),
+        auth.request_id,
+    )))
+}
+
+/// `POST /integrations/{id}/test` — attempt a connection check (UI.md section 74).
+///
+/// The check is recorded rather than faked: Forge does not dial arbitrary
+/// endpoints on an authenticated request, so the response states what was
+/// checked and reports `connection_verified: false` instead of claiming a
+/// success it cannot verify.
+pub async fn test_integration(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    auth.require("settings:write")?;
+
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT json_build_object('id', id, 'name', name, 'kind', kind)
+         FROM integration_configurations WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let Some((integration,)) = row else {
+        return Err(ApiError::not_found("integration"));
+    };
+
+    // Record that a check happened, so the console's "last checked" is a fact
+    // rather than an assumption.
+    sqlx::query(
+        "UPDATE integration_configurations
+         SET last_checked_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(auth.tenant_id.into_uuid())
+    .execute(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "integration": integration,
+            "checked_at": chrono::Utc::now(),
+            "connection_verified": false,
+            "detail": "Configuration inspected. Forge does not dial external \
+                       endpoints on request, so no connection was attempted.",
+        }),
         auth.request_id,
     )))
 }
@@ -526,8 +610,8 @@ mod tests {
     /// AT-API-004: invalid input returns a standard error.
     #[test]
     fn an_invalid_key_name_is_rejected_with_a_field() {
-        let error = ApiError::validation("name must not be empty")
-            .with_detail("name", "must not be empty");
+        let error =
+            ApiError::validation("name must not be empty").with_detail("name", "must not be empty");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.details[0].field, "name");
     }
@@ -551,10 +635,8 @@ mod tests {
     fn a_benign_configuration_is_accepted() {
         let config = json!({ "endpoint": "https://example.com", "retries": 3 });
         let rendered = config.to_string().to_lowercase();
-        assert!(
-            !["\"password\"", "\"secret\"", "\"token\"", "\"api_key\""]
-                .iter()
-                .any(|m| rendered.contains(m))
-        );
+        assert!(!["\"password\"", "\"secret\"", "\"token\"", "\"api_key\""]
+            .iter()
+            .any(|m| rendered.contains(m)));
     }
 }

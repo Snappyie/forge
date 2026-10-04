@@ -90,16 +90,18 @@ pub fn load() -> Result<Config> {
             .map_err(|e| CliError::Config(format!("{} is not valid: {e}", path.display()))),
         // A missing file is the normal first-run state, not an error.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(e) => Err(CliError::Config(format!("could not read {}: {e}", path.display()))),
+        Err(e) => Err(CliError::Config(format!(
+            "could not read {}: {e}",
+            path.display()
+        ))),
     }
 }
 
 pub fn save(config: &Config) -> Result<()> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CliError::Config(format!("could not create {}: {e}", parent.display()))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::Config(format!("could not create {}: {e}", parent.display())))?;
     }
     let rendered = serde_json::to_string_pretty(config)
         .map_err(|e| CliError::Config(format!("could not render config: {e}")))?;
@@ -111,9 +113,8 @@ pub fn save(config: &Config) -> Result<()> {
         .map_err(|e| CliError::Config(format!("could not write {}: {e}", temp.display())))?;
 
     restrict_permissions(&temp)?;
-    std::fs::rename(&temp, &path).map_err(|e| {
-        CliError::Config(format!("could not replace {}: {e}", path.display()))
-    })?;
+    std::fs::rename(&temp, &path)
+        .map_err(|e| CliError::Config(format!("could not replace {}: {e}", path.display())))?;
     restrict_permissions(&path)?;
     Ok(())
 }
@@ -129,9 +130,8 @@ fn restrict_permissions(path: &Path) -> Result<()> {
             .map_err(|e| CliError::Config(format!("could not stat {}: {e}", path.display())))?
             .permissions();
         perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms).map_err(|e| {
-            CliError::Config(format!("could not secure {}: {e}", path.display()))
-        })?;
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| CliError::Config(format!("could not secure {}: {e}", path.display())))?;
     }
     #[cfg(not(unix))]
     {

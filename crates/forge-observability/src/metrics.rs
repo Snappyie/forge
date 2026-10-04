@@ -49,16 +49,66 @@ impl MetricsSnapshot {
             out.push_str(&format!("forge_{name} {value}\n"));
         };
 
-        push("queue_depth", "Executions awaiting dispatch.", "gauge", self.queue_depth as f64);
-        push("oldest_queued_age_seconds", "Age of the oldest queued execution.", "gauge", self.oldest_queued_age_secs as f64);
-        push("executions_running", "Executions currently running.", "gauge", self.running as f64);
-        push("executions_succeeded_24h", "Executions succeeded in the last 24h.", "counter", self.succeeded_24h as f64);
-        push("executions_failed_24h", "Executions failed in the last 24h.", "counter", self.failed_24h as f64);
-        push("executions_dead_lettered_24h", "Executions dead-lettered in the last 24h.", "counter", self.dead_lettered_24h as f64);
-        push("execution_success_rate", "Success rate over the last 24h.", "gauge", self.success_rate);
-        push("execution_mean_latency_ms", "Mean execution latency.", "gauge", self.mean_latency_ms);
-        push("workers_ready", "Workers ready to accept work.", "gauge", self.workers_ready as f64);
-        push("workers_offline", "Workers currently offline.", "gauge", self.workers_offline as f64);
+        push(
+            "queue_depth",
+            "Executions awaiting dispatch.",
+            "gauge",
+            self.queue_depth as f64,
+        );
+        push(
+            "oldest_queued_age_seconds",
+            "Age of the oldest queued execution.",
+            "gauge",
+            self.oldest_queued_age_secs as f64,
+        );
+        push(
+            "executions_running",
+            "Executions currently running.",
+            "gauge",
+            self.running as f64,
+        );
+        push(
+            "executions_succeeded_24h",
+            "Executions succeeded in the last 24h.",
+            "counter",
+            self.succeeded_24h as f64,
+        );
+        push(
+            "executions_failed_24h",
+            "Executions failed in the last 24h.",
+            "counter",
+            self.failed_24h as f64,
+        );
+        push(
+            "executions_dead_lettered_24h",
+            "Executions dead-lettered in the last 24h.",
+            "counter",
+            self.dead_lettered_24h as f64,
+        );
+        push(
+            "execution_success_rate",
+            "Success rate over the last 24h.",
+            "gauge",
+            self.success_rate,
+        );
+        push(
+            "execution_mean_latency_ms",
+            "Mean execution latency.",
+            "gauge",
+            self.mean_latency_ms,
+        );
+        push(
+            "workers_ready",
+            "Workers ready to accept work.",
+            "gauge",
+            self.workers_ready as f64,
+        );
+        push(
+            "workers_offline",
+            "Workers currently offline.",
+            "gauge",
+            self.workers_offline as f64,
+        );
 
         for (queue, depth) in &self.queues {
             out.push_str(&format!(
@@ -130,10 +180,7 @@ impl Metrics {
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
-        self.snapshot
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.snapshot.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Every counter, for a scrape or a debug dump.
@@ -239,7 +286,10 @@ mod tests {
         m.increment("executions_dispatched", &[("queue", "default")], 2.0);
         m.increment("executions_dispatched", &[("queue", "bulk")], 5.0);
 
-        assert_eq!(m.counter("executions_dispatched", &[("queue", "default")]), 3.0);
+        assert_eq!(
+            m.counter("executions_dispatched", &[("queue", "default")]),
+            3.0
+        );
         assert_eq!(
             m.counter("executions_dispatched", &[("queue", "bulk")]),
             5.0,

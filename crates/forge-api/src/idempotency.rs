@@ -47,10 +47,10 @@ pub fn validate_key(raw: &str) -> Result<String, ApiError> {
     // A control character in a key would end up in a log line and a database
     // index, so reject rather than sanitise.
     if !raw.chars().all(|c| c.is_ascii_graphic()) {
-        return Err(ApiError::validation(
-            "idempotency key must contain only printable ASCII",
-        )
-        .with_detail("Idempotency-Key", "contains a control character"));
+        return Err(
+            ApiError::validation("idempotency key must contain only printable ASCII")
+                .with_detail("Idempotency-Key", "contains a control character"),
+        );
     }
     Ok(raw.to_string())
 }
@@ -59,10 +59,7 @@ pub fn validate_key(raw: &str) -> Result<String, ApiError> {
 #[derive(Debug)]
 pub enum IdempotencyAction {
     /// The key is new; run the operation and record the response.
-    Proceed {
-        key: String,
-        fingerprint: String,
-    },
+    Proceed { key: String, fingerprint: String },
     /// The same request already ran; return the stored response verbatim.
     Replay {
         status: StatusCode,
@@ -93,13 +90,7 @@ pub async fn begin(
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
 
     match repo
-        .reserve(
-            tenant_id,
-            &key,
-            endpoint,
-            &print,
-            expires_at,
-        )
+        .reserve(tenant_id, &key, endpoint, &print, expires_at)
         .await
     {
         Ok(forge_storage::IdempotencyOutcome::Fresh) => Ok(IdempotencyAction::Proceed {
@@ -180,7 +171,16 @@ where
                 "data": payload,
                 "request_id": request_id,
             });
-            complete(pool, tenant_id, &key, endpoint, status, &envelope, resource_id).await?;
+            complete(
+                pool,
+                tenant_id,
+                &key,
+                endpoint,
+                status,
+                &envelope,
+                resource_id,
+            )
+            .await?;
             Ok(IdempotentOutcome::Fresh {
                 status,
                 data: payload,
@@ -193,8 +193,14 @@ where
 /// a previous one.
 #[derive(Debug)]
 pub enum IdempotentOutcome<T> {
-    Fresh { status: StatusCode, data: T },
-    Replay { status: StatusCode, data: serde_json::Value },
+    Fresh {
+        status: StatusCode,
+        data: T,
+    },
+    Replay {
+        status: StatusCode,
+        data: serde_json::Value,
+    },
 }
 
 impl<T: Serialize> IdempotentOutcome<T> {
@@ -246,7 +252,10 @@ mod tests {
     #[test]
     fn a_key_with_a_control_character_is_rejected() {
         for hostile in ["abc\ndef", "abc\tdef", "abc\0def", "has space"] {
-            assert!(validate_key(hostile).is_err(), "{hostile:?} must be rejected");
+            assert!(
+                validate_key(hostile).is_err(),
+                "{hostile:?} must be rejected"
+            );
         }
     }
 

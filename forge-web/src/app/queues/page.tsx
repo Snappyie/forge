@@ -11,8 +11,9 @@ import { Loader2, Pause, Play, Plus, RefreshCw } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { useQuery } from "@/lib/useQuery";
-import { roleCan, type Queue } from "@/lib/types";
+import { useList } from "@/lib/useQuery";
+import { formatRelative, roleCan, type Queue } from "@/lib/types";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AsyncBoundary } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,10 +29,10 @@ import {
 
 export default function QueuesPage() {
   const { session } = useAuth();
-  const query = useQuery<{ data: Queue[] }>("/queues");
+  const query = useList<Queue>("/queues");
   const [creating, setCreating] = useState(false);
 
-  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const rows = query.rows;
   const canWrite = roleCan(session?.role, "queues:write");
 
   return (
@@ -68,6 +69,46 @@ export default function QueuesPage() {
       ) : null}
 
       <div className="rounded-lg border border-border">
+        {/* UI.md section 27 asks for queue depth and throughput graphs. With no
+            historical series stored, the only truthful chart is the current
+            depth per queue; a fabricated trend line would be worse than none. */}
+        {rows.length > 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Queue depth</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              {rows.map((queue) => {
+                const depth = queue.depth ?? 0;
+                const max = Math.max(...rows.map((q) => q.depth ?? 0), 1);
+                const percent = Math.round((depth / max) * 100);
+                return (
+                  <div key={queue.id}>
+                    <div className="mb-1 flex items-baseline justify-between text-xs">
+                      <span className="text-muted-foreground">{queue.name}</span>
+                      <span className="tabular-nums">{depth} waiting</span>
+                    </div>
+                    <div
+                      className="h-2 overflow-hidden rounded-full bg-muted"
+                      role="img"
+                      aria-label={`${queue.name}: ${depth} waiting`}
+                    >
+                      <div
+                        className="h-full rounded-full bg-primary"
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+              <p className="text-[11px] text-muted-foreground">
+                Current depth. Forge stores no historical depth series, so no
+                trend is charted.
+              </p>
+            </CardContent>
+          </Card>
+        ) : null}
+
         <AsyncBoundary
           state={query.state}
           error={query.error}
@@ -82,6 +123,9 @@ export default function QueuesPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
+                <TableHead>Depth</TableHead>
+                <TableHead>Running</TableHead>
+                <TableHead>Oldest wait</TableHead>
                 <TableHead>Max concurrency</TableHead>
                 <TableHead>State</TableHead>
                 {canWrite ? <TableHead className="text-right">Actions</TableHead> : null}
@@ -91,6 +135,17 @@ export default function QueuesPage() {
               {rows.map((queue) => (
                 <TableRow key={queue.id}>
                   <TableCell className="font-medium">{queue.name}</TableCell>
+                  <TableCell className="text-xs tabular-nums">
+                    {queue.depth ?? 0}
+                  </TableCell>
+                  <TableCell className="text-xs tabular-nums">
+                    {queue.running ?? 0}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {queue.oldest_queued_at
+                      ? formatRelative(queue.oldest_queued_at)
+                      : "—"}
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {queue.max_concurrency ?? "unlimited"}
                   </TableCell>

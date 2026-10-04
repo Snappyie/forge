@@ -1,112 +1,238 @@
 "use client";
 
-import React, { useState } from "react";
-import { ResourceShell } from "@/components/ui/resource-shell";
-import { Button } from "@/components/ui/button";
+/**
+ * Workflow detail (UI.md sections 23, 24, 35).
+ *
+ * Shows the stored definition, its versions, and the executions it produced.
+ * The graph is drawn from the stored node list, so it matches what the engine
+ * actually ran.
+ */
+
+import Link from "next/link";
+import { use, useState } from "react";
+import { ArrowLeft, Play } from "lucide-react";
+
+import { useList, useQuery } from "@/lib/useQuery";
+import { api } from "@/lib/api";
+import { formatRelative, formatTimestamp, type Execution, type Workflow } from "@/lib/types";
+import { WorkflowDesigner } from "@/components/ui/workflow-designer";
+import { useToast } from "@/lib/useToast";
+import { AsyncBoundary, EmptyState } from "@/components/states";
+import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
-import { PlayCircle, Settings, Save, Network, ZoomIn, ZoomOut, Maximize } from "lucide-react";
-import { useToast } from "@/hooks/use-toast";
-import ReactFlow, { Background, Controls, applyNodeChanges, applyEdgeChanges, NodeChange, EdgeChange, Node, Edge } from 'reactflow';
-import 'reactflow/dist/style.css';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const initialNodes: Node[] = [
-  { id: '1', position: { x: 250, y: 50 }, data: { label: 'Start (Trigger)' }, type: 'input' },
-  { id: '2', position: { x: 100, y: 150 }, data: { label: 'Extract Data' } },
-  { id: '3', position: { x: 400, y: 150 }, data: { label: 'Validate Format' } },
-  { id: '4', position: { x: 250, y: 250 }, data: { label: 'Transform' } },
-  { id: '5', position: { x: 250, y: 350 }, data: { label: 'Load to DWH' }, type: 'output' },
-];
+interface WorkflowDetail {
+  id: string;
+  key: string | null;
+  name: string;
+  description: string | null;
+  status: "DRAFT" | "ACTIVE" | "ARCHIVED";
+  current_version_id: string | null;
+  // The API returns the stored definition alongside the workflow.
+  definition: {
+    nodes: { key: string; name?: string; type: string; config?: Record<string, unknown> }[];
+    edges: { from: string; to: string }[];
+  } | null;
+}
 
-const initialEdges: Edge[] = [
-  { id: 'e1-2', source: '1', target: '2', animated: true },
-  { id: 'e1-3', source: '1', target: '3' },
-  { id: 'e2-4', source: '2', target: '4' },
-  { id: 'e3-4', source: '3', target: '4' },
-  { id: 'e4-5', source: '4', target: '5' },
-];
+interface WorkflowVersion {
+  id: string;
+  version: number;
+  status: string;
+  created_at: string;
+  published_at: string | null;
+}
 
-export default function WorkflowDesignerPage({ params }: { params: Promise<{ id: string }> }) {
-  const resolvedParams = React.use(params as any) as { id: string };
-  const { id } = resolvedParams;
-  const { toast } = useToast();
-  const [nodes, setNodes] = useState<Node[]>(initialNodes);
-  const [edges, setEdges] = useState<Edge[]>(initialEdges);
-  const [isSaving, setIsSaving] = useState(false);
+export default function WorkflowDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
 
-  const onNodesChange = (changes: NodeChange[]) => setNodes((nds) => applyNodeChanges(changes, nds));
-  const onEdgesChange = (changes: EdgeChange[]) => setEdges((eds) => applyEdgeChanges(changes, eds));
+  const workflow = useQuery<WorkflowDetail>(`/workflows/${id}`);
+  const versions = useList<WorkflowVersion>(`/workflows/${id}/versions`);
+  const executions = useList<Execution>(`/executions?workflow_id=${id}&limit=25`);
 
-  const handleSave = () => {
-    setIsSaving(true);
-    setTimeout(() => {
-      setIsSaving(false);
-      toast({
-        title: "Workflow Saved",
-        description: "Your DAG configuration has been persisted.",
-        type: "success"
+  const record = workflow.data;
+  const definition = record?.definition ?? undefined;
+
+  async function trigger() {
+    setBusy(true);
+    try {
+      const created = await api.post<{ execution_id?: string; id?: string }>(
+        `/workflows/${id}/trigger`,
+        {},
+      );
+      const executionId = created.execution_id ?? created.id;
+      toast.success("Workflow triggered", {
+        label: "Open execution",
+        onClick: () => window.location.assign(`/executions/${executionId}`),
       });
-    }, 800);
-  };
-
-  const headerActions = (
-    <div className="flex items-center space-x-2">
-      <Button variant="outline" size="sm" onClick={handleSave} disabled={isSaving}>
-        <Save className="mr-2 h-4 w-4" /> {isSaving ? "Saving..." : "Save Draft"}
-      </Button>
-      <Button variant="default" size="sm" className="bg-indigo-600 hover:bg-indigo-700 text-white">
-        <PlayCircle className="mr-2 h-4 w-4" /> Trigger Workflow
-      </Button>
-      <Button variant="ghost" size="icon">
-        <Settings className="h-4 w-4" />
-      </Button>
-    </div>
-  );
-
-  const titleComponent = (
-    <div className="flex items-center gap-3">
-      <span>End-of-Month Settlement</span>
-      <Badge variant="outline" className="text-green-500 bg-green-500/10 border-green-500/20">
-        Active
-      </Badge>
-    </div>
-  );
+      executions.reload();
+    } catch (error) {
+      toast.error("Could not trigger", error instanceof Error ? error.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
-    <ResourceShell
-      title={titleComponent}
-      subtitle={`Workflow ID: ${id} • Maintained by Finance Team`}
-      actions={headerActions}
-      breadcrumbs={[
-        { label: "Workflows", href: "/workflows" },
-        { label: id },
-      ]}
-      tabs={[
-        { id: "designer", label: "Designer" },
-        { id: "executions", label: "Executions" },
-        { id: "triggers", label: "Triggers" },
-        { id: "settings", label: "Settings" },
-      ]}
-      defaultTab="designer"
+    <AsyncBoundary
+      state={workflow.state}
+      error={workflow.error}
+      forbidden={workflow.forbidden}
+      empty={false}
+      onRetry={workflow.reload}
+      loadingLabel="Loading workflow"
     >
-      <div className="h-[70vh] w-full border rounded-xl overflow-hidden bg-background relative shadow-sm">
-        <div className="absolute top-4 left-4 z-10 bg-card/80 backdrop-blur-sm p-2 rounded-lg border shadow-sm flex flex-col gap-2">
-          <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">Toolbox</div>
-          <Button variant="outline" size="sm" className="justify-start"><Network className="w-4 h-4 mr-2" /> Add Job Node</Button>
-          <Button variant="outline" size="sm" className="justify-start"><Network className="w-4 h-4 mr-2" /> Add Sub-Workflow</Button>
+      {record ? (
+        <div className="flex flex-col gap-4 p-6">
+          <header className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <Link
+                href="/workflows"
+                className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <ArrowLeft className="size-3" aria-hidden />
+                All workflows
+              </Link>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-lg font-semibold">{record.name}</h1>
+                <StatusBadge status={record.status} />
+              </div>
+              {record.key ? (
+                <p className="mt-1 font-mono text-xs text-muted-foreground">
+                  {record.key}
+                </p>
+              ) : null}
+              {record.description ? (
+                <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+                  {record.description}
+                </p>
+              ) : null}
+            </div>
+
+            <Button
+              size="sm"
+              disabled={busy || record.status !== "ACTIVE"}
+              onClick={trigger}
+              title={
+                record.status !== "ACTIVE"
+                  ? "Only an active workflow can be triggered"
+                  : undefined
+              }
+            >
+              <Play className="mr-1 size-3.5" aria-hidden />
+              {busy ? "Triggering…" : "Trigger"}
+            </Button>
+          </header>
+
+          {/* The stored definition, editable and validated (UI.md section 23). */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Designer</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {definition?.nodes?.length ? (
+                <WorkflowDesigner
+                  workflowId={id}
+                  definition={{
+                    nodes: definition.nodes,
+                    edges: definition.edges ?? [],
+                  }}
+                />
+              ) : (
+                <EmptyState
+                  title="No published definition"
+                  description="This workflow has no version yet, so there is nothing to edit."
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Versions</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {versions.rows.length === 0 ? (
+                  <EmptyState title="No versions" description="Nothing published yet." />
+                ) : (
+                  <ul className="flex flex-col gap-1">
+                    {versions.rows.map((version) => (
+                      <li
+                        key={version.id}
+                        className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                      >
+                        <Badge variant="secondary" className="text-[10px]">
+                          v{version.version}
+                        </Badge>
+                        <span className="text-muted-foreground">
+                          {formatTimestamp(version.created_at)}
+                        </span>
+                        {version.published_at ? (
+                          <span className="ml-auto text-[11px] text-emerald-600 dark:text-emerald-400">
+                            published
+                          </span>
+                        ) : (
+                          <span className="ml-auto text-[11px] text-muted-foreground">
+                            draft
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Recent executions</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {executions.state === "loading" ? (
+                  <p className="py-3 text-center text-xs text-muted-foreground">
+                    Loading…
+                  </p>
+                ) : executions.rows.length === 0 ? (
+                  <EmptyState
+                    title="No executions yet"
+                    description="Trigger this workflow to see its runs here."
+                  />
+                ) : (
+                  <ul className="flex flex-col gap-1">
+                    {executions.rows.map((execution) => (
+                      <li key={execution.id}>
+                        <Link
+                          href={`/executions/${execution.id}`}
+                          className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                        >
+                          <StatusBadge status={execution.status} />
+                          <span className="ml-auto text-[11px] text-muted-foreground">
+                            {formatRelative(execution.created_at)}
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </div>
-        
-        <ReactFlow 
-          nodes={nodes} 
-          edges={edges} 
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          fitView
-          className="bg-muted/10"
-        >
-          <Background color="#ccc" gap={16} />
-          <Controls />
-        </ReactFlow>
-      </div>
-    </ResourceShell>
+      ) : (
+        <EmptyState
+          title="Workflow not found"
+          description="It may have been deleted, or it belongs to another tenant."
+        />
+      )}
+    </AsyncBoundary>
   );
 }

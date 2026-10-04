@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use crate::id::{ExecutionId, JobId, JobVersionId, TenantId, WorkerId};
 use crate::error::{DomainError, ErrorClass};
+use crate::id::{ExecutionId, JobId, JobVersionId, TenantId, WorkerId};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Execution lifecycle states from spec 02.5.
@@ -315,11 +315,17 @@ mod tests {
 
         exec.transition_to(ExecutionStatus::Running).unwrap();
         assert_eq!(exec.status, ExecutionStatus::Running);
-        assert!(exec.started_at.is_some(), "started_at must be stamped on Running");
+        assert!(
+            exec.started_at.is_some(),
+            "started_at must be stamped on Running"
+        );
 
         exec.transition_to(ExecutionStatus::Succeeded).unwrap();
         assert_eq!(exec.status, ExecutionStatus::Succeeded);
-        assert!(exec.ended_at.is_some(), "ended_at must be stamped when terminal");
+        assert!(
+            exec.ended_at.is_some(),
+            "ended_at must be stamped when terminal"
+        );
     }
 
     #[test]
@@ -338,7 +344,11 @@ mod tests {
         assert!(exec.transition_to(ExecutionStatus::Succeeded).is_err());
         // Cannot skip straight to running.
         assert!(exec.transition_to(ExecutionStatus::Running).is_err());
-        assert_eq!(exec.status, ExecutionStatus::Queued, "state must not change");
+        assert_eq!(
+            exec.status,
+            ExecutionStatus::Queued,
+            "state must not change"
+        );
     }
 
     #[test]
@@ -382,7 +392,9 @@ mod tests {
         // Permitted exit 1: schedule a retry.
         let mut failed = sample();
         failed.status = ExecutionStatus::Failed;
-        assert!(failed.transition_to(ExecutionStatus::RetryScheduled).is_ok());
+        assert!(failed
+            .transition_to(ExecutionStatus::RetryScheduled)
+            .is_ok());
 
         // Permitted exit 2: dead-letter directly (a separate execution, since
         // the first has already moved on).
@@ -474,7 +486,8 @@ mod tests {
         ] {
             let mut exec = sample();
             exec.status = from;
-            exec.transition_to(ExecutionStatus::CancelRequested).unwrap();
+            exec.transition_to(ExecutionStatus::CancelRequested)
+                .unwrap();
             exec.transition_to(ExecutionStatus::Cancelled).unwrap();
             assert_eq!(exec.status, ExecutionStatus::Cancelled);
         }
@@ -484,12 +497,11 @@ mod tests {
     #[test]
     fn cancelled_execution_cannot_be_retried() {
         let mut exec = sample();
-        exec.transition_to(ExecutionStatus::CancelRequested).unwrap();
+        exec.transition_to(ExecutionStatus::CancelRequested)
+            .unwrap();
         exec.transition_to(ExecutionStatus::Cancelled).unwrap();
 
-        assert!(exec
-            .transition_to(ExecutionStatus::RetryScheduled)
-            .is_err());
+        assert!(exec.transition_to(ExecutionStatus::RetryScheduled).is_err());
         assert!(exec.transition_to(ExecutionStatus::Queued).is_err());
     }
 

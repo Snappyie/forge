@@ -13,7 +13,12 @@ import { Archive, Loader2, Play, Plus, RefreshCw, Search } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { useQuery } from "@/lib/useQuery";
+import { useList } from "@/lib/useQuery";
+import { cn } from "cn";
+import { BulkActions } from "@/components/ui/bulk-actions";
+import { ImportExport } from "@/components/ui/import-export";
+import { Checkbox } from "@/components/ui/checkbox";
+import { compare, useTablePrefs } from "@/lib/tablePrefs";
 import {
   formatRelative,
   formatTimestamp,
@@ -55,10 +60,12 @@ export default function JobsPage() {
   const { session } = useAuth();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("ALL");
+  const [selected, setSelected] = useState<string[]>([]);
+  const { prefs, toggleSort, setDensity } = useTablePrefs("jobs");
 
-  const query = useQuery<{ data: Job[] }>("/jobs");
+  const query = useList<Job>("/jobs");
   const jobs = useMemo(() => {
-    const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+    const rows = query.rows;
     return rows.filter((job) => {
       if (status !== "ALL" && job.status !== status) return false;
       if (!search.trim()) return true;
@@ -72,6 +79,17 @@ export default function JobsPage() {
 
   // A filter that matches nothing is an empty result, not an empty collection.
   const empty = query.state === "ready" && jobs.length === 0;
+  const sorted = useMemo(() => {
+    const copy = [...jobs];
+    copy.sort((a, b) => {
+      const record = a as unknown as Record<string, unknown>;
+      const other = b as unknown as Record<string, unknown>;
+      const result = compare(record[prefs.sortKey], other[prefs.sortKey]);
+      return prefs.sortDirection === "asc" ? result : -result;
+    });
+    return copy;
+  }, [jobs, prefs.sortKey, prefs.sortDirection]);
+
   const filtering = search.trim().length > 0 || status !== "ALL";
 
   return (
@@ -122,7 +140,38 @@ export default function JobsPage() {
             <SelectItem value="ARCHIVED">Archived</SelectItem>
           </SelectContent>
         </Select>
+
+        {/* UI.md section 5: density is a persistent preference. */}
+        <div className="flex rounded-md border border-border">
+          {(["compact", "comfortable"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => setDensity(option)}
+              aria-pressed={prefs.density === option}
+              aria-label={`${option} density`}
+              className={cn(
+                "px-2 py-1 text-[11px] capitalize",
+                prefs.density === option
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent/50",
+              )}
+            >
+              {option === "compact" ? "Dense" : "Roomy"}
+            </button>
+          ))}
+        </div>
       </div>
+
+      <ImportExport onImported={query.reload} />
+
+      <BulkActions
+        selected={selected}
+        onDone={() => {
+          setSelected([]);
+          query.reload();
+        }}
+      />
 
       <div className="rounded-lg border border-border">
         <AsyncBoundary
@@ -142,17 +191,64 @@ export default function JobsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Priority</TableHead>
-                <TableHead>Version</TableHead>
-                <TableHead>Updated</TableHead>
+                <TableHead className="w-8">
+                  <Checkbox
+                    aria-label="Select all listed jobs"
+                    checked={
+                      sorted.length > 0 && selected.length === sorted.length
+                    }
+                    onCheckedChange={(checked) =>
+                      setSelected(checked ? sorted.map((j) => j.id) : [])
+                    }
+                  />
+                </TableHead>
+                {(
+                  [
+                    ["name", "Name"],
+                    ["status", "Status"],
+                    ["priority", "Priority"],
+                    ["current_version_id", "Version"],
+                    ["updated_at", "Updated"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <TableHead key={key}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSort(key)}
+                      aria-label={`Sort by ${label}`}
+                      className="flex items-center gap-1 hover:text-foreground"
+                    >
+                      {label}
+                      {prefs.sortKey === key ? (
+                        <span aria-hidden>
+                          {prefs.sortDirection === "asc" ? "▲" : "▼"}
+                        </span>
+                      ) : null}
+                    </button>
+                  </TableHead>
+                ))}
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {jobs.map((job) => (
-                <TableRow key={job.id}>
+              {sorted.map((job) => (
+                <TableRow
+                  key={job.id}
+                  className={prefs.density === "compact" ? "h-8" : undefined}
+                >
+                  <TableCell>
+                    <Checkbox
+                      aria-label={`Select ${job.name}`}
+                      checked={selected.includes(job.id)}
+                      onCheckedChange={(checked) =>
+                        setSelected((current) =>
+                          checked
+                            ? [...current, job.id]
+                            : current.filter((id) => id !== job.id),
+                        )
+                      }
+                    />
+                  </TableCell>
                   <TableCell>
                     <Link
                       href={`/jobs/${job.id}`}

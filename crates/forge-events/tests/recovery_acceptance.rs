@@ -55,7 +55,11 @@ impl TestDb {
         let (server, _) = base.rsplit_once('/').unwrap_or((base.as_str(), ""));
         let admin_url = format!("{}/postgres", server.trim_end_matches('/'));
 
-        let admin = match PgPoolOptions::new().max_connections(1).connect(&admin_url).await {
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping recovery tests: cannot connect ({e})");
@@ -90,7 +94,11 @@ impl TestDb {
             eprintln!("skipping recovery tests: migrations failed ({e})");
             return None;
         }
-        Some(TestDb { pool, admin_url, db_name })
+        Some(TestDb {
+            pool,
+            admin_url,
+            db_name,
+        })
     }
 }
 
@@ -334,7 +342,10 @@ async fn at_rec_004_a_restored_database_is_usable() {
         }
 
         // And the restored data is readable through the normal path.
-        assert!(ExecutionRepository::new(&pool).get(f.tenant, id).await.is_ok());
+        assert!(ExecutionRepository::new(&pool)
+            .get(f.tenant, id)
+            .await
+            .is_ok());
     })
     .await;
 }
@@ -359,7 +370,10 @@ async fn recovery_refuses_a_completion_from_the_dead_worker() {
             .unwrap();
 
         let id = queued(&pool, &f).await;
-        executions.claim_next(f.tenant, None, dead.id).await.unwrap();
+        executions
+            .claim_next(f.tenant, None, dead.id)
+            .await
+            .unwrap();
         let stale = leases
             .acquire(f.tenant, id, dead.id, None, 20)
             .await
@@ -369,11 +383,12 @@ async fn recovery_refuses_a_completion_from_the_dead_worker() {
             .execute(&pool)
             .await
             .unwrap();
-        LeaseReaper::new(&pool)
-            .reap(chrono::Utc::now(), 100)
-            .await;
+        LeaseReaper::new(&pool).reap(chrono::Utc::now(), 100).await;
 
-        executions.claim_next(f.tenant, None, live.id).await.unwrap();
+        executions
+            .claim_next(f.tenant, None, live.id)
+            .await
+            .unwrap();
         let fresh = leases
             .acquire(f.tenant, id, live.id, None, 60)
             .await
@@ -478,7 +493,10 @@ async fn correlation_id_survives_recovery() {
         let before = executions.get(f.tenant, id).await.unwrap();
         let correlation = before.correlation_id.clone().expect("a correlation id");
 
-        executions.claim_next(f.tenant, None, worker.id).await.unwrap();
+        executions
+            .claim_next(f.tenant, None, worker.id)
+            .await
+            .unwrap();
         leases
             .acquire(f.tenant, id, worker.id, None, 20)
             .await
@@ -487,9 +505,7 @@ async fn correlation_id_survives_recovery() {
             .execute(&pool)
             .await
             .unwrap();
-        LeaseReaper::new(&pool)
-            .reap(chrono::Utc::now(), 100)
-            .await;
+        LeaseReaper::new(&pool).reap(chrono::Utc::now(), 100).await;
 
         let after = executions.get(f.tenant, id).await.unwrap();
         assert_eq!(
@@ -516,7 +532,10 @@ async fn a_recovery_writes_an_outbox_event() {
             .await
             .unwrap();
         let id = queued(&pool, &f).await;
-        executions.claim_next(f.tenant, None, worker.id).await.unwrap();
+        executions
+            .claim_next(f.tenant, None, worker.id)
+            .await
+            .unwrap();
         leases
             .acquire(f.tenant, id, worker.id, None, 20)
             .await
@@ -526,9 +545,7 @@ async fn a_recovery_writes_an_outbox_event() {
             .execute(&pool)
             .await
             .unwrap();
-        LeaseReaper::new(&pool)
-            .reap(chrono::Utc::now(), 100)
-            .await;
+        LeaseReaper::new(&pool).reap(chrono::Utc::now(), 100).await;
 
         // The attempt is preserved with its classification.
         let rows: Vec<(String,)> =

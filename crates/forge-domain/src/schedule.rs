@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
 
@@ -25,7 +25,9 @@ pub struct CatchUpPolicy {
 
 impl Default for CatchUpPolicy {
     fn default() -> Self {
-        Self { max_occurrences: 100 }
+        Self {
+            max_occurrences: 100,
+        }
     }
 }
 
@@ -133,21 +135,19 @@ impl Schedule {
                     ));
                 }
             }
-            ScheduleType::Interval => {
-                match self.interval {
-                    None => {
-                        return Err(DomainError::ValidationError(
-                            "an interval schedule requires an interval".to_string(),
-                        ))
-                    }
-                    Some(i) if i <= Duration::zero() => {
-                        return Err(DomainError::ValidationError(
-                            "an interval schedule requires a positive interval".to_string(),
-                        ))
-                    }
-                    Some(_) => {}
+            ScheduleType::Interval => match self.interval {
+                None => {
+                    return Err(DomainError::ValidationError(
+                        "an interval schedule requires an interval".to_string(),
+                    ))
                 }
-            }
+                Some(i) if i <= Duration::zero() => {
+                    return Err(DomainError::ValidationError(
+                        "an interval schedule requires a positive interval".to_string(),
+                    ))
+                }
+                Some(_) => {}
+            },
         }
         Ok(())
     }
@@ -198,9 +198,7 @@ impl Schedule {
                     ScheduleType::Interval => self.interval.unwrap_or(Duration::minutes(5)),
                     // Cron density is approximated by the catch-up ceiling
                     // itself; the scheduler supplies exact stepping for cron.
-                    ScheduleType::Cron | ScheduleType::OneTime => {
-                        Duration::minutes(1)
-                    }
+                    ScheduleType::Cron | ScheduleType::OneTime => Duration::minutes(1),
                 };
                 let ceiling = self.catch_up_policy.max_occurrences.max(1) as usize;
 
@@ -336,9 +334,10 @@ mod tests {
 
         assert_eq!(plan.occurrences.len(), 5);
         assert!(!plan.skipped.is_empty());
-        assert!(plan.skipped.iter().all(|(t, r)| {
-            *r == SkipReason::CatchUpLimit && *t > now - Duration::minutes(30)
-        }));
+        assert!(plan
+            .skipped
+            .iter()
+            .all(|(t, r)| { *r == SkipReason::CatchUpLimit && *t > now - Duration::minutes(30) }));
     }
 
     #[test]

@@ -1,15 +1,22 @@
+pub mod alerts;
 pub mod auth_routes;
+pub mod bulk;
 pub mod envelope;
 pub mod executions;
 pub mod extract;
 pub mod idempotency;
+pub mod insights;
 pub mod jobs;
 pub mod middleware;
 pub mod openapi;
+pub mod ops;
+pub mod parity;
 pub mod router;
 pub mod schedules;
+pub mod search;
 pub mod system;
 pub mod workers;
+pub mod workflows;
 
 pub use envelope::{
     ApiError, ApiErrorDetail, ApiErrorResponse, ApiResponse, ListResponse, PageInfo,

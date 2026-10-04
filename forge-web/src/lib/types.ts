@@ -163,6 +163,12 @@ export interface Queue {
   name: string;
   max_concurrency: number | null;
   paused?: boolean;
+  /** Executions waiting for a worker (UI.md 27). */
+  depth?: number;
+  /** Executions currently dispatched or running. */
+  running?: number;
+  /** When the oldest waiting execution was created, if any. */
+  oldest_queued_at?: string | null;
 }
 
 export interface ApiKey {

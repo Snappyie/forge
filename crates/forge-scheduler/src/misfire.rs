@@ -119,7 +119,8 @@ pub fn plan_occurrences(
 
             for candidate in candidates.iter().take(ceiling) {
                 if already_materialised.contains(candidate) {
-                    plan.skipped.push((*candidate, SkipReason::AlreadyMaterialised));
+                    plan.skipped
+                        .push((*candidate, SkipReason::AlreadyMaterialised));
                 } else {
                     plan.fire.push(*candidate);
                 }
@@ -193,7 +194,10 @@ mod tests {
             default_catch_up_limit(),
             &[],
         );
-        assert!(plan.is_empty(), "a clock that moved back must not fire future work");
+        assert!(
+            plan.is_empty(),
+            "a clock that moved back must not fire future work"
+        );
     }
 
     // AT-SCH-009: catch-up obeys the maximum limit.
@@ -211,7 +215,9 @@ mod tests {
         assert_eq!(plan.fire.len(), 3);
         assert_eq!(plan.fire[0], at("2026-10-03T00:00:00Z"));
         assert!(
-            plan.skipped.iter().any(|(_, r)| *r == SkipReason::CatchUpLimit),
+            plan.skipped
+                .iter()
+                .any(|(_, r)| *r == SkipReason::CatchUpLimit),
             "occurrences beyond the ceiling must be reported"
         );
     }
@@ -243,12 +249,13 @@ mod tests {
             &[at("2026-10-03T01:00:00Z")],
         );
         // 00:00, 01:00 (existing), 02:00.
-        assert_eq!(plan.fire, vec![at("2026-10-03T00:00:00Z"), at("2026-10-03T02:00:00Z")]);
-        assert!(plan
-            .skipped
-            .iter()
-            .any(|(t, r)| *t == at("2026-10-03T01:00:00Z")
-                && *r == SkipReason::AlreadyMaterialised));
+        assert_eq!(
+            plan.fire,
+            vec![at("2026-10-03T00:00:00Z"), at("2026-10-03T02:00:00Z")]
+        );
+        assert!(plan.skipped.iter().any(
+            |(t, r)| *t == at("2026-10-03T01:00:00Z") && *r == SkipReason::AlreadyMaterialised
+        ));
     }
 
     #[test]
@@ -302,7 +309,10 @@ mod tests {
 
     #[test]
     fn skip_reasons_render_for_the_operator() {
-        assert_eq!(SkipReason::CatchUpLimit.to_string(), "beyond the catch-up limit");
+        assert_eq!(
+            SkipReason::CatchUpLimit.to_string(),
+            "beyond the catch-up limit"
+        );
         assert_eq!(
             SkipReason::AlreadyMaterialised.to_string(),
             "already materialised"

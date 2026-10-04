@@ -62,8 +62,10 @@ pub async fn register(
         // Spec 11: registration must not reveal that an address is already in
         // use, so this reads as a conflict on the address rather than an
         // invitation to try another one.
-        return Err(ApiError::conflict("an account with that email already exists")
-            .with_detail("email", "already registered"));
+        return Err(
+            ApiError::conflict("an account with that email already exists")
+                .with_detail("email", "already registered"),
+        );
     }
 
     sqlx::query(
@@ -94,10 +96,7 @@ pub async fn register(
 }
 
 /// Resolves or creates the tenant a new user belongs to.
-async fn ensure_tenant(
-    state: &AppState,
-    tenant_name: Option<&str>,
-) -> Result<TenantId, ApiError> {
+async fn ensure_tenant(state: &AppState, tenant_name: Option<&str>) -> Result<TenantId, ApiError> {
     // A single-tenant deployment reuses the existing tenant rather than
     // fragmenting data across tenants created by successive sign-ups.
     let existing: Option<(Uuid,)> =
@@ -294,19 +293,14 @@ async fn issue_session(
     })
 }
 
-async fn role_for(
-    state: &AppState,
-    user_id: Uuid,
-    tenant: TenantId,
-) -> Result<Role, ApiError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM tenant_memberships WHERE user_id = $1 AND tenant_id = $2",
-    )
-    .bind(user_id)
-    .bind(tenant.into_uuid())
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(ApiError::from)?;
+async fn role_for(state: &AppState, user_id: Uuid, tenant: TenantId) -> Result<Role, ApiError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT role FROM tenant_memberships WHERE user_id = $1 AND tenant_id = $2")
+            .bind(user_id)
+            .bind(tenant.into_uuid())
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
 
     row.and_then(|(raw,)| Role::parse(&raw))
         .ok_or_else(|| ApiError::forbidden("this account has no role in the tenant"))
@@ -404,8 +398,9 @@ pub async fn create_user(
 
     let email = body.email.trim().to_ascii_lowercase();
     if !valid_email(&email) {
-        return Err(ApiError::validation("email must be a valid address")
-            .with_detail("email", "invalid"));
+        return Err(
+            ApiError::validation("email must be a valid address").with_detail("email", "invalid")
+        );
     }
     forge_auth::check_password_strength(&body.password)?;
 
@@ -438,19 +433,19 @@ pub async fn create_user(
     .map_err(ApiError::from)?;
 
     if inserted.rows_affected() == 0 {
-        return Err(ApiError::conflict("an account with that email already exists")
-            .with_detail("email", "already registered"));
+        return Err(
+            ApiError::conflict("an account with that email already exists")
+                .with_detail("email", "already registered"),
+        );
     }
 
-    sqlx::query(
-        "INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, $3)",
-    )
-    .bind(user_id)
-    .bind(auth.tenant_id.into_uuid())
-    .bind(role.as_str())
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::from)?;
+    sqlx::query("INSERT INTO tenant_memberships (user_id, tenant_id, role) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(auth.tenant_id.into_uuid())
+        .bind(role.as_str())
+        .execute(&state.pool)
+        .await
+        .map_err(ApiError::from)?;
 
     Ok((
         StatusCode::CREATED,
@@ -487,7 +482,8 @@ pub async fn update_user(
 
     if let Some(raw) = &body.role {
         let role = Role::parse(raw).ok_or_else(|| {
-            ApiError::validation(format!("`{raw}` is not a valid role")).with_detail("role", "unknown")
+            ApiError::validation(format!("`{raw}` is not a valid role"))
+                .with_detail("role", "unknown")
         })?;
         if role == Role::Owner && !auth.can("tenants:delete") {
             return Err(ApiError::forbidden("only an owner may grant ownership"));
@@ -566,7 +562,11 @@ mod tests {
 
     #[test]
     fn a_valid_email_is_accepted() {
-        for good in ["a@b.com", "first.last@example.co.uk", "x+tag@sub.domain.org"] {
+        for good in [
+            "a@b.com",
+            "first.last@example.co.uk",
+            "x+tag@sub.domain.org",
+        ] {
             assert!(valid_email(good), "{good} should be valid");
         }
     }

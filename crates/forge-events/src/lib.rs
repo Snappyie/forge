@@ -109,9 +109,9 @@ pub fn execution_event(
         ExecutionStatus::DeadLettered => event_type::EXECUTION_DEAD_LETTERED,
         // Dispatched, RetryScheduled and TimedOut are internal progress, not
         // externally meaningful state changes.
-        ExecutionStatus::Dispatched | ExecutionStatus::RetryScheduled | ExecutionStatus::TimedOut => {
-            event_type::EXECUTION_STARTED
-        }
+        ExecutionStatus::Dispatched
+        | ExecutionStatus::RetryScheduled
+        | ExecutionStatus::TimedOut => event_type::EXECUTION_STARTED,
     };
 
     DomainEvent::new(event_type, "execution", execution_id, Some(tenant_id))
@@ -471,12 +471,7 @@ mod tests {
         );
         assert_eq!(manual.payload["trigger_source"], "MANUAL");
 
-        let scheduled = trigger_event(
-            tenant(),
-            Uuid::new_v4(),
-            TriggerSource::Schedule,
-            None,
-        );
+        let scheduled = trigger_event(tenant(), Uuid::new_v4(), TriggerSource::Schedule, None);
         assert_eq!(scheduled.payload["trigger_source"], "SCHEDULE");
     }
 

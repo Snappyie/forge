@@ -44,7 +44,10 @@ where
 }
 
 /// Parses a `FORGE_WORKER_LABELS` / label-map style value: `k=v,k2=v2`.
-fn parse_labels(key: &'static str, raw: &str) -> Result<std::collections::BTreeMap<String, String>> {
+fn parse_labels(
+    key: &'static str,
+    raw: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
     let mut out = std::collections::BTreeMap::new();
     for pair in raw.split(',') {
         let pair = pair.trim();
@@ -121,13 +124,17 @@ impl ServerConfig {
         let auth_session_secret = env_var("FORGE_AUTH_SESSION_SECRET").ok_or(
             ConfigError::Missing("FORGE_AUTH_SESSION_SECRET (required; the server refuses to start without a session signing secret)"),
         )?;
-        let api_key_hashing_secret = env_var("FORGE_API_KEY_HASHING_SECRET").ok_or(
-            ConfigError::Missing("FORGE_API_KEY_HASHING_SECRET (required; API keys are only ever stored hashed)"),
-        )?;
+        let api_key_hashing_secret =
+            env_var("FORGE_API_KEY_HASHING_SECRET").ok_or(ConfigError::Missing(
+                "FORGE_API_KEY_HASHING_SECRET (required; API keys are only ever stored hashed)",
+            ))?;
 
         let default_timezone = get_or("FORGE_DEFAULT_TIMEZONE", "UTC");
 
-        let log_format = match get_or("FORGE_LOG_FORMAT", "text").to_ascii_lowercase().as_str() {
+        let log_format = match get_or("FORGE_LOG_FORMAT", "text")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "text" | "pretty" => LogFormat::Text,
             "json" => LogFormat::Json,
             other => {
@@ -323,10 +330,22 @@ mod tests {
     fn parses_suffixed_durations() {
         assert_eq!(parse_duration("K", "30").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration("K", "5s").unwrap(), Duration::from_secs(5));
-        assert_eq!(parse_duration("K", "10m").unwrap(), Duration::from_secs(600));
-        assert_eq!(parse_duration("K", "2h").unwrap(), Duration::from_secs(7200));
-        assert_eq!(parse_duration("K", "7d").unwrap(), Duration::from_secs(604_800));
-        assert_eq!(parse_duration("K", "250ms").unwrap(), Duration::from_millis(250));
+        assert_eq!(
+            parse_duration("K", "10m").unwrap(),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            parse_duration("K", "2h").unwrap(),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(
+            parse_duration("K", "7d").unwrap(),
+            Duration::from_secs(604_800)
+        );
+        assert_eq!(
+            parse_duration("K", "250ms").unwrap(),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]
@@ -352,6 +371,9 @@ mod tests {
         // race with other tests mutating the process environment.
         let raw = "0";
         let parsed: u32 = raw.parse().unwrap();
-        assert_eq!(parsed, 0, "zero concurrency is caught in WorkerConfig::from_env");
+        assert_eq!(
+            parsed, 0,
+            "zero concurrency is caught in WorkerConfig::from_env"
+        );
     }
 }

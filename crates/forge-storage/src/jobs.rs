@@ -200,7 +200,7 @@ impl<'a> JobRepository<'a> {
 
         Ok(crate::error::Page::from_overfetch(rows, limit, |row| {
             crate::error::Cursor::new(row.created_at.to_rfc3339(), row.id)
-}))
+        }))
     }
 }
 
@@ -298,9 +298,7 @@ impl<'a> JobRepository<'a> {
             let parsed: JobStatus = current
                 .status
                 .parse::<JobStatus>()
-                .map_err(|e: forge_domain::DomainError| {
-                    StorageError::Validation(e.to_string())
-                })?;
+                .map_err(|e: forge_domain::DomainError| StorageError::Validation(e.to_string()))?;
             let mut job = forge_domain::Job {
                 id: forge_domain::JobId::from_uuid(current.id),
                 tenant_id: forge_domain::TenantId::from_uuid(current.tenant_id),
@@ -459,11 +457,7 @@ impl<'a> JobVersionRepository<'a> {
         .ok_or_else(|| StorageError::not_found("job version"))
     }
 
-    pub async fn list(
-        &self,
-        tenant_id: TenantId,
-        job_id: JobId,
-    ) -> Result<Vec<JobVersionRow>> {
+    pub async fn list(&self, tenant_id: TenantId, job_id: JobId) -> Result<Vec<JobVersionRow>> {
         sqlx::query_as::<_, JobVersionRow>(&format!(
             "SELECT {JOB_VERSION_COLUMNS} FROM job_versions
              WHERE job_id = $1 AND tenant_id = $2 ORDER BY version_number DESC"
@@ -923,11 +917,7 @@ impl<'a> ExecutionRepository<'a> {
     }
 
     /// Counts non-terminal executions for a scope, used by concurrency checks.
-    pub async fn count_active_for_job(
-        &self,
-        tenant_id: TenantId,
-        job_id: Uuid,
-    ) -> Result<i64> {
+    pub async fn count_active_for_job(&self, tenant_id: TenantId, job_id: Uuid) -> Result<i64> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM executions
              WHERE tenant_id = $1 AND job_id = $2
@@ -1005,8 +995,14 @@ impl<'a> ExecutionRepository<'a> {
         tenant_id: TenantId,
         execution_id: Uuid,
     ) -> Result<ExecutionRow> {
-        self.transition(tenant_id, execution_id, ExecutionStatus::CancelRequested, None, None)
-            .await
+        self.transition(
+            tenant_id,
+            execution_id,
+            ExecutionStatus::CancelRequested,
+            None,
+            None,
+        )
+        .await
     }
 }
 
@@ -1018,10 +1014,7 @@ fn build_domain_execution(row: &ExecutionRow) -> forge_domain::Execution {
         tenant_id: forge_domain::TenantId::from_uuid(row.tenant_id),
         job_id: forge_domain::JobId::from_uuid(row.job_id),
         job_version_id: forge_domain::JobVersionId::from_uuid(row.job_version_id),
-        status: row
-            .status
-            .parse()
-            .unwrap_or(ExecutionStatus::Queued),
+        status: row.status.parse().unwrap_or(ExecutionStatus::Queued),
         worker_id: row.worker_id.map(forge_domain::WorkerId::from_uuid),
         attempt_count: row.attempt_count.max(0) as u32,
         trigger_source: parse_trigger_source(&row.trigger_source),

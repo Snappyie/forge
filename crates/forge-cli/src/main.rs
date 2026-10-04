@@ -402,7 +402,10 @@ impl Render for HealthView {
         let mut t = Table::new(["CHECK", "STATUS"]);
         t.push(vec![
             "api".to_string(),
-            self.data["status"].as_str().unwrap_or("unknown").to_string(),
+            self.data["status"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
         ]);
         t
     }
@@ -533,9 +536,7 @@ pub fn read_password() -> Result<String> {
 pub fn query(params: &[(&str, Option<String>)]) -> String {
     let encoded: Vec<String> = params
         .iter()
-        .filter_map(|(key, value)| {
-            value.as_ref().map(|v| format!("{key}={}", urlencode(v)))
-        })
+        .filter_map(|(key, value)| value.as_ref().map(|v| format!("{key}={}", urlencode(v))))
         .collect();
     if encoded.is_empty() {
         String::new()
@@ -605,4 +606,3 @@ mod rpassword {
         }
     }
 }
-

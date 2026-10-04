@@ -62,7 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // receiver.
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-    let background = tokio::spawn({
+    // Typed explicitly: `Runtime::run` returns nothing, and the shutdown match
+    // below needs to know that.
+    let mut background: tokio::task::JoinHandle<()> = tokio::spawn({
         let config = Arc::clone(&config);
         let pool = pool.clone();
         let rx = shutdown_tx.subscribe();
@@ -83,7 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `into_make_service_with_connect_info` supplies the peer address the rate
     // limiter needs to key limits per client IP.
-    let mut api = tokio::spawn({
+    // Typed explicitly so the shutdown match below can name both handle types.
+    let mut api: tokio::task::JoinHandle<std::io::Result<()>> = tokio::spawn({
         let signal_tx = shutdown_tx.clone();
         async move {
             axum::serve(
@@ -99,32 +102,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut background = background;
+    // Whichever finishes first begins the shutdown.
+    //
+    // `select!` polls by mutable reference, so both handles survive it and the
+    // losing one can still be awaited. The `Result` is taken from the winner
+    // only, because a completed `JoinHandle` panics if awaited twice.
+    enum First {
+        Api(std::io::Result<()>),
+        Background(Result<(), tokio::task::JoinError>),
+    }
 
-    // Whichever finishes first begins the shutdown; the other is awaited so the
-    // process does not exit with work still in flight.
-    tokio::select! {
-        result = &mut api => {
-            match result {
-                Ok(Ok(())) => info!("API stopped"),
-                Ok(Err(e)) => error!(error = %e, "API failed"),
-                Err(e) => error!(error = %e, "API task panicked"),
-            }
-        }
-        result = &mut background => {
-            if let Err(e) = result {
-                error!(error = %e, "background runtime panicked");
-            }
+    let (first, pending_api) = tokio::select! {
+        result = &mut api => (First::Api(result.expect("the API task must not panic")), None),
+        result = &mut background => (
+            First::Background(result),
+            Some(api),
+        ),
+    };
+
+    match first {
+        First::Api(Ok(())) => info!("API stopped"),
+        First::Api(Err(e)) => error!(error = %e, "API failed"),
+        First::Background(Ok(())) => {
+            info!("background runtime stopped");
             warn!("background runtime exited; stopping the API");
+        }
+        First::Background(Err(e)) => {
+            error!(error = %e, "background runtime panicked");
         }
     }
 
-    // Both sides observe the same signal.
+    // Tell anything still running to stop.
     let _ = shutdown_tx.send(());
 
-    // Drain whatever is still running.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), api).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), background).await;
+    // Drain the API if the background task finished first.
+    if let Some(handle) = pending_api {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+    }
 
     info!("Forge stopped");
     Ok(())

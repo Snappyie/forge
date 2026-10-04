@@ -1,0 +1,59 @@
+# Schema migrations run once, before the server rolls out.
+#
+# `forge-server` applies migrations at startup, but a rolling update would let
+# several replicas migrate concurrently. This Job serialises the step so an
+# upgrade is a deliberate, observable action rather than a race.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: forge-migrate
+  namespace: forge-system
+  labels:
+    app.kubernetes.io/name: forge
+    app.kubernetes.io/component: migration
+spec:
+  # A migration that hangs should not block the release indefinitely.
+  backoffLimit: 3
+  # A superseded Job of the same name is replaced rather than duplicated.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: forge
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: forge/server:latest
+          # Starting the server is what applies migrations; the readiness probe
+          # below turns a failure into a failed Job.
+          args: []
+          envFrom:
+            - configMapRef:
+                name: forge-config
+            - secretRef:
+                name: forge-db-secret
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 2

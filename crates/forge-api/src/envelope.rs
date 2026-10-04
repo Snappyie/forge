@@ -58,11 +58,7 @@ pub struct ListResponse<T> {
 }
 
 impl<T: Serialize> ListResponse<T> {
-    pub fn new(
-        data: Vec<T>,
-        page: PageInfo,
-        request_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(data: Vec<T>, page: PageInfo, request_id: impl Into<String>) -> Self {
         Self {
             data,
             page,
@@ -253,8 +249,7 @@ impl From<forge_storage::StorageError> for ApiError {
             forge_storage::StorageError::Validation(message) => ApiError::validation(message),
             forge_storage::StorageError::TenantIsolation(message) => {
                 // Never leak that another tenant's resource exists.
-                ApiError::not_found("resource")
-                    .with_detail("tenant", message)
+                ApiError::not_found("resource").with_detail("tenant", message)
             }
             forge_storage::StorageError::InvalidCursor(message) => {
                 ApiError::validation(format!("invalid cursor: {message}"))
@@ -277,17 +272,16 @@ impl From<forge_domain::DomainError> for ApiError {
     fn from(err: forge_domain::DomainError) -> Self {
         use forge_domain::DomainError::*;
         match err {
-            InvalidStateTransition { from, to } => ApiError::conflict(format!(
-                "cannot move from {from} to {to}"
-            )),
-            ValidationError(message) | InvalidWorkflow(message) => {
-                ApiError::validation(message)
+            InvalidStateTransition { from, to } => {
+                ApiError::conflict(format!("cannot move from {from} to {to}"))
             }
+            ValidationError(message) | InvalidWorkflow(message) => ApiError::validation(message),
             ConcurrencyLimitExceeded(message) | RetryNotPermitted(message) => {
                 ApiError::conflict(message)
             }
-            TenantIsolation(message) => ApiError::not_found("resource")
-                .with_detail("tenant", message),
+            TenantIsolation(message) => {
+                ApiError::not_found("resource").with_detail("tenant", message)
+            }
         }
     }
 }
@@ -296,9 +290,9 @@ impl From<forge_auth::AuthError> for ApiError {
     fn from(err: forge_auth::AuthError) -> Self {
         use forge_auth::AuthError::*;
         match err {
-            InvalidToken | TokenExpired => ApiError::unauthenticated(
-                "the access token is invalid or has expired",
-            ),
+            InvalidToken | TokenExpired => {
+                ApiError::unauthenticated("the access token is invalid or has expired")
+            }
             InvalidCredentials => ApiError::unauthenticated("invalid email or password"),
             AccountDisabled => ApiError::forbidden("this account has been disabled"),
             PermissionDenied(permission) => {
@@ -405,7 +399,10 @@ mod tests {
     #[test]
     fn each_error_constructor_uses_its_spec_class() {
         assert_eq!(ApiError::validation("x").code, "VALIDATION_ERROR");
-        assert_eq!(ApiError::unauthenticated("x").code, "AUTHENTICATION_REQUIRED");
+        assert_eq!(
+            ApiError::unauthenticated("x").code,
+            "AUTHENTICATION_REQUIRED"
+        );
         assert_eq!(ApiError::forbidden("x").code, "AUTHORIZATION_DENIED");
         assert_eq!(ApiError::not_found("job").code, "NOT_FOUND");
         assert_eq!(ApiError::conflict("x").code, "CONFLICT");
@@ -417,13 +414,25 @@ mod tests {
     #[test]
     fn each_error_constructor_uses_its_spec_status() {
         assert_eq!(ApiError::validation("x").status, StatusCode::BAD_REQUEST);
-        assert_eq!(ApiError::unauthenticated("x").status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            ApiError::unauthenticated("x").status,
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(ApiError::forbidden("x").status, StatusCode::FORBIDDEN);
         assert_eq!(ApiError::not_found("x").status, StatusCode::NOT_FOUND);
         assert_eq!(ApiError::conflict("x").status, StatusCode::CONFLICT);
-        assert_eq!(ApiError::rate_limited("x").status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(ApiError::unavailable("x").status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(ApiError::internal().status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            ApiError::rate_limited("x").status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            ApiError::unavailable("x").status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            ApiError::internal().status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// Spec 01.22 invariant 12: no stack traces in production responses.
@@ -466,12 +475,10 @@ mod tests {
         let not_found: ApiError = forge_storage::StorageError::not_found("job").into();
         assert_eq!(not_found.status, StatusCode::NOT_FOUND);
 
-        let conflict: ApiError =
-            forge_storage::StorageError::Conflict("duplicate".into()).into();
+        let conflict: ApiError = forge_storage::StorageError::Conflict("duplicate".into()).into();
         assert_eq!(conflict.status, StatusCode::CONFLICT);
 
-        let invalid: ApiError =
-            forge_storage::StorageError::InvalidCursor("bad".into()).into();
+        let invalid: ApiError = forge_storage::StorageError::InvalidCursor("bad".into()).into();
         assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
     }
 
@@ -517,7 +524,11 @@ mod tests {
         assert_eq!(capped.effective_limit(), MAX_PAGE_LIMIT);
 
         let zero: PaginationQuery = serde_json::from_str(r#"{"limit": 0}"#).unwrap();
-        assert_eq!(zero.effective_limit(), 1, "a page must hold at least one row");
+        assert_eq!(
+            zero.effective_limit(),
+            1,
+            "a page must hold at least one row"
+        );
 
         let explicit: PaginationQuery = serde_json::from_str(r#"{"limit": 25}"#).unwrap();
         assert_eq!(explicit.effective_limit(), 25);

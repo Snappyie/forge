@@ -91,19 +91,15 @@ impl std::str::FromStr for ErrorClass {
     /// Accepts the spec 02.14 spelling, case-insensitively, so a client may send
     /// either `TIMEOUT` or `timeout`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s).ok_or_else(|| {
-            DomainError::ValidationError(format!("unknown error class: {s}"))
-        })
+        Self::parse(s)
+            .ok_or_else(|| DomainError::ValidationError(format!("unknown error class: {s}")))
     }
 }
 
 #[derive(Error, Debug, PartialEq)]
 pub enum DomainError {
     #[error("Invalid state transition: cannot transition from {from} to {to}")]
-    InvalidStateTransition {
-        from: String,
-        to: String,
-    },
+    InvalidStateTransition { from: String, to: String },
     #[error("Validation error: {0}")]
     ValidationError(String),
     /// A workflow graph is not a valid DAG (spec 02.11).

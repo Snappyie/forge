@@ -12,7 +12,7 @@ import { AlertTriangle, Eye, Pause, Play, RefreshCw } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { useQuery } from "@/lib/useQuery";
+import { useList } from "@/lib/useQuery";
 import {
   formatRelative,
   formatTimestamp,
@@ -40,10 +40,10 @@ import {
 
 export default function SchedulesPage() {
   const { session } = useAuth();
-  const query = useQuery<{ data: Schedule[] }>("/schedules?limit=100");
+  const query = useList<Schedule>("/schedules?limit=100");
   const [preview, setPreview] = useState<SchedulePreview | null>(null);
 
-  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const rows = query.rows;
   const canWrite = roleCan(session?.role, "schedules:write");
 
   return (

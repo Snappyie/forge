@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use forge_events::{
-    DomainEvent, InMemorySink, LogSink, OutboxPublisher, PublishStats, SinkError,
-};
+use forge_events::{DomainEvent, InMemorySink, LogSink, OutboxPublisher, PublishStats, SinkError};
 use forge_storage::OutboxRepository;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool};
@@ -48,7 +46,11 @@ impl TestDb {
         let (server, _) = base.rsplit_once('/').unwrap_or((base.as_str(), ""));
         let admin_url = format!("{}/postgres", server.trim_end_matches('/'));
 
-        let admin = match PgPoolOptions::new().max_connections(1).connect(&admin_url).await {
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping events integration tests: cannot connect ({e})");
@@ -84,7 +86,11 @@ impl TestDb {
             return None;
         }
 
-        Some(TestDb { pool, admin_url, db_name })
+        Some(TestDb {
+            pool,
+            admin_url,
+            db_name,
+        })
     }
 }
 
@@ -251,9 +257,7 @@ async fn the_batch_size_bounds_a_publish_pass() {
         assert_eq!(first.claimed, 2);
         assert_eq!(sink.len(), 2);
 
-        let second = OutboxPublisher::new(&pool, 100)
-            .publish_batch(&sink)
-            .await;
+        let second = OutboxPublisher::new(&pool, 100).publish_batch(&sink).await;
         assert_eq!(second.published, 3);
         assert_eq!(sink.len(), 5);
     })
@@ -302,9 +306,7 @@ async fn the_run_loop_stops_when_asked() {
 async fn publishing_nothing_is_a_no_op() {
     with_db!(|pool: PgPool| async move {
         let sink = InMemorySink::new();
-        let stats: PublishStats = OutboxPublisher::new(&pool, 100)
-            .publish_batch(&sink)
-            .await;
+        let stats: PublishStats = OutboxPublisher::new(&pool, 100).publish_batch(&sink).await;
         assert_eq!(stats.claimed, 0);
         assert_eq!(stats.published, 0);
         assert!(sink.is_empty());

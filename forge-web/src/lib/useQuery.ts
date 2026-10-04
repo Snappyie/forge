@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError } from "@/lib/api";
+import { ApiError, getList, type Paged } from "@/lib/api";
 import type { PageInfo } from "@/lib/api";
 
 export type LoadState = "loading" | "ready" | "error";
@@ -25,6 +25,69 @@ export interface QueryResult<T> {
   /** Whether the collection came back empty. */
   empty: boolean;
   reload: () => void;
+}
+
+/**
+ * Reads a list endpoint, returning its rows and page metadata.
+ *
+ * Prefer this over `useQuery` for collections: `getList` unwraps the response
+ * envelope once, so a page receives the array of rows rather than an object it
+ * might unwrap a second time.
+ */
+export function useList<T>(
+  path: string | null,
+  deps: unknown[] = [],
+): QueryResult<T[]> & { rows: T[]; page: PageInfo | null } {
+  const [payload, setPayload] = useState<Paged<T> | null>(null);
+  const [state, setState] = useState<LoadState>("loading");
+  const [error, setError] = useState<ApiError | null>(null);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    if (!path) {
+      setState("loading");
+      return;
+    }
+
+    const controller = new AbortController();
+    setState("loading");
+    setError(null);
+
+    (async () => {
+      try {
+        const result = await getList<T>(path, controller.signal);
+        if (controller.signal.aborted) return;
+        setPayload(result);
+        setState("ready");
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setError(
+          cause instanceof ApiError
+            ? cause
+            : new ApiError(0, "INTERNAL_ERROR", String(cause)),
+        );
+        setState("error");
+      }
+    })();
+
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, nonce, ...deps]);
+
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  const rows = payload?.rows ?? [];
+
+  return {
+    data: rows,
+    rows,
+    page: payload?.page ?? null,
+    state,
+    error,
+    forbidden: error?.isForbidden ?? false,
+    empty: state === "ready" && rows.length === 0,
+    reload,
+  };
 }
 
 /** Reads one resource or a page of them. */

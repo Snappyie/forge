@@ -1,61 +1,166 @@
 "use client";
 
-import { ResourceShell } from "@/components/ui/resource-shell";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
+/**
+ * Job comparison (UI.md section 43, environment comparison).
+ *
+ * Diffs two real jobs so a promotion between environments can be reviewed
+ * before it is applied.
+ */
 
-export default function EnvironmentComparePage() {
-  const comparison = [
-    { property: "Schedule", dev: "0 2 * * *", qa: "0 2 * * *", prod: "0 3 * * *", diff: true },
-    { property: "Retry Count", dev: "3", qa: "3", prod: "5", diff: true },
-    { property: "Timeout", dev: "30m", qa: "30m", prod: "60m", diff: true },
-    { property: "Workers", dev: "dev-pool", qa: "qa-pool", prod: "prod-pool", diff: true },
-    { property: "Timezone", dev: "UTC", qa: "UTC", prod: "UTC", diff: false },
-    { property: "Concurrency", dev: "1", qa: "1", prod: "1", diff: false },
-  ];
+import { useMemo, useState } from "react";
+import { ArrowRight } from "lucide-react";
+
+import { useQuery } from "@/lib/useQuery";
+import { formatTimestamp, type Job } from "@/lib/types";
+import { AsyncBoundary, EmptyState } from "@/components/states";
+import { StatusBadge } from "@/components/status-badge";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { cn } from "cn";
+
+interface Field {
+  label: string;
+  left: string;
+  right: string;
+}
+
+export default function CompareJobsPage() {
+  const [leftId, setLeftId] = useState("");
+  const [rightId, setRightId] = useState("");
+
+  const left = useQuery<Job>(leftId ? `/jobs/${leftId}` : null);
+  const right = useQuery<Job>(rightId ? `/jobs/${rightId}` : null);
+
+  const ready = left.state === "ready" && right.state === "ready";
+  const loading = (leftId && left.state === "loading") || (rightId && right.state === "loading");
+  const error = left.error ?? right.error;
+
+  const fields = useMemo<Field[]>(() => {
+    const a = left.data;
+    const b = right.data;
+    if (!a || !b) return [];
+    return [
+      { label: "Name", left: a.name, right: b.name },
+      { label: "Key", left: a.key ?? "—", right: b.key ?? "—" },
+      { label: "Status", left: a.status, right: b.status },
+      { label: "Priority", left: a.priority, right: b.priority },
+      { label: "Default queue", left: a.default_queue_id ?? "—", right: b.default_queue_id ?? "—" },
+      { label: "Current version", left: a.current_version_id ?? "—", right: b.current_version_id ?? "—" },
+      { label: "Description", left: a.description ?? "—", right: b.description ?? "—" },
+      { label: "Updated", left: formatTimestamp(a.updated_at), right: formatTimestamp(b.updated_at) },
+    ];
+  }, [left.data, right.data]);
+
+  const differences = fields.filter((f) => f.left !== f.right).length;
 
   return (
-    <ResourceShell
-      title="Environment Comparison"
-      subtitle="Job: nightly-settlement"
-      backUrl="/jobs"
-    >
-      <Card className="border-border/50 shadow-sm overflow-hidden">
-        <CardHeader className="bg-muted/30 border-b border-border/50">
-          <CardTitle className="text-lg">Configuration Differences</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/50 hover:bg-muted/50">
-                <TableHead className="w-[200px] font-semibold text-foreground">Configuration Property</TableHead>
-                <TableHead className="font-semibold text-indigo-600 dark:text-indigo-400">DEV</TableHead>
-                <TableHead className="font-semibold text-amber-600 dark:text-amber-400">QA</TableHead>
-                <TableHead className="font-semibold text-rose-600 dark:text-rose-400">PROD</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {comparison.map((row, i) => (
-                <TableRow key={i} className={row.diff ? "bg-muted/20" : ""}>
-                  <TableCell className="font-medium text-muted-foreground">{row.property}</TableCell>
-                  <TableCell className="font-mono text-sm">{row.dev}</TableCell>
-                  <TableCell className="font-mono text-sm">{row.qa}</TableCell>
-                  <TableCell>
-                    {row.diff ? (
-                      <Badge className="bg-rose-100 text-rose-700 hover:bg-rose-100 shadow-none border-none font-mono text-sm">
-                        {row.prod}
-                      </Badge>
-                    ) : (
-                      <span className="font-mono text-sm">{row.prod}</span>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-    </ResourceShell>
+    <div className="flex flex-col gap-4 p-6">
+      <header>
+        <h1 className="text-lg font-semibold">Compare jobs</h1>
+        <p className="text-xs text-muted-foreground">
+          Paste two job IDs to review differences before promoting a change.
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto_1fr] md:items-end">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="left-job">First job</Label>
+          <Input
+            id="left-job"
+            value={leftId}
+            onChange={(e) => setLeftId(e.target.value.trim())}
+            placeholder="job id"
+            className="font-mono text-xs"
+          />
+        </div>
+        <ArrowRight className="hidden size-4 text-muted-foreground md:block" aria-hidden />
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="right-job">Second job</Label>
+          <Input
+            id="right-job"
+            value={rightId}
+            onChange={(e) => setRightId(e.target.value.trim())}
+            placeholder="job id"
+            className="font-mono text-xs"
+          />
+        </div>
+      </div>
+
+      {!leftId || !rightId ? (
+        <EmptyState
+          title="Enter two job IDs"
+          description="Both must belong to a tenant you can read."
+        />
+      ) : (
+        <AsyncBoundary
+          state={loading ? "loading" : error ? "error" : "ready"}
+          error={error}
+          forbidden={left.forbidden || right.forbidden}
+          empty={false}
+          onRetry={() => {
+            left.reload();
+            right.reload();
+          }}
+          loadingLabel="Loading jobs"
+        >
+          {ready ? (
+            <Card>
+              <CardHeader className="flex-row items-center justify-between">
+                <CardTitle className="text-sm">
+                  {differences === 0
+                    ? "No differences"
+                    : `${differences} field${differences === 1 ? "" : "s"} differ`}
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <StatusBadge status={left.data!.status} />
+                  <StatusBadge status={right.data!.status} />
+                </div>
+              </CardHeader>
+              <CardContent>
+                <table className="w-full text-xs">
+                  <caption className="sr-only">Field-by-field comparison of two jobs</caption>
+                  <thead>
+                    <tr className="text-left text-muted-foreground">
+                      <th scope="col" className="py-1 pr-3 font-medium">Field</th>
+                      <th scope="col" className="py-1 pr-3 font-mono">{leftId.slice(0, 8)}</th>
+                      <th scope="col" className="py-1 font-mono">{rightId.slice(0, 8)}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fields.map((field) => {
+                      const differs = field.left !== field.right;
+                      return (
+                        <tr
+                          key={field.label}
+                          className={cn(
+                            "border-t border-border/60",
+                            differs && "bg-amber-500/5",
+                          )}
+                        >
+                          <th
+                            scope="row"
+                            className="py-1.5 pr-3 text-left font-normal text-muted-foreground"
+                          >
+                            {field.label}
+                            {differs ? <span className="sr-only"> (differs)</span> : null}
+                          </th>
+                          <td className={cn("py-1.5 pr-3", differs && "font-medium")}>
+                            {field.left}
+                          </td>
+                          <td className={cn("py-1.5", differs && "font-medium")}>
+                            {field.right}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          ) : null}
+        </AsyncBoundary>
+      )}
+    </div>
   );
 }

@@ -69,7 +69,10 @@ impl Table {
         S: AsRef<str>,
     {
         Self {
-            headers: headers.into_iter().map(|h| h.as_ref().to_string()).collect(),
+            headers: headers
+                .into_iter()
+                .map(|h| h.as_ref().to_string())
+                .collect(),
             rows: Vec::new(),
         }
     }
@@ -87,11 +90,7 @@ impl Table {
             return String::new();
         }
 
-        let mut widths: Vec<usize> = self
-            .headers
-            .iter()
-            .map(|h| h.chars().count())
-            .collect();
+        let mut widths: Vec<usize> = self.headers.iter().map(|h| h.chars().count()).collect();
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate() {
                 if i < widths.len() {
@@ -199,7 +198,6 @@ pub fn emit<T: Render>(value: &T, format: OutputFormat) -> String {
         }
     }
 }
-
 
 /// Prints an error to stderr, never stdout.
 pub fn print_error(message: &str) {
@@ -310,7 +308,12 @@ mod tests {
             }
         }
 
-        let yaml = emit(&Envelope { data: vec![Row { id: 7 }] }, OutputFormat::Yaml);
+        let yaml = emit(
+            &Envelope {
+                data: vec![Row { id: 7 }],
+            },
+            OutputFormat::Yaml,
+        );
         assert!(yaml.contains("id: 7"), "{yaml}");
     }
 

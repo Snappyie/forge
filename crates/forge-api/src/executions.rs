@@ -29,11 +29,10 @@ pub struct ListExecutionsQuery {
 fn parse_filter(query: &ListExecutionsQuery) -> Result<ExecutionFilter, ApiError> {
     let status = match query.status.as_deref() {
         None => None,
-        Some(raw) => Some(
-            raw.parse::<ExecutionStatus>()
-                .map_err(|_| ApiError::validation(format!("`{raw}` is not a valid status"))
-                    .with_detail("status", "unknown execution status"))?,
-        ),
+        Some(raw) => Some(raw.parse::<ExecutionStatus>().map_err(|_| {
+            ApiError::validation(format!("`{raw}` is not a valid status"))
+                .with_detail("status", "unknown execution status")
+        })?),
     };
     Ok(ExecutionFilter {
         job_id: query.job,
@@ -243,7 +242,7 @@ pub async fn logs(
         .get(auth.tenant_id, execution_id)
         .await?;
 
-    let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+    let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT stream, content, logged_at FROM execution_logs
          WHERE execution_id = $1 AND tenant_id = $2
          ORDER BY logged_at ASC",
@@ -336,9 +335,7 @@ pub async fn heartbeat(
     let lease = LeaseRepository::new(&state.pool)
         .active_for_execution(execution_id)
         .await?
-        .ok_or_else(|| {
-            ApiError::conflict("this execution has no active lease")
-        })?;
+        .ok_or_else(|| ApiError::conflict("this execution has no active lease"))?;
 
     if lease.id != body.lease_id {
         return Err(ApiError::conflict(
@@ -384,15 +381,19 @@ pub async fn complete(
             forge_executor::CompletionRejection::ExecutionTerminal => {
                 ApiError::conflict("the execution has already finished")
             }
-            other => ApiError::conflict(format!(
-                "the completion was rejected: {other:?}"
-            )),
+            other => ApiError::conflict(format!("the completion was rejected: {other:?}")),
         })?;
 
     let repo = ExecutionRepository::new(&state.pool);
     let row = if body.succeeded {
-        repo.transition(auth.tenant_id, execution_id, ExecutionStatus::Succeeded, None, None)
-            .await?
+        repo.transition(
+            auth.tenant_id,
+            execution_id,
+            ExecutionStatus::Succeeded,
+            None,
+            None,
+        )
+        .await?
     } else {
         let class = match body.error_class.as_deref() {
             None => ErrorClass::Permanent,
@@ -455,9 +456,11 @@ mod tests {
 
     #[test]
     fn a_status_filter_is_validated() {
-        let good: ListExecutionsQuery =
-            serde_json::from_str(r#"{"status":"RUNNING"}"#).unwrap();
-        assert_eq!(parse_filter(&good).unwrap().status, Some(ExecutionStatus::Running));
+        let good: ListExecutionsQuery = serde_json::from_str(r#"{"status":"RUNNING"}"#).unwrap();
+        assert_eq!(
+            parse_filter(&good).unwrap().status,
+            Some(ExecutionStatus::Running)
+        );
 
         let bad: ListExecutionsQuery =
             serde_json::from_str(r#"{"status":"NOT_A_STATUS"}"#).unwrap();
@@ -469,9 +472,18 @@ mod tests {
     #[test]
     fn every_status_string_is_recognised() {
         for status in [
-            "SCHEDULED", "QUEUED", "DISPATCHED", "RUNNING", "SUCCEEDED", "FAILED",
-            "TIMED_OUT", "CANCEL_REQUESTED", "CANCELLED", "RETRY_SCHEDULED",
-            "DEAD_LETTERED", "ABANDONED",
+            "SCHEDULED",
+            "QUEUED",
+            "DISPATCHED",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "TIMED_OUT",
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+            "RETRY_SCHEDULED",
+            "DEAD_LETTERED",
+            "ABANDONED",
         ] {
             assert!(is_known_status(status), "{status} must be accepted");
         }
@@ -482,10 +494,8 @@ mod tests {
     fn execution_filters_pass_through() {
         let job = Uuid::new_v4();
         let worker = Uuid::new_v4();
-        let query: ListExecutionsQuery = serde_json::from_str(&format!(
-            r#"{{"job":"{job}","worker":"{worker}"}}"#
-        ))
-        .unwrap();
+        let query: ListExecutionsQuery =
+            serde_json::from_str(&format!(r#"{{"job":"{job}","worker":"{worker}"}}"#)).unwrap();
 
         let filter = parse_filter(&query).unwrap();
         assert_eq!(filter.job_id, Some(job));

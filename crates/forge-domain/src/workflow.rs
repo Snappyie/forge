@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::error::DomainError;
 use crate::id::{JobId, TenantId};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use uuid::Uuid;
 
@@ -192,9 +192,7 @@ impl Workflow {
             visited += 1;
             if let Some(children) = adjacency.get(node) {
                 for child in children {
-                    let degree = in_degree
-                        .get_mut(child)
-                        .expect("child is a known node");
+                    let degree = in_degree.get_mut(child).expect("child is a known node");
                     *degree -= 1;
                     if *degree == 0 {
                         queue.push_back(child);
@@ -258,7 +256,9 @@ mod tests {
     fn job_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            node_type: NodeType::Job { job_id: JobId::new() },
+            node_type: NodeType::Job {
+                job_id: JobId::new(),
+            },
             name: id.to_string(),
         }
     }

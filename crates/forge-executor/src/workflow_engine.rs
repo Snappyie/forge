@@ -32,7 +32,9 @@ pub enum NodeState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SuspensionReason {
-    AwaitingApproval { required_role: String },
+    AwaitingApproval {
+        required_role: String,
+    },
     Delay,
     /// A map node waiting for its fan-out instances to finish.
     AwaitingFanOut,
@@ -43,10 +45,7 @@ pub enum SuspensionReason {
 #[serde(tag = "action", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowAction {
     /// Dispatch the referenced job for this node.
-    DispatchJob {
-        node_id: String,
-        job_id: uuid::Uuid,
-    },
+    DispatchJob { node_id: String, job_id: uuid::Uuid },
     /// Resume after the given wall-clock instant.
     ScheduleDelay {
         node_id: String,
@@ -64,10 +63,7 @@ pub enum WorkflowAction {
         items: Vec<serde_json::Value>,
     },
     /// The node finished unsuccessfully.
-    NodeFailed {
-        node_id: String,
-        reason: String,
-    },
+    NodeFailed { node_id: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -182,7 +178,9 @@ impl<'a> ExpressionEvaluator<'a> {
         let quoted = (token.starts_with('"') && token.ends_with('"') && token.len() >= 2)
             || (token.starts_with('\'') && token.ends_with('\'') && token.len() >= 2);
         if quoted {
-            return Ok(serde_json::Value::String(token[1..token.len() - 1].to_string()));
+            return Ok(serde_json::Value::String(
+                token[1..token.len() - 1].to_string(),
+            ));
         }
 
         self.lookup(token)
@@ -476,28 +474,28 @@ impl WorkflowExecution {
             .all(|e| parse_edge_condition(e.condition.as_deref()) != EdgeCondition::AnySucceeded);
 
         let satisfied = |edge: &forge_domain::workflow::Edge| -> bool {
-                let parent_state = self.node_states.get(&edge.from_node);
-                let parent_completed = matches!(parent_state, Some(NodeState::Completed));
-                let parent_finished = matches!(
-                    parent_state,
-                    Some(NodeState::Completed) | Some(NodeState::Failed { .. })
-                );
+            let parent_state = self.node_states.get(&edge.from_node);
+            let parent_completed = matches!(parent_state, Some(NodeState::Completed));
+            let parent_finished = matches!(
+                parent_state,
+                Some(NodeState::Completed) | Some(NodeState::Failed { .. })
+            );
 
-                match parse_edge_condition(edge.condition.as_deref()) {
-                    EdgeCondition::Always => true,
-                    EdgeCondition::AllSucceeded | EdgeCondition::AnySucceeded => {
-                        // A `true`/`false` edge label is a *branch selector*: it
-                        // only fires when the parent condition node produced that
-                        // result. Treating it as a plain dependency would run both
-                        // branches of an if/else.
-                        if let Some(result) = self.condition_result(&edge.from_node) {
-                            return branch_label_matches(edge.condition.as_deref(), result);
-                        }
-                        parent_completed
+            match parse_edge_condition(edge.condition.as_deref()) {
+                EdgeCondition::Always => true,
+                EdgeCondition::AllSucceeded | EdgeCondition::AnySucceeded => {
+                    // A `true`/`false` edge label is a *branch selector*: it
+                    // only fires when the parent condition node produced that
+                    // result. Treating it as a plain dependency would run both
+                    // branches of an if/else.
+                    if let Some(result) = self.condition_result(&edge.from_node) {
+                        return branch_label_matches(edge.condition.as_deref(), result);
                     }
-                    EdgeCondition::AllCompleted => parent_finished,
+                    parent_completed
                 }
-            };
+                EdgeCondition::AllCompleted => parent_finished,
+            }
+        };
 
         if require_all {
             // Every parent must have finished successfully, unless an edge opts
@@ -540,10 +538,7 @@ impl WorkflowExecution {
                     .entry("nodes".to_string())
                     .or_insert_with(|| serde_json::Value::Object(Default::default()));
                 if let serde_json::Value::Object(map) = nodes {
-                    map.insert(
-                        node_id.to_string(),
-                        serde_json::json!({ "output": output }),
-                    );
+                    map.insert(node_id.to_string(), serde_json::json!({ "output": output }));
                 }
             }
         }
@@ -623,7 +618,12 @@ fn branch_label_matches(label: Option<&str>, result: bool) -> bool {
 fn parse_edge_condition(raw: Option<&str>) -> EdgeCondition {
     match raw {
         None => EdgeCondition::AllSucceeded,
-        Some(text) => match text.trim().to_ascii_uppercase().replace([' ', '-'], "_").as_str() {
+        Some(text) => match text
+            .trim()
+            .to_ascii_uppercase()
+            .replace([' ', '-'], "_")
+            .as_str()
+        {
             "ANY_SUCCEEDED" => EdgeCondition::AnySucceeded,
             "ALL_COMPLETED" => EdgeCondition::AllCompleted,
             "ALWAYS" => EdgeCondition::Always,
@@ -800,9 +800,7 @@ mod tests {
             .is_empty());
 
         // After it, the delay completes and the successor starts.
-        let later = run
-            .advance_at(now + chrono::Duration::seconds(61))
-            .unwrap();
+        let later = run.advance_at(now + chrono::Duration::seconds(61)).unwrap();
         assert_eq!(run.node_states["hold"], NodeState::Completed);
         assert_eq!(
             later.len(),
@@ -895,12 +893,8 @@ mod tests {
             json!({ "extract": { "output": { "items": [1, 2, 3] } } }),
         )]);
         let ev = ExpressionEvaluator::new(&context);
-        assert!(ev
-            .evaluate("nodes.extract.output.items[0] == 1")
-            .unwrap());
-        assert!(ev
-            .evaluate("nodes.extract.output.items[2] == 3")
-            .unwrap());
+        assert!(ev.evaluate("nodes.extract.output.items[0] == 1").unwrap());
+        assert!(ev.evaluate("nodes.extract.output.items[2] == 3").unwrap());
     }
 
     #[test]
@@ -1082,11 +1076,7 @@ mod tests {
         // successor runs in the same pass — the workflow must not stall.
         let actions = run.advance().unwrap();
         assert_eq!(run.node_states["spread"], NodeState::Completed);
-        assert_eq!(
-            actions.len(),
-            1,
-            "only the successor runs: {actions:?}"
-        );
+        assert_eq!(actions.len(), 1, "only the successor runs: {actions:?}");
     }
 
     #[test]

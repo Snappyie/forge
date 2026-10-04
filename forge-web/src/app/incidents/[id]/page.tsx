@@ -1,113 +1,259 @@
 "use client";
 
-import { ResourceShell } from "@/components/ui/resource-shell";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+/**
+ * Incident detail (UI.md sections 29, 67).
+ *
+ * The incident, the alerts folded into it, and the timeline — all stored rows.
+ * The share button produces the deep link an operator would paste into chat.
+ */
+
+import Link from "next/link";
+import { use } from "react";
+import { ArrowLeft, Share2 } from "lucide-react";
+
+import { useQuery } from "@/lib/useQuery";
+import { copyText } from "@/lib/clipboard";
+import { formatRelative, formatTimestamp } from "@/lib/types";
+import { useToast } from "@/lib/useToast";
+import { AsyncBoundary, EmptyState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { AlertCircle, ServerCrash, Clock, FileText, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "cn";
 
-export default function IncidentContextPage() {
+interface AlertRow {
+  id: string;
+  kind: string;
+  severity: "INFO" | "WARNING" | "CRITICAL";
+  title: string;
+  status: string;
+  resource_type: string | null;
+  resource_id: string | null;
+}
+
+interface TimelineEvent {
+  id: string;
+  at: string;
+  kind: string;
+  message: string;
+  actor_id: string | null;
+}
+
+interface IncidentDetail {
+  incident: {
+    id: string;
+    title: string;
+    summary: string | null;
+    severity: "SEV1" | "SEV2" | "SEV3";
+    status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+    impact: string | null;
+    root_cause: string | null;
+    resolution: string | null;
+    detected_at: string;
+    acknowledged_at: string | null;
+    resolved_at: string | null;
+  };
+  alerts: AlertRow[];
+  timeline: TimelineEvent[];
+}
+
+const SEVERITY_TONE: Record<string, string> = {
+  SEV1: "border-red-500/50 bg-red-500/10 text-red-600 dark:text-red-400",
+  SEV2: "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  SEV3: "border-border text-muted-foreground",
+};
+
+export default function IncidentDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
+  const toast = useToast();
+  const detail = useQuery<IncidentDetail>(`/incidents/${id}`);
+
+  const incident = detail.data?.incident;
+  const alerts = detail.data?.alerts ?? [];
+  const timeline = detail.data?.timeline ?? [];
+
+  async function share() {
+    const ok = await copyText(window.location.href);
+    if (ok) toast.success("Incident link copied");
+    else toast.error("Could not copy link");
+  }
+
   return (
-    <ResourceShell
-      title="Incident INC-8021"
-      subtitle="Settlement Failure (P1)"
-      statusBadge={<Badge variant="destructive">Active Incident</Badge>}
-      actions={
-        <div className="flex gap-2">
-          <Button variant="outline">Acknowledge</Button>
-          <Button variant="outline">Resolve</Button>
-        </div>
-      }
+    <AsyncBoundary
+      state={detail.state}
+      error={detail.error}
+      forbidden={detail.forbidden}
+      empty={false}
+      onRetry={detail.reload}
+      loadingLabel="Loading incident"
     >
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="md:col-span-2 space-y-6">
-          <Card className="border-red-200 dark:border-red-900/50">
-            <CardHeader className="bg-red-50/50 dark:bg-red-900/10 border-b border-red-100 dark:border-red-900/30">
-              <CardTitle className="flex items-center gap-2"><AlertCircle className="w-5 h-5 text-red-500" /> Correlated Alerts</CardTitle>
-            </CardHeader>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Time</TableHead>
-                    <TableHead>Alert</TableHead>
-                    <TableHead>Component</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <TableRow className="bg-red-50/20 dark:bg-red-900/5 text-red-900 dark:text-red-200">
-                    <TableCell className="font-mono text-xs">02:08:41</TableCell>
-                    <TableCell className="font-semibold">Job Settlement Failed (3rd attempt)</TableCell>
-                    <TableCell>Job Scheduler</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-mono text-xs">02:08:00</TableCell>
-                    <TableCell>Worker Node CPU Spiked to 99%</TableCell>
-                    <TableCell>worker-17</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-mono text-xs">02:05:12</TableCell>
-                    <TableCell>Database Latency &gt; 2000ms</TableCell>
-                    <TableCell>PostgreSQL (Primary)</TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-
-          <Card className="border-border/50">
-            <CardHeader className="border-b border-border/50">
-              <CardTitle className="flex items-center gap-2"><FileText className="w-5 h-5" /> Extracted Logs</CardTitle>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="bg-[#1e1e1e] text-[#d4d4d4] font-mono text-xs p-4 overflow-x-auto">
-                <div className="flex gap-4"><span className="text-gray-500">02:07:55</span><span className="text-blue-400">INFO</span><span>Beginning transaction settlement batch #9182</span></div>
-                <div className="flex gap-4"><span className="text-gray-500">02:08:00</span><span className="text-yellow-400">WARN</span><span>Query taking longer than expected...</span></div>
-                <div className="flex gap-4"><span className="text-gray-500">02:08:31</span><span className="text-red-400">ERROR</span><span>Connection timeout waiting for lock</span></div>
-                <div className="flex gap-4"><span className="text-gray-500">02:08:41</span><span className="text-red-400">FATAL</span><span>Job execution failed. Maximum retries (3) reached.</span></div>
+      {incident ? (
+        <div className="flex flex-col gap-4 p-6">
+          <header className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <Link
+                href="/incidents"
+                className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <ArrowLeft className="size-3" aria-hidden />
+                All incidents
+              </Link>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-lg font-semibold">{incident.title}</h1>
+                <Badge
+                  variant="outline"
+                  className={cn("text-[10px]", SEVERITY_TONE[incident.severity])}
+                >
+                  {incident.severity}
+                </Badge>
+                <Badge variant="secondary" className="text-[10px]">
+                  {incident.status.toLowerCase()}
+                </Badge>
               </div>
-            </CardContent>
-          </Card>
-        </div>
+              {incident.summary ? (
+                <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+                  {incident.summary}
+                </p>
+              ) : null}
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                detected {formatRelative(incident.detected_at)} ·{" "}
+                {formatTimestamp(incident.detected_at)}
+              </p>
+            </div>
 
-        <div className="space-y-6">
-          <Card className="border-border/50">
+            <Button variant="outline" size="sm" onClick={share}>
+              <Share2 className="mr-1 size-3.5" aria-hidden />
+              Copy link
+            </Button>
+          </header>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Impact</CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs">
+                {incident.impact ?? "Not recorded."}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Root cause</CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs">
+                {incident.root_cause ?? "Not recorded."}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Resolution</CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs">
+                {incident.resolution ?? "Not recorded."}
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card>
             <CardHeader>
-              <CardTitle className="text-base">Impact Analysis</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div>
-                <p className="text-sm text-muted-foreground mb-1">Downstream Workflows Blocked</p>
-                <div className="flex flex-col gap-2">
-                  <Badge variant="outline" className="w-fit">Billing Generation</Badge>
-                  <Badge variant="outline" className="w-fit">Daily Report Sync</Badge>
-                </div>
-              </div>
-              <div className="pt-4 border-t border-border/50">
-                <p className="text-sm text-muted-foreground mb-1">SLA Status</p>
-                <Badge variant="destructive">Missed by 45m</Badge>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="border-border/50">
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2"><ServerCrash className="w-4 h-4" /> Affected Workers</CardTitle>
+              <CardTitle className="text-sm">
+                Related alerts
+                <span className="ml-2 font-normal text-muted-foreground">
+                  {alerts.length}
+                </span>
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-2">
-                <div className="flex justify-between items-center bg-muted/30 p-2 rounded border border-border/50">
-                  <span className="text-sm font-mono">worker-17</span>
-                  <Badge className="bg-red-100 text-red-700 shadow-none border-none">Degraded</Badge>
-                </div>
-              </div>
+              {alerts.length === 0 ? (
+                <EmptyState
+                  title="No alerts attached"
+                  description="This incident has no linked alerts."
+                />
+              ) : (
+                <ul className="flex flex-col gap-1">
+                  {alerts.map((alert) => (
+                    <li
+                      key={alert.id}
+                      className="flex flex-wrap items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50"
+                    >
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "text-[10px]",
+                          SEVERITY_TONE[
+                            alert.severity === "CRITICAL"
+                              ? "SEV1"
+                              : alert.severity === "WARNING"
+                                ? "SEV2"
+                                : "SEV3"
+                          ],
+                        )}
+                      >
+                        {alert.severity}
+                      </Badge>
+                      <span className="font-medium">{alert.title}</span>
+                      {alert.resource_type === "execution" && alert.resource_id ? (
+                        <Link
+                          href={`/executions/${alert.resource_id}`}
+                          className="text-[11px] underline"
+                        >
+                          execution
+                        </Link>
+                      ) : null}
+                      <span className="ml-auto text-[11px] text-muted-foreground">
+                        {alert.status.toLowerCase()}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </CardContent>
           </Card>
-          
-          <Button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white"><Search className="w-4 h-4 mr-2" /> Start AI Troubleshooting</Button>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Timeline</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {timeline.length === 0 ? (
+                <EmptyState
+                  title="No timeline entries"
+                  description="Nothing has been recorded against this incident."
+                />
+              ) : (
+                <ol className="flex flex-col gap-2 border-l border-border pl-4">
+                  {timeline.map((event) => (
+                    <li key={event.id} className="relative text-xs">
+                      <span
+                        className="absolute -left-[1.3rem] top-1 size-2 rounded-full bg-border"
+                        aria-hidden
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary" className="text-[10px]">
+                          {event.kind.toLowerCase()}
+                        </Badge>
+                        <span className="text-muted-foreground">
+                          {formatTimestamp(event.at)}
+                        </span>
+                      </div>
+                      <p className="mt-0.5">{event.message}</p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </CardContent>
+          </Card>
         </div>
-      </div>
-    </ResourceShell>
+      ) : (
+        <EmptyState
+          title="Incident not found"
+          description="It may have been deleted, or it belongs to another tenant."
+        />
+      )}
+    </AsyncBoundary>
   );
 }

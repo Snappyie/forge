@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 
-import { useQuery } from "@/lib/useQuery";
+import { useList } from "@/lib/useQuery";
 import { formatTimestamp, type AuditEvent } from "@/lib/types";
 import { AsyncBoundary } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -39,8 +39,8 @@ export default function AuditPage() {
   if (action !== "ALL") params.set("action", action);
   if (resource.trim()) params.set("resource", resource.trim());
 
-  const query = useQuery<{ data: AuditEvent[] }>(`/audit-events?${params.toString()}`);
-  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const query = useList<AuditEvent>(`/audit-events?${params.toString()}`);
+  const rows = query.rows;
   const filtering = action !== "ALL" || resource.trim().length > 0;
 
   return (

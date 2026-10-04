@@ -5,8 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use forge_domain::{ExecutionStatus, JobId, JobVersionId, TenantId, TriggerSource};
 use forge_executor::{
-    CompletionGate, CompletionRejection, HeartbeatMonitor, LeasePolicy, LeaseReaper,
-    RecoveryPolicy,
+    CompletionGate, CompletionRejection, HeartbeatMonitor, LeasePolicy, LeaseReaper, RecoveryPolicy,
 };
 use forge_storage::{
     ExecutionRepository, JobRepository, JobVersionRepository, LeaseRepository, NewExecution,
@@ -55,7 +54,11 @@ impl TestDb {
         let (server, _) = base.rsplit_once('/').unwrap_or((base.as_str(), ""));
         let admin_url = format!("{}/postgres", server.trim_end_matches('/'));
 
-        let admin = match PgPoolOptions::new().max_connections(1).connect(&admin_url).await {
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping executor integration tests: cannot connect ({e})");
@@ -91,7 +94,11 @@ impl TestDb {
             return None;
         }
 
-        Some(TestDb { pool, admin_url, db_name })
+        Some(TestDb {
+            pool,
+            admin_url,
+            db_name,
+        })
     }
 }
 
@@ -143,11 +150,7 @@ async fn scaffold(db: &PgPool) -> (TenantId, JobId, JobVersionId) {
 
     let versions = JobVersionRepository::new(db);
     let v = versions
-        .create(
-            tenant,
-            JobId::from_uuid(job.id),
-            &NewJobVersion::default(),
-        )
+        .create(tenant, JobId::from_uuid(job.id), &NewJobVersion::default())
         .await
         .unwrap();
     versions
@@ -159,7 +162,11 @@ async fn scaffold(db: &PgPool) -> (TenantId, JobId, JobVersionId) {
         .await
         .unwrap();
 
-    (tenant, JobId::from_uuid(job.id), JobVersionId::from_uuid(v.id))
+    (
+        tenant,
+        JobId::from_uuid(job.id),
+        JobVersionId::from_uuid(v.id),
+    )
 }
 
 /// Creates a QUEUED execution.
@@ -204,7 +211,14 @@ async fn a_worker_registers_and_is_offered_work() {
         let executions = ExecutionRepository::new(&pool);
 
         let w = workers
-            .register(tenant, "w1", "host-1", Some("1.0"), json!(["linux"]), json!({}))
+            .register(
+                tenant,
+                "w1",
+                "host-1",
+                Some("1.0"),
+                json!(["linux"]),
+                json!({}),
+            )
             .await
             .unwrap();
         assert_eq!(w.status, "READY");
@@ -234,11 +248,13 @@ async fn a_heartbeat_refreshes_liveness() {
         assert!(workers.find_ready(tenant, 10).await.unwrap().len() == 1);
 
         // Lapse the heartbeat, then refresh it.
-        sqlx::query("UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
-            .bind(w.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '10 minutes' WHERE id = $1",
+        )
+        .bind(w.id)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert!(
             workers.find_ready(tenant, 10).await.unwrap().is_empty(),
             "a lapsed worker is not offered work"
@@ -272,8 +288,14 @@ async fn a_drained_worker_receives_no_new_work() {
         // A drained worker never appears among the eligible set, so nothing is
         // claimed for it.
         assert!(workers.find_ready(tenant, 10).await.unwrap().is_empty());
-        assert!(executions.claim_next(tenant, None, w.id).await.unwrap().is_none()
-            || workers.find_ready(tenant, 10).await.unwrap().is_empty());
+        assert!(
+            executions
+                .claim_next(tenant, None, w.id)
+                .await
+                .unwrap()
+                .is_none()
+                || workers.find_ready(tenant, 10).await.unwrap().is_empty()
+        );
     })
     .await;
 }
@@ -319,7 +341,10 @@ async fn an_expired_lease_is_recovered() {
             .await
             .unwrap()
             .expect("work was claimed");
-        leases.acquire(tenant, execution_id, w.id, None, 20).await.unwrap();
+        leases
+            .acquire(tenant, execution_id, w.id, None, 20)
+            .await
+            .unwrap();
 
         expire_leases(&pool).await;
 
@@ -328,19 +353,17 @@ async fn an_expired_lease_is_recovered() {
         assert_eq!(stats.requeued, 1, "the execution must be re-queued");
         assert_eq!(stats.dead_lettered, 0);
 
-        let after = executions
-            .get(tenant, execution_id)
-            .await
-            .unwrap();
+        let after = executions.get(tenant, execution_id).await.unwrap();
         assert_eq!(after.status, "QUEUED", "recovered work is runnable again");
 
         // The abandoned attempt's record is preserved, not deleted.
-        let attempts: (i64,) =
-            sqlx::query_as("SELECT COUNT(*)::bigint FROM execution_attempts WHERE execution_id = $1")
-                .bind(execution_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let attempts: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM execution_attempts WHERE execution_id = $1",
+        )
+        .bind(execution_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(attempts.0, 1, "the attempt history is preserved");
 
         let status: (String,) =
@@ -370,10 +393,16 @@ async fn a_recovered_execution_frees_its_concurrency_slot() {
             .unwrap();
 
         executions.claim_next(tenant, None, w.id).await.unwrap();
-        leases.acquire(tenant, execution_id, w.id, None, 20).await.unwrap();
+        leases
+            .acquire(tenant, execution_id, w.id, None, 20)
+            .await
+            .unwrap();
 
         // While dispatched, the execution holds a slot.
-        let active = executions.count_active_for_job(tenant, job.into_uuid()).await.unwrap();
+        let active = executions
+            .count_active_for_job(tenant, job.into_uuid())
+            .await
+            .unwrap();
         assert_eq!(active, 1);
 
         expire_leases(&pool).await;
@@ -383,7 +412,10 @@ async fn a_recovered_execution_frees_its_concurrency_slot() {
         // is held by the same logical execution, not leaked.
         let after = executions.get(tenant, execution_id).await.unwrap();
         assert_eq!(after.status, "QUEUED");
-        let active = executions.count_active_for_job(tenant, job.into_uuid()).await.unwrap();
+        let active = executions
+            .count_active_for_job(tenant, job.into_uuid())
+            .await
+            .unwrap();
         assert_eq!(active, 1, "the slot is still accounted for");
 
         // Completing it releases the slot (AT-CON-004). The recovered
@@ -399,7 +431,10 @@ async fn a_recovered_execution_frees_its_concurrency_slot() {
             .await
             .unwrap();
         assert_eq!(
-            executions.count_active_for_job(tenant, job.into_uuid()).await.unwrap(),
+            executions
+                .count_active_for_job(tenant, job.into_uuid())
+                .await
+                .unwrap(),
             0,
             "a terminal execution releases its slot"
         );
@@ -474,11 +509,20 @@ async fn a_non_holder_cannot_complete() {
         let leases = LeaseRepository::new(&pool);
 
         let execution_id = queued_execution(&pool, tenant, job, version).await;
-        let w1 = workers.register(tenant, "w1", "h1", None, json!([]), json!({})).await.unwrap();
-        let w2 = workers.register(tenant, "w2", "h2", None, json!([]), json!({})).await.unwrap();
+        let w1 = workers
+            .register(tenant, "w1", "h1", None, json!([]), json!({}))
+            .await
+            .unwrap();
+        let w2 = workers
+            .register(tenant, "w2", "h2", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         executions.claim_next(tenant, None, w1.id).await.unwrap();
-        let lease = leases.acquire(tenant, execution_id, w1.id, None, 60).await.unwrap();
+        let lease = leases
+            .acquire(tenant, execution_id, w1.id, None, 60)
+            .await
+            .unwrap();
 
         let gate = CompletionGate::new(&pool);
         assert_eq!(
@@ -498,10 +542,16 @@ async fn a_terminal_execution_rejects_further_completions() {
         let leases = LeaseRepository::new(&pool);
 
         let execution_id = queued_execution(&pool, tenant, job, version).await;
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         executions.claim_next(tenant, None, w.id).await.unwrap();
-        let lease = leases.acquire(tenant, execution_id, w.id, None, 60).await.unwrap();
+        let lease = leases
+            .acquire(tenant, execution_id, w.id, None, 60)
+            .await
+            .unwrap();
 
         // `claim_next` already moved it to DISPATCHED.
         executions
@@ -531,10 +581,16 @@ async fn recovery_leaves_a_terminal_execution_alone() {
         let leases = LeaseRepository::new(&pool);
 
         let execution_id = queued_execution(&pool, tenant, job, version).await;
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         executions.claim_next(tenant, None, w.id).await.unwrap();
-        leases.acquire(tenant, execution_id, w.id, None, 20).await.unwrap();
+        leases
+            .acquire(tenant, execution_id, w.id, None, 20)
+            .await
+            .unwrap();
 
         // The worker finishes just before its lease lapses.
         // `claim_next` already moved it to DISPATCHED.
@@ -551,7 +607,10 @@ async fn recovery_leaves_a_terminal_execution_alone() {
         let stats = LeaseReaper::new(&pool).reap(Utc::now(), 100).await;
 
         assert_eq!(stats.already_terminal, 1);
-        assert_eq!(stats.requeued, 0, "a finished execution must not be re-queued");
+        assert_eq!(
+            stats.requeued, 0,
+            "a finished execution must not be re-queued"
+        );
         assert_eq!(
             executions.get(tenant, execution_id).await.unwrap().status,
             "SUCCEEDED"
@@ -575,11 +634,21 @@ async fn recovery_gives_up_after_the_budget_is_spent() {
         // Exhaust the recovery budget: a worker that always dies must not loop.
         for attempt in 0..policy.max_recovery_attempts {
             let w = workers
-                .register(tenant, &format!("w{attempt}"), "h", None, json!([]), json!({}))
+                .register(
+                    tenant,
+                    &format!("w{attempt}"),
+                    "h",
+                    None,
+                    json!([]),
+                    json!({}),
+                )
                 .await
                 .unwrap();
             executions.claim_next(tenant, None, w.id).await.unwrap();
-            leases.acquire(tenant, execution_id, w.id, None, 20).await.unwrap();
+            leases
+                .acquire(tenant, execution_id, w.id, None, 20)
+                .await
+                .unwrap();
             expire_leases(&pool).await;
 
             let stats = reaper.reap(Utc::now(), 100).await;
@@ -587,9 +656,15 @@ async fn recovery_gives_up_after_the_budget_is_spent() {
         }
 
         // One more failure exhausts the budget.
-        let w = workers.register(tenant, "last", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "last", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
         executions.claim_next(tenant, None, w.id).await.unwrap();
-        leases.acquire(tenant, execution_id, w.id, None, 20).await.unwrap();
+        leases
+            .acquire(tenant, execution_id, w.id, None, 20)
+            .await
+            .unwrap();
         expire_leases(&pool).await;
 
         let stats = reaper.reap(Utc::now(), 100).await;
@@ -597,13 +672,11 @@ async fn recovery_gives_up_after_the_budget_is_spent() {
 
         let final_state = executions.get(tenant, execution_id).await.unwrap();
         assert_eq!(final_state.status, "DEAD_LETTERED");
-        assert!(
-            final_state
-                .status
-                .parse::<ExecutionStatus>()
-                .unwrap()
-                .is_terminal()
-        );
+        assert!(final_state
+            .status
+            .parse::<ExecutionStatus>()
+            .unwrap()
+            .is_terminal());
     })
     .await;
 }
@@ -614,12 +687,17 @@ async fn stale_workers_are_marked_offline() {
         let (tenant, _, _) = scaffold(&pool).await;
         let workers = WorkerRepository::new(&pool);
 
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
-        sqlx::query("UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
-            .bind(w.id)
-            .execute(&pool)
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
             .await
             .unwrap();
+        sqlx::query(
+            "UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '10 minutes' WHERE id = $1",
+        )
+        .bind(w.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let reaped = HeartbeatMonitor::new(&pool).reap_stale(60).await.unwrap();
         assert_eq!(reaped, 1);
@@ -637,7 +715,10 @@ async fn a_renewed_lease_survives_the_reaper() {
         let leases = LeaseRepository::new(&pool);
 
         let execution_id = queued_execution(&pool, tenant, job, version).await;
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         executions.claim_next(tenant, None, w.id).await.unwrap();
         let lease = leases
@@ -686,7 +767,10 @@ async fn an_expired_short_lease_is_recovered_promptly() {
         let leases = LeaseRepository::new(&pool);
 
         let execution_id = queued_execution(&pool, tenant, job, version).await;
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         executions.claim_next(tenant, None, w.id).await.unwrap();
         // A lease already in the past.
@@ -714,7 +798,10 @@ async fn the_reaper_respects_its_batch_size() {
         let executions = ExecutionRepository::new(&pool);
         let leases = LeaseRepository::new(&pool);
 
-        let w = workers.register(tenant, "w", "h", None, json!([]), json!({})).await.unwrap();
+        let w = workers
+            .register(tenant, "w", "h", None, json!([]), json!({}))
+            .await
+            .unwrap();
 
         // Five executions, each dispatched to the same worker and leased, so
         // each has in-flight work the reaper can act on.
@@ -742,7 +829,11 @@ async fn the_reaper_respects_its_batch_size() {
                 break;
             }
         }
-        assert_eq!(total as usize, ids.len(), "every execution eventually recovers");
+        assert_eq!(
+            total as usize,
+            ids.len(),
+            "every execution eventually recovers"
+        );
     })
     .await;
 }

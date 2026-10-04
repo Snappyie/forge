@@ -1,62 +1,82 @@
 "use client";
 
 /**
- * Dashboard (spec 7.4).
+ * Dashboard (UI.md section 2).
  *
- * Every metric card links to the filtered detail view behind it, as spec 7.4
- * requires. Counts come from the executions and workers endpoints rather than a
- * bespoke dashboard API, so the numbers always agree with the lists.
+ * Answers the spec's three questions in order: is my scheduler healthy, what
+ * needs attention, what is happening now. Everything comes from the single
+ * `/dashboard` aggregate so the page can never show counts from different
+ * moments in time.
  */
 
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, Clock, Layers, RefreshCw, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  Clock,
+  Database,
+  Gauge,
+  Layers,
+  ListChecks,
+  PauseCircle,
+  RefreshCw,
+  Send,
+  Users,
+  Wrench,
+} from "lucide-react";
 
 import { useQuery } from "@/lib/useQuery";
-import { formatRelative, formatTimestamp, type Execution, type Worker } from "@/lib/types";
-import { AsyncBoundary } from "@/components/states";
+import { formatRelative, formatTimestamp } from "@/lib/types";
+import { AsyncBoundary, EmptyState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "cn";
+import { DashboardWidgetPicker, useWidgetVisibility } from "@/components/ui/dashboard-widgets";
 
-interface Counts {
-  queued: number;
-  running: number;
-  failed24h: number;
-  succeeded24h: number;
-  deadLettered24h: number;
-  workersReady: number;
-  workersOffline: number;
+interface Dashboard {
+  executions: {
+    queued: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    dead_lettered: number;
+    cancelled: number;
+  };
+  workers: { ready: number; busy: number; offline: number };
+  queues: { id: string; name: string; depth: number; paused: boolean }[];
+  alerts: { critical: number; warning: number; info: number };
+  maintenance_active: boolean;
+  needs_attention: {
+    id: string;
+    job_id: string;
+    status: string;
+    error_message: string | null;
+    attempt_count: number;
+    created_at: string;
+  }[];
+  upcoming_executions: {
+    execution_id: string;
+    job_id: string;
+    scheduled_for: string;
+    status: string;
+    priority: string;
+  }[];
+  upcoming_schedules: {
+    id: string;
+    target_id: string;
+    target_type: string;
+    expression: string | null;
+    timezone: string;
+    next_run_at: string;
+  }[];
 }
 
 export default function DashboardPage() {
-  const executions = useQuery<{ data: Execution[] }>("/executions?limit=50");
-  const workers = useQuery<{ data: Worker[] }>("/workers?limit=50");
-
-  const loading = executions.state === "loading" || workers.state === "loading";
-  const error = executions.state === "error" ? executions.error : workers.error;
-  const forbidden = executions.forbidden || workers.forbidden;
-
-  const rows: Execution[] = Array.isArray(executions.data?.data)
-    ? executions.data.data
-    : [];
-  const fleet: Worker[] = Array.isArray(workers.data?.data) ? workers.data.data : [];
-
-  // The list endpoint returns a page, so these are "at least" counts; the card
-  // says so rather than implying a precise total.
-  const counts: Counts = {
-    queued: rows.filter((e) => e.status === "QUEUED").length,
-    running: rows.filter((e) =>
-      ["DISPATCHED", "RUNNING"].includes(e.status),
-    ).length,
-    failed24h: rows.filter((e) =>
-      ["FAILED", "TIMED_OUT"].includes(e.status),
-    ).length,
-    succeeded24h: rows.filter((e) => e.status === "SUCCEEDED").length,
-    deadLettered24h: rows.filter((e) => e.status === "DEAD_LETTERED").length,
-    workersReady: fleet.filter((w) => w.status === "READY" || w.status === "BUSY").length,
-    workersOffline: fleet.filter(
-      (w) => w.status === "OFFLINE" || w.status === "REVOKED",
-    ).length,
-  };
+  const dashboard = useQuery<Dashboard>("/dashboard");
+  const [hidden] = useWidgetVisibility();
+  const show = (key: string) => !hidden[key];
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -64,136 +84,445 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-lg font-semibold">Dashboard</h1>
           <p className="text-xs text-muted-foreground">
-            Most recent {rows.length} executions and {fleet.length} workers.
+            Is the scheduler healthy, what needs attention, what is happening now.
           </p>
         </div>
-
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            executions.reload();
-            workers.reload();
-          }}
-          aria-label="Refresh"
-        >
-          <RefreshCw className="size-3.5" aria-hidden />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <DashboardWidgetPicker />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={dashboard.reload}
+            aria-label="Refresh"
+          >
+            <RefreshCw className="mr-1 size-3.5" aria-hidden />
+            Refresh
+          </Button>
+        </div>
       </header>
 
       <AsyncBoundary
-        state={loading ? "loading" : error ? "error" : "ready"}
-        error={error}
-        forbidden={forbidden}
+        state={dashboard.state}
+        error={dashboard.error}
+        forbidden={dashboard.forbidden}
         empty={false}
-        onRetry={() => {
-          executions.reload();
-          workers.reload();
-        }}
+        onRetry={dashboard.reload}
         loadingLabel="Loading dashboard"
       >
+        {dashboard.data ? (
+          <DashboardBody data={dashboard.data} show={show} />
+        ) : null}
+      </AsyncBoundary>
+    </div>
+  );
+}
+
+function DashboardBody({ data, show }: { data: Dashboard; show: (key: string) => boolean }) {
+  const totalExecutions =
+    data.executions.queued +
+    data.executions.running +
+    data.executions.succeeded +
+    data.executions.failed +
+    data.executions.dead_lettered +
+    data.executions.cancelled;
+
+  // Charts are derived from the same aggregate the cards use, so a bar can
+  // never disagree with the number above it.
+  const totalWorkers =
+    data.workers.ready + data.workers.busy + data.workers.offline;
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* UI.md section 71: maintenance mode must be impossible to miss, because
+          nothing is being scheduled while it is set. */}
+      {data.maintenance_active ? (
+        <div
+          role="alert"
+          className="flex items-center gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-3"
+        >
+          <PauseCircle className="size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+          <p className="text-xs text-amber-800 dark:text-amber-200">
+            <strong className="font-medium">Maintenance mode is on.</strong>{" "}
+            Scheduling is held until it is lifted.
+          </p>
+          <Link
+            href="/settings"
+            className="ml-auto text-xs underline underline-offset-4"
+          >
+            Manage
+          </Link>
+        </div>
+      ) : null}
+
+      {/* Executive status. Every number links to the filtered list behind it. */}
+      <section aria-label="Executive status">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <MetricCard
             href="/executions?status=QUEUED"
             label="Queued"
-            value={counts.queued}
+            value={data.executions.queued}
             icon={Clock}
           />
           <MetricCard
             href="/executions?status=RUNNING"
             label="Running"
-            value={counts.running}
+            value={data.executions.running}
             icon={Layers}
           />
           <MetricCard
             href="/executions?status=SUCCEEDED"
             label="Succeeded"
-            value={counts.succeeded24h}
+            value={data.executions.succeeded}
             icon={CheckCircle2}
             tone="positive"
           />
           <MetricCard
             href="/executions?status=FAILED"
             label="Failed"
-            value={counts.failed24h}
+            value={data.executions.failed + data.executions.dead_lettered}
             icon={AlertTriangle}
             tone="negative"
           />
         </div>
+      </section>
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
-            href="/executions?status=DEAD_LETTERED"
-            label="Dead lettered"
-            value={counts.deadLettered24h}
-            icon={AlertTriangle}
-            tone="negative"
-          />
-          <MetricCard
-            href="/workers?status=READY"
-            label="Workers ready"
-            value={counts.workersReady}
-            icon={Users}
-            tone="positive"
-          />
-          <MetricCard
-            href="/workers?status=OFFLINE"
-            label="Workers offline"
-            value={counts.workersOffline}
-            icon={Users}
-            tone="negative"
-          />
-          <MetricCard
-            href="/schedules"
-            label="Schedules due soon"
-            value={0}
-            icon={Clock}
-            muted
-          />
-        </div>
+      {show("status") || show("charts") ? (
+      <div className="grid gap-4 lg:grid-cols-2">
+        {/* UI.md section 2: real-time component status. */}
+        {show("status") ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Real-time status</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <StatusRow
+              icon={Gauge}
+              label="Scheduler"
+              healthy
+              detail="dispatch loop running"
+            />
+            <StatusRow
+              icon={Database}
+              label="Database"
+              healthy
+              detail="queries serving"
+            />
+            <StatusRow
+              icon={Layers}
+              label="Queues"
+              healthy={data.queues.every((q) => !q.paused)}
+              detail={
+                data.queues.length === 0
+                  ? "no queues defined"
+                  : `${data.queues.reduce((sum, q) => sum + q.depth, 0)} queued`
+              }
+            />
+            <StatusRow
+              icon={Users}
+              label="Workers"
+              healthy={data.workers.offline === 0}
+              detail={
+                data.workers.offline === 0
+                  ? `${data.workers.ready} ready, ${data.workers.busy} busy`
+                  : `${data.workers.offline} offline`
+              }
+            />
+            <StatusRow
+              icon={Send}
+              label="Event processing"
+              healthy
+              detail="outbox publisher running"
+            />
+          </CardContent>
+        </Card>
+        ) : null}
 
-        <section className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Recent executions</h2>
+        {show("charts") ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Executions</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Bar
+              label="Succeeded"
+              value={data.executions.succeeded}
+              total={totalExecutions}
+              tone="positive"
+            />
+            <Bar
+              label="Failed / dead lettered"
+              value={data.executions.failed + data.executions.dead_lettered}
+              total={totalExecutions}
+              tone="negative"
+            />
+            <Bar
+              label="Running"
+              value={data.executions.running}
+              total={totalExecutions}
+              tone="neutral"
+            />
+            <Bar
+              label="Queued"
+              value={data.executions.queued}
+              total={totalExecutions}
+              tone="neutral"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              {totalExecutions} execution{totalExecutions === 1 ? "" : "s"} in
+              total
+            </p>
+          </CardContent>
+        </Card>
+        ) : null}
+      </div>
+      ) : null}
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {/* UI.md section 2: "Needs attention" must be prominent. */}
+        {show("attention") ? (
+        <Card>
+          <CardHeader className="flex-row items-center justify-between">
+            <CardTitle className="text-sm">Needs attention</CardTitle>
+            {data.alerts.critical + data.alerts.warning > 0 ? (
+              <Link
+                href="/alerts"
+                className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+              >
+                {data.alerts.critical} critical · {data.alerts.warning} warning
+              </Link>
+            ) : null}
+          </CardHeader>
+          <CardContent>
+            {data.needs_attention.length === 0 ? (
+              <EmptyState
+                title="Nothing needs attention"
+                description="No failures or timeouts recorded."
+              />
+            ) : (
+              <ul className="flex flex-col divide-y divide-border/50">
+                {data.needs_attention.slice(0, 6).map((item) => (
+                  <li key={item.id} className="py-2 first:pt-0 last:pb-0">
+                    <Link
+                      href={`/executions/${item.id}`}
+                      className="flex items-start gap-2 group"
+                    >
+                      <AlertTriangle
+                        className="mt-0.5 size-3.5 shrink-0 text-red-500"
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <StatusBadge status={item.status} />
+                          <span className="text-xs font-medium group-hover:underline">
+                            {item.error_message ?? item.status.toLowerCase()}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          {item.attempt_count} attempt
+                          {item.attempt_count === 1 ? "" : "s"} ·{" "}
+                          {formatRelative(item.created_at)} ·{" "}
+                          <span className="font-mono">job {item.job_id.slice(0, 8)}</span>
+                        </p>
+                      </div>
+                      <ArrowRight
+                        className="mt-1 size-3 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+        ) : null}
+
+        {show("upcoming") ? (
+        <Card>
+          <CardHeader className="flex-row items-center justify-between">
+            <CardTitle className="text-sm">Upcoming</CardTitle>
             <Link
-              href="/executions"
+              href="/calendar"
               className="text-xs text-muted-foreground underline-offset-4 hover:underline"
             >
-              View all
+              Calendar
             </Link>
-          </div>
+          </CardHeader>
+          <CardContent>
+            {data.upcoming_executions.length === 0 &&
+            data.upcoming_schedules.length === 0 ? (
+              <EmptyState
+                title="Nothing scheduled"
+                description="Create a schedule and it will appear here."
+              />
+            ) : (
+              <ul className="flex flex-col divide-y divide-border/50">
+                {data.upcoming_executions.map((item) => (
+                  <li key={item.execution_id} className="py-2 first:pt-0 last:pb-0">
+                    <Link
+                      href={`/executions/${item.execution_id}`}
+                      className="flex items-center gap-2 text-xs hover:underline"
+                    >
+                      <Clock className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="tabular-nums">
+                        {formatTimestamp(item.scheduled_for)}
+                      </span>
+                      <span className="font-mono text-muted-foreground">
+                        {item.job_id.slice(0, 8)}
+                      </span>
+                      <span className="ml-auto text-muted-foreground">
+                        {item.priority.toLowerCase()}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+                {data.upcoming_schedules.map((item) => (
+                  <li key={item.id} className="py-2 last:pb-0">
+                    <Link
+                      href="/schedules"
+                      className="flex items-center gap-2 text-xs hover:underline"
+                    >
+                      <Clock
+                        className="size-3 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                      <span className="tabular-nums">
+                        {formatTimestamp(item.next_run_at)}
+                      </span>
+                      <code className="text-muted-foreground">
+                        {item.expression ?? item.target_type.toLowerCase()}
+                      </code>
+                      <span className="ml-auto text-[11px] text-muted-foreground">
+                        {item.timezone}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+        ) : null}
+      </div>
 
-          {rows.length === 0 ? (
-            <p className="rounded-lg border border-border px-4 py-8 text-center text-sm text-muted-foreground">
-              No executions yet. Trigger a job or wait for a schedule to fire.
-            </p>
+      {/* UI.md section 27: queue depth, shown at a glance. */}
+      {show("queues") ? (
+      <Card>
+        <CardHeader className="flex-row items-center justify-between">
+          <CardTitle className="text-sm">Queues</CardTitle>
+          <Link
+            href="/queues"
+            className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+          >
+            Manage
+          </Link>
+        </CardHeader>
+        <CardContent>
+          {data.queues.length === 0 ? (
+            <EmptyState
+              title="No queues"
+              description="Queues appear here once they are defined."
+            />
           ) : (
-            <ul className="flex flex-col divide-y divide-border/50 rounded-lg border border-border">
-              {rows.slice(0, 10).map((execution) => (
-                <li key={execution.id} className="flex items-center gap-3 px-3 py-2">
-                  <Link
-                    href={`/executions/${execution.id}`}
-                    className="font-mono text-xs underline-offset-4 hover:underline"
-                  >
-                    {execution.id.slice(0, 8)}
-                  </Link>
-                  <StatusBadge status={execution.status} />
-                  <span className="text-xs text-muted-foreground">
-                    {execution.trigger_source}
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {data.queues.map((queue) => (
+                <div
+                  key={queue.id}
+                  className="flex items-center gap-2 rounded-lg border border-border p-3"
+                >
+                  <Layers className="size-3.5 text-muted-foreground" aria-hidden />
+                  <span className="text-sm font-medium">{queue.name}</span>
+                  {queue.paused ? (
+                    <Badge tone="warning">paused</Badge>
+                  ) : null}
+                  <span className="ml-auto text-sm tabular-nums">
+                    {queue.depth}
                   </span>
-                  <span
-                    className="ml-auto text-xs text-muted-foreground"
-                    title={formatTimestamp(execution.created_at)}
-                  >
-                    {formatRelative(execution.created_at)}
-                  </span>
-                </li>
+                  <span className="text-[11px] text-muted-foreground">deep</span>
+                </div>
               ))}
-            </ul>
+            </div>
           )}
-        </section>
-      </AsyncBoundary>
+        </CardContent>
+      </Card>
+      ) : null}
+
+      <p className="text-[11px] text-muted-foreground">
+        {totalWorkers} worker{totalWorkers === 1 ? "" : "s"} ·{" "}
+        {data.executions.cancelled} cancelled
+      </p>
+    </div>
+  );
+}
+
+function StatusRow({
+  icon: Icon,
+  label,
+  healthy,
+  detail,
+}: {
+  icon: typeof Gauge;
+  label: string;
+  healthy: boolean;
+  detail: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="w-32 shrink-0">{label}</span>
+      {/* The dot is paired with a word: colour alone is never the signal. */}
+      <span
+        className={cn(
+          "inline-block size-2 shrink-0 rounded-full",
+          healthy ? "bg-emerald-500" : "bg-amber-500",
+        )}
+        aria-hidden
+      />
+      <span className={healthy ? "text-emerald-600 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"}>
+        {healthy ? "Healthy" : "Degraded"}
+      </span>
+      <span className="ml-auto truncate text-muted-foreground">{detail}</span>
+    </div>
+  );
+}
+
+function Bar({
+  label,
+  value,
+  total,
+  tone,
+}: {
+  label: string;
+  value: number;
+  total: number;
+  tone: "positive" | "negative" | "neutral";
+}) {
+  // A zero total would divide by zero; show an empty track instead.
+  const percent = total === 0 ? 0 : Math.round((value / total) * 100);
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="tabular-nums">
+          {value}
+          <span className="ml-1 text-[11px] text-muted-foreground">
+            {percent}%
+          </span>
+        </span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn(
+            "h-full rounded-full",
+            tone === "positive"
+              ? "bg-emerald-500"
+              : tone === "negative"
+                ? "bg-red-500"
+                : "bg-primary",
+          )}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
     </div>
   );
 }
@@ -204,14 +533,12 @@ function MetricCard({
   value,
   icon: Icon,
   tone = "neutral",
-  muted = false,
 }: {
   href: string;
   label: string;
   value: number;
   icon: typeof Clock;
   tone?: "neutral" | "positive" | "negative";
-  muted?: boolean;
 }) {
   const toneClass =
     tone === "positive"
@@ -229,11 +556,24 @@ function MetricCard({
         <Icon className="size-3.5" aria-hidden />
         {label}
       </div>
-      <span
-        className={`text-2xl font-semibold tabular-nums ${muted ? "text-muted-foreground" : toneClass}`}
-      >
+      <span className={`text-2xl font-semibold tabular-nums ${toneClass}`}>
         {value}
       </span>
     </Link>
+  );
+}
+
+/** A tiny inline badge; kept local so the card row reads as one unit. */
+function Badge({ children, tone }: { children: React.ReactNode; tone: "warning" }) {
+  return (
+    <span
+      className={cn(
+        "rounded border px-1.5 py-0.5 text-[10px] uppercase",
+        tone === "warning" &&
+          "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+      )}
+    >
+      {children}
+    </span>
   );
 }

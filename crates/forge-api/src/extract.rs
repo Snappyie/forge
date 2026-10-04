@@ -89,9 +89,8 @@ impl FromRequestParts<AppState> for AuthUser {
 
         let user_id = Uuid::parse_str(&claims.sub)
             .map_err(|_| ApiError::unauthenticated("the token subject is not a valid id"))?;
-        let tenant_uuid = Uuid::parse_str(&claims.tenant_id).map_err(|_| {
-            ApiError::unauthenticated("the token carries no valid tenant scope")
-        })?;
+        let tenant_uuid = Uuid::parse_str(&claims.tenant_id)
+            .map_err(|_| ApiError::unauthenticated("the token carries no valid tenant scope"))?;
 
         Ok(AuthUser(AuthContext {
             user_id,

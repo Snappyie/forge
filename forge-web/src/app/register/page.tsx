@@ -1,68 +1,135 @@
 "use client";
 
-import { motion } from "framer-motion";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+/**
+ * Registration.
+ *
+ * Calls the real `POST /auth/register`; the previous version had no submit
+ * handler, so its button did nothing.
+ */
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { AlertCircle, Hexagon, Loader2 } from "lucide-react";
+
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Hexagon } from "lucide-react";
-import Link from "next/link";
+import { Label } from "@/components/ui/label";
 
 export default function RegisterPage() {
+  const router = useRouter();
+  const { signIn } = useAuth();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [tenantName, setTenantName] = useState("");
+  const [error, setError] = useState<ApiError | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function onSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+
+    try {
+      await api.post("/auth/register", {
+        email: email.trim(),
+        password,
+        tenant_name: tenantName.trim() || undefined,
+      });
+      // Registering returns a session, but signing in keeps one code path.
+      await signIn(email.trim(), password);
+      router.replace("/");
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError
+          ? cause
+          : new ApiError(0, "INTERNAL_ERROR", "could not reach the server"),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-50/50 via-background to-background dark:from-indigo-900/20 dark:via-background dark:to-background">
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.3 }}
-        className="w-full max-w-md p-4"
-      >
-        <div className="flex justify-center mb-8">
-          <div className="flex items-center gap-2">
-            <div className="bg-indigo-600 p-2 rounded-lg">
-              <Hexagon className="h-6 w-6 text-white" />
-            </div>
-            <span className="text-2xl font-bold tracking-tight">Forge</span>
+    <main className="grid min-h-screen place-items-center px-4">
+      <div className="w-full max-w-sm">
+        <div className="mb-6 flex items-center gap-2">
+          <span className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground">
+            <Hexagon className="size-5" aria-hidden />
+          </span>
+          <div>
+            <h1 className="text-base font-semibold">Create a Forge account</h1>
+            <p className="text-xs text-muted-foreground">
+              You become the owner of a new tenant.
+            </p>
           </div>
         </div>
 
-        <Card className="bg-card/50 backdrop-blur-xl border-border/50 shadow-2xl">
-          <CardHeader className="space-y-1">
-            <CardTitle className="text-2xl text-center">Create an account</CardTitle>
-            <CardDescription className="text-center">
-              Enter your information to get started with Forge
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium leading-none" htmlFor="name">
-                Full Name
-              </label>
-              <Input id="name" type="text" placeholder="John Doe" className="bg-background/50" />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium leading-none" htmlFor="email">
-                Email
-              </label>
-              <Input id="email" type="email" placeholder="m@example.com" className="bg-background/50" />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium leading-none" htmlFor="password">
-                Password
-              </label>
-              <Input id="password" type="password" className="bg-background/50" />
-            </div>
-          </CardContent>
-          <CardFooter className="flex flex-col gap-4">
-            <Button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white">Create Account</Button>
-            <div className="text-sm text-center text-muted-foreground">
-              Already have an account?{" "}
-              <Link href="/login" className="text-indigo-500 hover:text-indigo-400 font-medium">
-                Sign in
-              </Link>
-            </div>
-          </CardFooter>
-        </Card>
-      </motion.div>
-    </div>
+        <form onSubmit={onSubmit} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="tenant">Tenant name</Label>
+            <Input
+              id="tenant"
+              value={tenantName}
+              onChange={(e) => setTenantName(e.target.value)}
+              placeholder="acme-platform"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoFocus
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={12}
+            />
+            <p className="text-xs text-muted-foreground">
+              At least 12 characters.
+            </p>
+          </div>
+
+          {error ? (
+            <p
+              role="alert"
+              className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            >
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              <span>{error.fieldError("password") ?? error.message}</span>
+            </p>
+          ) : null}
+
+          <Button type="submit" disabled={busy} className="w-full">
+            {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
+            {busy ? "Creating…" : "Create account"}
+          </Button>
+        </form>
+
+        <p className="mt-4 text-center text-xs text-muted-foreground">
+          Already registered?{" "}
+          <Link href="/login" className="underline underline-offset-4">
+            Sign in
+          </Link>
+        </p>
+      </div>
+    </main>
   );
 }

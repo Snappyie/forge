@@ -6,15 +6,14 @@
 //! and integration-level where it needs stored state.
 
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use chrono::{Datelike, Timelike};
 use forge_domain::workflow::{Node, NodeType, Workflow};
 use forge_domain::{JobId, TenantId};
 use forge_executor::{
     workflow_engine::{NodeState, WorkflowExecution},
     LeasePolicy,
 };
-use chrono::{Datelike, Timelike};
 use forge_scheduler::{CronSchedule, LocalTimeKind};
-
 
 fn node(id: &str) -> Node {
     Node {
@@ -141,11 +140,7 @@ fn an_ordinary_day_is_unaffected_by_dst() {
     let to = at("2026-06-17T00:00:00Z");
 
     let occurrences = cron.occurrences_between(from, to, 10);
-    assert_eq!(
-        occurrences.len(),
-        2,
-        "two ordinary days produce two runs"
-    );
+    assert_eq!(occurrences.len(), 2, "two ordinary days produce two runs");
 }
 
 // --- AT-WF-007: workflow cancellation propagates according to policy ---
@@ -217,7 +212,10 @@ fn at_wf_008_a_delay_times_out_and_releases() {
 
     // Before the timeout: suspended, and nothing downstream runs.
     let actions = run.advance_at(start).unwrap();
-    assert!(matches!(actions[0], forge_executor::workflow_engine::WorkflowAction::ScheduleDelay { .. }));
+    assert!(matches!(
+        actions[0],
+        forge_executor::workflow_engine::WorkflowAction::ScheduleDelay { .. }
+    ));
     assert!(matches!(
         run.node_states["wait"],
         NodeState::Suspended {
@@ -226,14 +224,20 @@ fn at_wf_008_a_delay_times_out_and_releases() {
         }
     ));
     assert!(
-        run.advance_at(start + Duration::seconds(299)).unwrap().is_empty(),
+        run.advance_at(start + Duration::seconds(299))
+            .unwrap()
+            .is_empty(),
         "the timeout must not fire early"
     );
 
     // At the timeout: the node completes and the successor starts.
     let after = run.advance_at(start + Duration::seconds(301)).unwrap();
     assert_eq!(run.node_states["wait"], NodeState::Completed);
-    assert_eq!(after.len(), 1, "the successor runs once the timeout elapses");
+    assert_eq!(
+        after.len(),
+        1,
+        "the successor runs once the timeout elapses"
+    );
 }
 
 /// A rejected approval is a cancellation of that branch, and the workflow does

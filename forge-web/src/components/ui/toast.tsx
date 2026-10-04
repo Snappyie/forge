@@ -197,6 +197,12 @@ function ToastList() {
   ))
 }
 
+/**
+ * Renders the toast viewport.
+ *
+ * `Toaster` must wrap the whole app, not sit beside it: `useToast` consumes
+ * `useToastManager`, which is only in context beneath this provider.
+ */
 function Toaster({
   children,
   toastManager = toast,

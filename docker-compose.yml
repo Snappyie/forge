@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: forge
-      POSTGRES_PASSWORD: forgepassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forgepassword}
       POSTGRES_DB: forgedb
     ports:
       - "5432:5432"
@@ -16,6 +14,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # The API plus the scheduler, lease reaper, outbox publisher, and retention
+  # tasks. Spec 17.6 requires startup to fail on invalid critical
+  # configuration, so the secrets below have no insecure defaults in a
+  # deployment; the values here are for local development only.
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FORGE_DATABASE_URL: postgres://forge:${POSTGRES_PASSWORD:-forgepassword}@postgres:5432/forgedb
+      FORGE_SERVER_HOST: 0.0.0.0
+      FORGE_SERVER_PORT: "3000"
+      FORGE_PUBLIC_BASE_URL: http://localhost:3000/api/v1
+      FORGE_AUTH_SESSION_SECRET: ${FORGE_AUTH_SESSION_SECRET:-local-development-session-secret}
+      FORGE_API_KEY_HASHING_SECRET: ${FORGE_API_KEY_HASHING_SECRET:-local-development-hash-secret}
+      FORGE_LOG_LEVEL: ${FORGE_LOG_LEVEL:-info}
+      FORGE_LOG_FORMAT: ${FORGE_LOG_FORMAT:-text}
+      FORGE_SCHEDULER_ENABLED: ${FORGE_SCHEDULER_ENABLED:-true}
+      FORGE_SCHEDULER_POLL_INTERVAL: ${FORGE_SCHEDULER_POLL_INTERVAL:-5s}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # The web console. Talks to the API through the compose network; the browser
+  # reaches the API through the host-published port above.
+  web:
+    build:
+      context: ./forge-web
+      dockerfile: Dockerfile
+    depends_on:
+      - server
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000/api/v1
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
 
 volumes:
   postgres_data:

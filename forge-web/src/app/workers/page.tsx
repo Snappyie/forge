@@ -13,7 +13,7 @@ import { Loader2, Power, RefreshCw, ShieldOff } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { useQuery } from "@/lib/useQuery";
+import { useList } from "@/lib/useQuery";
 import { formatRelative, formatTimestamp, roleCan, type Worker } from "@/lib/types";
 import { AsyncBoundary } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
@@ -38,9 +38,9 @@ export default function WorkersPage() {
   const { session } = useAuth();
   const [status, setStatus] = useState("ALL");
   const path = status === "ALL" ? "/workers?limit=50" : `/workers?limit=50&status=${status}`;
-  const query = useQuery<{ data: Worker[] }>(path);
+  const query = useList<Worker>(path);
 
-  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const rows = query.rows;
   const canAdmin = roleCan(session?.role, "workers:admin");
 
   return (

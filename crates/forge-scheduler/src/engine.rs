@@ -97,7 +97,12 @@ impl SchedulerEngine {
         // `claim_due` writes a lease marker inside its transaction, so only one
         // scheduler instance can hold a given schedule (spec 09.3).
         let claimed = match schedules
-            .claim_due(now, self.batch_size, self.instance_id, self.claim_lease.num_seconds())
+            .claim_due(
+                now,
+                self.batch_size,
+                self.instance_id,
+                self.claim_lease.num_seconds(),
+            )
             .await
         {
             Ok(rows) => rows,
@@ -113,10 +118,7 @@ impl SchedulerEngine {
         };
 
         for row in claimed {
-            match self
-                .process(&row, now, &schedules, &executions)
-                .await
-            {
+            match self.process(&row, now, &schedules, &executions).await {
                 Ok(outcome) => {
                     report.executions_created += outcome.created;
                     report.duplicates_suppressed += outcome.duplicates;
@@ -187,14 +189,7 @@ impl SchedulerEngine {
 
         // Which occurrences already exist makes the whole tick idempotent.
         let existing = schedules.materialised_occurrences(row.id, due).await?;
-        let plan = plan_occurrences(
-            &cron,
-            due,
-            now,
-            policy,
-            catch_up_limit,
-            &existing,
-        );
+        let plan = plan_occurrences(&cron, due, now, policy, catch_up_limit, &existing);
 
         for (occurrence, reason) in &plan.skipped {
             if *reason == SkipReason::AlreadyMaterialised {

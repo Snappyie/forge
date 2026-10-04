@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use forge_domain::{ConcurrencyScope, ExecutionStatus, JobId, JobVersionId, TenantId, TriggerSource};
+use forge_domain::{
+    ConcurrencyScope, ExecutionStatus, JobId, JobVersionId, TenantId, TriggerSource,
+};
 use forge_storage::{
     ExecutionRepository, JobRepository, JobVersionRepository, NewExecution, NewJobVersion,
 };
@@ -53,7 +55,11 @@ impl TestDb {
         let (server, _) = base.rsplit_once('/').unwrap_or((base.as_str(), ""));
         let admin_url = format!("{}/postgres", server.trim_end_matches('/'));
 
-        let admin = match PgPoolOptions::new().max_connections(1).connect(&admin_url).await {
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping concurrency tests: cannot connect ({e})");
@@ -85,7 +91,11 @@ impl TestDb {
             eprintln!("skipping concurrency tests: migrations failed ({e})");
             return None;
         }
-        Some(TestDb { pool, admin_url, db_name })
+        Some(TestDb {
+            pool,
+            admin_url,
+            db_name,
+        })
     }
 }
 
@@ -129,11 +139,7 @@ async fn scaffold(pool: &PgPool, tenant: TenantId) -> (JobId, JobVersionId) {
         .unwrap();
 
     let version = JobVersionRepository::new(pool)
-        .create(
-            tenant,
-            JobId::from_uuid(job.id),
-            &NewJobVersion::default(),
-        )
+        .create(tenant, JobId::from_uuid(job.id), &NewJobVersion::default())
         .await
         .unwrap();
     JobVersionRepository::new(pool)
@@ -145,7 +151,10 @@ async fn scaffold(pool: &PgPool, tenant: TenantId) -> (JobId, JobVersionId) {
         .await
         .unwrap();
 
-    (JobId::from_uuid(job.id), JobVersionId::from_uuid(version.id))
+    (
+        JobId::from_uuid(job.id),
+        JobVersionId::from_uuid(version.id),
+    )
 }
 
 async fn queued(
@@ -235,7 +244,11 @@ async fn at_con_001_limit_is_scoped_to_one_job() {
             .await
             .unwrap();
         let version_b = JobVersionRepository::new(&pool)
-            .create(tenant, JobId::from_uuid(job_b.id), &NewJobVersion::default())
+            .create(
+                tenant,
+                JobId::from_uuid(job_b.id),
+                &NewJobVersion::default(),
+            )
             .await
             .unwrap();
 
@@ -328,12 +341,14 @@ async fn at_con_003_queue_concurrency_is_enforced() {
         let (job, version) = scaffold(&pool, tenant).await;
 
         let queue_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO queues (id, tenant_id, name, max_concurrency) VALUES ($1, $2, 'bulk', 2)")
-            .bind(queue_id)
-            .bind(tenant.into_uuid())
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO queues (id, tenant_id, name, max_concurrency) VALUES ($1, $2, 'bulk', 2)",
+        )
+        .bind(queue_id)
+        .bind(tenant.into_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let executions = ExecutionRepository::new(&pool);
         let mut limit = policy(2, ConcurrencyScope::Queue);
@@ -343,10 +358,7 @@ async fn at_con_003_queue_concurrency_is_enforced() {
         queued(&pool, tenant, job, version, Some(queue_id)).await;
 
         assert_eq!(
-            executions
-                .count_active_for_queue(queue_id)
-                .await
-                .unwrap(),
+            executions.count_active_for_queue(queue_id).await.unwrap(),
             2
         );
         assert!(
@@ -427,10 +439,7 @@ async fn at_con_004_every_terminal_state_releases_the_slot() {
                 vec![ExecutionStatus::Running, ExecutionStatus::Failed],
             ),
             // A timeout also ends the execution.
-            (
-                ExecutionStatus::TimedOut,
-                vec![ExecutionStatus::Running],
-            ),
+            (ExecutionStatus::TimedOut, vec![ExecutionStatus::Running]),
         ] {
             let id = queued(&pool, tenant, job, version, None).await;
             executions
@@ -480,7 +489,10 @@ async fn at_con_005_slot_is_recovered_after_an_abandoned_attempt() {
             .unwrap();
 
         let id = queued(&pool, tenant, job, version, None).await;
-        executions.claim_next(tenant, None, worker.id).await.unwrap();
+        executions
+            .claim_next(tenant, None, worker.id)
+            .await
+            .unwrap();
         leases
             .acquire(tenant, id, worker.id, None, 20)
             .await

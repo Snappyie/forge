@@ -13,9 +13,7 @@ use forge_storage::{
     NewExecution, NewJobVersion,
 };
 
-use crate::envelope::{
-    ApiError, ApiResponse, ListResponse, PaginationQuery,
-};
+use crate::envelope::{ApiError, ApiResponse, ListResponse, PaginationQuery};
 use crate::extract::Auth;
 use crate::idempotency;
 use crate::router::AppState;
@@ -46,8 +44,10 @@ pub async fn create(
     let priority = match body.priority.as_deref() {
         None => Priority::Normal,
         Some(raw) => parse_priority(raw).ok_or_else(|| {
-            ApiError::validation(format!("`{raw}` is not a valid priority"))
-                .with_detail("priority", "expected CRITICAL, HIGH, NORMAL, LOW or BACKGROUND")
+            ApiError::validation(format!("`{raw}` is not a valid priority")).with_detail(
+                "priority",
+                "expected CRITICAL, HIGH, NORMAL, LOW or BACKGROUND",
+            )
         })?,
     };
 
@@ -72,11 +72,7 @@ pub async fn create(
                     Some(auth.user_id),
                 )
                 .await?;
-            Ok((
-                StatusCode::CREATED,
-                JobView::from_row(&row),
-                Some(row.id),
-            ))
+            Ok((StatusCode::CREATED, JobView::from_row(&row), Some(row.id)))
         },
     )
     .await?;
@@ -95,11 +91,10 @@ pub async fn list(
 
     let status = match filter.status.as_deref() {
         None => None,
-        Some(raw) => Some(
-            raw.parse::<JobStatus>()
-                .map_err(|_| ApiError::validation(format!("`{raw}` is not a valid job status"))
-                    .with_detail("status", "unknown status"))?,
-        ),
+        Some(raw) => Some(raw.parse::<JobStatus>().map_err(|_| {
+            ApiError::validation(format!("`{raw}` is not a valid job status"))
+                .with_detail("status", "unknown status")
+        })?),
     };
 
     let label = match filter.label.as_deref() {
@@ -165,13 +160,19 @@ pub async fn get(
         .get(auth.tenant_id, JobId::from_uuid(job_id))
         .await?;
 
-    Ok(Json(ApiResponse::new(JobView::from_row(&row), auth.request_id)))
+    Ok(Json(ApiResponse::new(
+        JobView::from_row(&row),
+        auth.request_id,
+    )))
 }
 
 /// `PATCH /jobs/{job_id}` (spec 05 endpoint 4).
 #[derive(Debug, Deserialize)]
 pub struct UpdateJobRequest {
     pub name: Option<String>,
+    /// `DRAFT`, `ACTIVE`, or `ARCHIVED`. Changing it records an undo entry
+    /// (UI.md section 38) so a mistake can be reversed without a second edit.
+    pub status: Option<String>,
     /// Double option: absent leaves it, `null` clears it.
     #[serde(default, deserialize_with = "double_option")]
     pub description: Option<Option<String>>,
@@ -219,8 +220,10 @@ pub async fn update(
     let priority = match body.priority.as_deref() {
         None => None,
         Some(raw) => Some(parse_priority(raw).ok_or_else(|| {
-            ApiError::validation(format!("`{raw}` is not a valid priority"))
-                .with_detail("priority", "expected CRITICAL, HIGH, NORMAL, LOW or BACKGROUND")
+            ApiError::validation(format!("`{raw}` is not a valid priority")).with_detail(
+                "priority",
+                "expected CRITICAL, HIGH, NORMAL, LOW or BACKGROUND",
+            )
         })?),
     };
 
@@ -231,7 +234,10 @@ pub async fn update(
         priority,
     };
 
-    let row = JobRepository::new(&state.pool)
+    // The patched row is not used: the response is re-read below so it reflects
+    // a status change as well. What matters here is that the patch applied, so
+    // a failed patch still returns the error.
+    JobRepository::new(&state.pool)
         .update(
             auth.tenant_id,
             JobId::from_uuid(job_id),
@@ -240,7 +246,68 @@ pub async fn update(
         )
         .await?;
 
-    Ok(Json(ApiResponse::new(JobView::from_row(&row), auth.request_id)))
+    // A status change is applied separately from the patch, and only after the
+    // patch succeeded, so a rejected edit does not leave a misleading undo
+    // entry behind.
+    if let Some(raw) = body.status.as_deref() {
+        let next = parse_status(raw).ok_or_else(|| {
+            ApiError::validation(format!("`{raw}` is not a valid job status"))
+                .with_detail("status", "expected DRAFT, ACTIVE or ARCHIVED")
+        })?;
+
+        // Capture the prior status so undo can restore exactly what was there.
+        let prior: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM jobs WHERE id = $1 AND tenant_id = $2")
+                .bind(job_id)
+                .bind(auth.tenant_id.into_uuid())
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(ApiError::from)?;
+
+        if let Some((previous,)) = prior {
+            if previous != next.as_str() {
+                sqlx::query("UPDATE jobs SET status = $3, updated_at = NOW() WHERE id = $1 AND tenant_id = $2")
+                    .bind(job_id)
+                    .bind(auth.tenant_id.into_uuid())
+                    .bind(next.as_str())
+                    .execute(&state.pool)
+                    .await
+                    .map_err(ApiError::from)?;
+
+                crate::parity::record_undo(
+                    &state.pool,
+                    auth.tenant_id.into_uuid(),
+                    auth.user_id,
+                    "JOB_STATUS",
+                    "JOB",
+                    job_id,
+                    serde_json::json!({ "status": previous }),
+                )
+                .await?;
+            }
+        }
+    }
+
+    // Re-read through the repository so the response reflects the status
+    // change rather than the row as it was before it.
+    let fresh = JobRepository::new(&state.pool)
+        .get(auth.tenant_id, JobId::from_uuid(job_id))
+        .await?;
+
+    Ok(Json(ApiResponse::new(
+        JobView::from_row(&fresh),
+        auth.request_id,
+    )))
+}
+
+/// Parses a job status, returning `None` for an unknown value.
+fn parse_status(raw: &str) -> Option<forge_domain::JobStatus> {
+    match raw.to_uppercase().as_str() {
+        "DRAFT" => Some(forge_domain::JobStatus::Draft),
+        "ACTIVE" => Some(forge_domain::JobStatus::Active),
+        "ARCHIVED" => Some(forge_domain::JobStatus::Archived),
+        _ => None,
+    }
 }
 
 /// `DELETE /jobs/{job_id}` (spec 05 endpoint 5) — a soft delete.
@@ -323,8 +390,7 @@ pub async fn create_version(
         return Err(ApiError::validation("timeout_seconds must be positive")
             .with_detail("timeout_seconds", "must be greater than zero"));
     }
-    if !["HTTP_REQUEST", "CONTAINER_COMMAND", "WORKER_TASK"]
-        .contains(&body.execution_type.as_str())
+    if !["HTTP_REQUEST", "CONTAINER_COMMAND", "WORKER_TASK"].contains(&body.execution_type.as_str())
     {
         return Err(ApiError::validation(
             "execution_type must be HTTP_REQUEST, CONTAINER_COMMAND or WORKER_TASK",
@@ -459,10 +525,10 @@ pub async fn trigger(
             match job.current_version_id {
                 Some(current) => forge_domain::JobVersionId::from_uuid(current),
                 None => {
-                    return Err(ApiError::conflict(
-                        "this job has no published version to run",
+                    return Err(
+                        ApiError::conflict("this job has no published version to run")
+                            .with_detail("job", "publish a version first"),
                     )
-                    .with_detail("job", "publish a version first"))
                 }
             }
         }
@@ -613,16 +679,19 @@ pub fn execution_view(row: &forge_storage::ExecutionRow) -> serde_json::Value {
 fn validate_name(name: &str) -> Result<(), ApiError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
-        return Err(ApiError::validation("name must not be empty")
-            .with_detail("name", "must not be empty"));
+        return Err(
+            ApiError::validation("name must not be empty").with_detail("name", "must not be empty")
+        );
     }
     if trimmed.chars().count() > 255 {
         return Err(ApiError::validation("name must be at most 255 characters")
             .with_detail("name", "too long"));
     }
     if trimmed.chars().any(char::is_control) {
-        return Err(ApiError::validation("name must not contain control characters")
-            .with_detail("name", "contains a control character"));
+        return Err(
+            ApiError::validation("name must not contain control characters")
+                .with_detail("name", "contains a control character"),
+        );
     }
     Ok(())
 }

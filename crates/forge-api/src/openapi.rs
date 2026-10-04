@@ -177,8 +177,7 @@ fn op(
     });
 
     if let Some(permission) = permission {
-        operation["description"] =
-            json!(format!("Requires the `{permission}` permission."));
+        operation["description"] = json!(format!("Requires the `{permission}` permission."));
     }
     if !parameters.is_empty() {
         operation["parameters"] = Value::Array(parameters);
@@ -695,11 +694,27 @@ fn paths() -> Value {
     );
 
     // --- system (spec 05 endpoints 60-62) ---
-    let mut live = op("Liveness probe", "system", "healthLive", None, vec![], None, "200");
+    let mut live = op(
+        "Liveness probe",
+        "system",
+        "healthLive",
+        None,
+        vec![],
+        None,
+        "200",
+    );
     live["security"] = json!([]);
     paths.insert("/health/live".into(), json!({ "get": live }));
 
-    let mut ready = op("Readiness probe", "system", "healthReady", None, vec![], None, "200");
+    let mut ready = op(
+        "Readiness probe",
+        "system",
+        "healthReady",
+        None,
+        vec![],
+        None,
+        "200",
+    );
     ready["security"] = json!([]);
     paths.insert("/health/ready".into(), json!({ "get": ready }));
 
@@ -732,7 +747,10 @@ mod tests {
         assert_eq!(doc["openapi"], "3.1.0");
         assert_eq!(doc["info"]["title"], "Forge API");
         assert!(doc["paths"].is_object());
-        assert!(doc["paths"].as_object().unwrap().len() > 40, "the spec 05 surface is covered");
+        assert!(
+            doc["paths"].as_object().unwrap().len() > 40,
+            "the spec 05 surface is covered"
+        );
     }
 
     /// Spec 09.4 requires the cron parser behaviour to be documented.
@@ -808,12 +826,10 @@ mod tests {
         assert_eq!(doc["paths"]["/health/live"]["get"]["security"], json!([]));
 
         // A tenant-scoped route documents the permission it needs.
-        assert!(
-            doc["paths"]["/jobs"]["post"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("jobs:write")
-        );
+        assert!(doc["paths"]["/jobs"]["post"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("jobs:write"));
     }
 
     #[test]

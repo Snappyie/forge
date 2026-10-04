@@ -10,7 +10,7 @@
 import Link from "next/link";
 import { RefreshCw } from "lucide-react";
 
-import { useQuery } from "@/lib/useQuery";
+import { useList } from "@/lib/useQuery";
 import { formatTimestamp, type Workflow as WorkflowSummary } from "@/lib/types";
 import { AsyncBoundary } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
@@ -25,8 +25,8 @@ import {
 } from "@/components/ui/table";
 
 export default function WorkflowsPage() {
-  const query = useQuery<{ data: WorkflowSummary[] }>("/workflows");
-  const rows = Array.isArray(query.data?.data) ? query.data.data : [];
+  const query = useList<WorkflowSummary>("/workflows");
+  const rows = query.rows;
 
   return (
     <div className="flex flex-col gap-4 p-6">

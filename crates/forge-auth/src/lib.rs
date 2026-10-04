@@ -170,9 +170,7 @@ impl std::fmt::Display for Role {
 /// Hashes a password with argon2id.
 pub fn hash_password(password: &str) -> Result<String, AuthError> {
     if password.is_empty() {
-        return Err(AuthError::WeakPassword(
-            "password must not be empty".into(),
-        ));
+        return Err(AuthError::WeakPassword("password must not be empty".into()));
     }
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -253,12 +251,8 @@ impl JwtService {
             iat: now.timestamp() as usize,
             token_type: "access".to_string(),
         };
-        encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &self.encoding_key,
-        )
-        .map_err(|e| AuthError::Crypto(format!("sign token: {e}")))
+        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
+            .map_err(|e| AuthError::Crypto(format!("sign token: {e}")))
     }
 
     pub fn verify(&self, token: &str) -> Result<Claims, AuthError> {
@@ -456,9 +450,7 @@ pub fn check_ip(ip: std::net::IpAddr) -> Option<UrlVerdict> {
         }
     };
 
-    blocked.then(|| {
-        UrlVerdict::Blocked("address is not permitted for outbound requests".into())
-    })
+    blocked.then(|| UrlVerdict::Blocked("address is not permitted for outbound requests".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +501,14 @@ mod tests {
     #[test]
     fn every_spec_role_exists() {
         // Spec 05 §5.10 names exactly these six.
-        for name in ["OWNER", "ADMIN", "OPERATOR", "DEVELOPER", "AUDITOR", "VIEWER"] {
+        for name in [
+            "OWNER",
+            "ADMIN",
+            "OPERATOR",
+            "DEVELOPER",
+            "AUDITOR",
+            "VIEWER",
+        ] {
             assert!(Role::parse(name).is_some(), "{name} must be a role");
         }
         assert_eq!(
@@ -555,7 +554,10 @@ mod tests {
     #[test]
     fn an_owner_may_do_anything() {
         for permission in ["jobs:read", "users:write", "tenants:delete", "any:thing"] {
-            assert!(Role::Owner.allows(permission), "OWNER must allow {permission}");
+            assert!(
+                Role::Owner.allows(permission),
+                "OWNER must allow {permission}"
+            );
         }
     }
 
@@ -677,7 +679,9 @@ mod tests {
     fn a_token_signed_with_another_secret_is_rejected() {
         let issuer = JwtService::new(b"secret-one");
         let verifier = JwtService::new(b"secret-two");
-        let token = issuer.issue(Uuid::new_v4(), Uuid::new_v4(), Role::Admin).unwrap();
+        let token = issuer
+            .issue(Uuid::new_v4(), Uuid::new_v4(), Role::Admin)
+            .unwrap();
         assert!(verifier.verify(&token).is_err());
     }
 
@@ -694,8 +698,13 @@ mod tests {
         // The verifier allows 60s of clock skew, so a token must be expired by
         // more than that to register as expired rather than merely invalid.
         let service = JwtService::new_with_ttl(b"secret", Duration::seconds(-120));
-        let token = service.issue(Uuid::new_v4(), Uuid::new_v4(), Role::Viewer).unwrap();
-        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
+        let token = service
+            .issue(Uuid::new_v4(), Uuid::new_v4(), Role::Viewer)
+            .unwrap();
+        assert!(matches!(
+            service.verify(&token),
+            Err(AuthError::TokenExpired)
+        ));
     }
 
     #[test]
@@ -703,7 +712,9 @@ mod tests {
         // A small negative skew must not lock a user out during ordinary clock
         // drift.
         let service = JwtService::new_with_ttl(b"secret", Duration::seconds(-10));
-        let token = service.issue(Uuid::new_v4(), Uuid::new_v4(), Role::Viewer).unwrap();
+        let token = service
+            .issue(Uuid::new_v4(), Uuid::new_v4(), Role::Viewer)
+            .unwrap();
         assert!(service.verify(&token).is_ok(), "modest skew is tolerated");
     }
 
@@ -799,7 +810,11 @@ mod tests {
 
     #[test]
     fn non_http_schemes_are_blocked() {
-        for url in ["file:///etc/passwd", "ftp://example.com/", "gopher://example.com/"] {
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/",
+            "gopher://example.com/",
+        ] {
             assert!(
                 matches!(check_outbound_url(url), UrlVerdict::Blocked(_)),
                 "{url} must be blocked"

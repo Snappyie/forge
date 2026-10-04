@@ -1,0 +1,18 @@
+# Rust
+/target
+**/target
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+
+# Node
+node_modules
+.next
+npm-debug.log*
+
+# Editors and OS
+.DS_Store
+*.swp

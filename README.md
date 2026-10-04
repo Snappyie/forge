@@ -7,6 +7,60 @@ Forge is designed as both:
 2. A usable self-hostable scheduler for recurring jobs, one-off jobs, workflows, retries, dependencies, resource-aware execution, observability, and auditability.
 3. A payment-operations reference workload, without embedding payment-provider-specific behavior into the core product.
 
+## Quick start
+
+Prerequisites: Rust (stable), Node 22+, and Docker for PostgreSQL.
+
+```bash
+cp .env.example .env          # secrets are required; the server refuses to start without them
+make db-up                    # start PostgreSQL and wait for it
+make seed                     # optional demo data (idempotent)
+make dev-api                  # API + background runtime on :3000
+make dev-web                  # console on :3000, in a second terminal
+```
+
+Register the first account, which becomes the tenant owner:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/auth/register \
+  -H "content-type: application/json" \
+  -d @scripts/register.json
+```
+
+Everything also runs under Docker:
+
+```bash
+docker compose up --build     # API on :3000, console on :3001
+```
+
+### Using the CLI
+
+```bash
+forge auth login --email you@example.com
+forge jobs list
+forge jobs create --name "Nightly settlement"
+forge executions list
+```
+
+`forge --output json` produces stable, machine-readable output; errors go to
+stderr and the exit code follows `docs/16-cli-specification.md` §16.8.
+
+## Architecture at a glance
+
+| crate | responsibility |
+|---|---|
+| `forge-domain` | entities, state machines, policies — no infrastructure |
+| `forge-storage` | PostgreSQL repositories, migrations, transactional units |
+| `forge-scheduler` | cron/timezone/DST evaluation, misfire handling |
+| `forge-executor` | worker protocol, leases, recovery, workflow engine |
+| `forge-events` | domain events and the outbox publisher |
+| `forge-observability` | logging, metrics, correlation, secret redaction |
+| `forge-auth` | argon2 hashing, JWTs, refresh rotation, RBAC, SSRF guard |
+| `forge-api` | HTTP surface and OpenAPI description |
+| `forge-cli` | the `forge` binary |
+| `forge-server` | composition root: API plus the background runtime |
+| `forge-config` | configuration loaded from the `FORGE_*` environment |
+
 ## Documentation is the product specification
 
 The `docs/` directory is normative. If implementation and documentation disagree, treat the documentation as the intended behavior and update the implementation or explicitly amend the specification through an ADR/RFC.

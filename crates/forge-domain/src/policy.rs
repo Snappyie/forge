@@ -430,10 +430,7 @@ mod tests {
             jitter_ratio: 1.0,
             ..Default::default()
         };
-        assert_eq!(
-            policy.delay_for(1, &mut NoJitter),
-            policy.base_delay_for(1)
-        );
+        assert_eq!(policy.delay_for(1, &mut NoJitter), policy.base_delay_for(1));
     }
 
     // AT-RETRY-005: a non-retryable error is not retried

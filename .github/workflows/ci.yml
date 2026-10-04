@@ -37,9 +37,73 @@ jobs:
       uses: Swatinem/rust-cache@v2
     - name: Check formatting
       run: cargo fmt -- --check
+    # `--all-targets` so test code is linted too; without it a lint in a test
+    # passes locally and fails in review.
     - name: Run clippy
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
     - name: Run tests
       env:
         DATABASE_URL: postgres://forge:forgepassword@localhost:5432/forgedb
-      run: cargo test
+      run: cargo test --workspace
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+    # Spec 11.11 makes vulnerability and licence checking a MUST; neither was
+    # present before.
+    - name: Audit dependencies for known vulnerabilities
+      uses: rustsec/audit-check@v2.0.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check dependency licences
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        manifest-path: deny.toml
+
+  web:
+    name: Web console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: forge-web
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: forge-web/package-lock.json
+    - name: Install dependencies
+      run: npm ci
+    - name: Typecheck
+      run: npm run typecheck
+    - name: Lint
+      run: npm run lint
+    - name: Build
+      run: npm run build
+      env:
+        NEXT_PUBLIC_API_URL: http://localhost:3000/api/v1
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [test, web]
+    steps:
+    - uses: actions/checkout@v4
+    # Build-only: publishing requires registry credentials that a fork's PR does
+    # not have. The image is therefore proven buildable without being pushed.
+    - uses: docker/setup-buildx-action@v3
+    - name: Build the server image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: false
+        tags: forge/server:ci
+        cache-from: type=gha
+        cache-to: type=gha,mode=max

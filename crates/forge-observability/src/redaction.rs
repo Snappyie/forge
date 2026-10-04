@@ -59,7 +59,9 @@ pub fn is_sensitive(key: &str) -> bool {
     // `accessToken`-style camelCase keys normalise to a single segment, so also
     // check the trailing word of a concatenated key.
     if let Some(last) = segments.last() {
-        if SENSITIVE_KEYS.iter().any(|s| last.ends_with(s)) && *last != *segments.first().unwrap_or(last) {
+        if SENSITIVE_KEYS.iter().any(|s| last.ends_with(s))
+            && *last != *segments.first().unwrap_or(last)
+        {
             return true;
         }
     }
@@ -195,9 +197,7 @@ mod tests {
         assert_eq!(redacted[0].0, "authorization");
         assert_eq!(redacted[0].1, REDACTED);
         assert_eq!(redacted[1].1, "application/json");
-        assert!(!redacted
-            .iter()
-            .any(|(_, v)| v.contains("secret-token")));
+        assert!(!redacted.iter().any(|(_, v)| v.contains("secret-token")));
     }
 
     #[test]

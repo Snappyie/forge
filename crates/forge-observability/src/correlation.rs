@@ -28,10 +28,7 @@ fn is_acceptable(value: &str) -> bool {
 
 /// Extracts a correlation id from a set of headers, falling back to the request
 /// id so every request has at least one stable identifier.
-pub fn resolve_correlation_id(
-    correlation: Option<&str>,
-    request_id: &str,
-) -> String {
+pub fn resolve_correlation_id(correlation: Option<&str>, request_id: &str) -> String {
     match correlation {
         Some(value) if is_acceptable(value) => value.to_string(),
         _ => request_id.to_string(),

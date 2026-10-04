@@ -56,23 +56,28 @@ pub async fn create(
         "" | "JOB" => "JOB",
         "WORKFLOW" => "WORKFLOW",
         other => {
-            return Err(ApiError::validation(format!(
-                "`{other}` is not a valid target type"
-            ))
-            .with_detail("target_type", "expected JOB or WORKFLOW"))
+            return Err(
+                ApiError::validation(format!("`{other}` is not a valid target type"))
+                    .with_detail("target_type", "expected JOB or WORKFLOW"),
+            )
         }
     };
-    let version_policy = match body.target_version_policy.trim().to_ascii_uppercase().as_str() {
+    let version_policy = match body
+        .target_version_policy
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
         "" | "LATEST_PUBLISHED" => "LATEST_PUBLISHED",
         "PINNED" => "PINNED",
         other => {
-            return Err(ApiError::validation(format!(
-                "`{other}` is not a valid version policy"
-            ))
-            .with_detail(
-                "target_version_policy",
-                "expected PINNED or LATEST_PUBLISHED",
-            ))
+            return Err(
+                ApiError::validation(format!("`{other}` is not a valid version policy"))
+                    .with_detail(
+                        "target_version_policy",
+                        "expected PINNED or LATEST_PUBLISHED",
+                    ),
+            )
         }
     };
 
@@ -152,8 +157,10 @@ fn parse_schedule_type(raw: &str) -> Result<forge_domain::ScheduleType, ApiError
         "" | "CRON" => Ok(forge_domain::ScheduleType::Cron),
         "ONE_TIME" => Ok(forge_domain::ScheduleType::OneTime),
         "INTERVAL" => Ok(forge_domain::ScheduleType::Interval),
-        other => Err(ApiError::validation(format!("`{other}` is not a schedule type"))
-            .with_detail("schedule_type", "expected CRON, ONE_TIME or INTERVAL")),
+        other => Err(
+            ApiError::validation(format!("`{other}` is not a schedule type"))
+                .with_detail("schedule_type", "expected CRON, ONE_TIME or INTERVAL"),
+        ),
     }
 }
 
@@ -396,20 +403,12 @@ pub async fn preview(
     };
 
     let count = body.count.clamp(1, 50);
-    let explanation = forge_scheduler::explain_schedule(
-        &expression,
-        &timezone,
-        Utc::now(),
-    )
-    .map_err(|e| ApiError::validation(e.to_string()))?;
+    let explanation = forge_scheduler::explain_schedule(&expression, &timezone, Utc::now())
+        .map_err(|e| ApiError::validation(e.to_string()))?;
 
-    let occurrences = forge_scheduler::preview_occurrences(
-        &expression,
-        &timezone,
-        Utc::now(),
-        count,
-    )
-    .map_err(|e| ApiError::validation(e.to_string()))?;
+    let occurrences =
+        forge_scheduler::preview_occurrences(&expression, &timezone, Utc::now(), count)
+            .map_err(|e| ApiError::validation(e.to_string()))?;
 
     Ok(Json(ApiResponse::new(
         json!({
@@ -443,10 +442,7 @@ fn dst_anomalies(
         let local = occurrence.with_timezone(&cron.timezone());
         // Rebuild the wall clock and ask the tz database what kind of time it
         // is.
-        let naive = chrono::NaiveDateTime::new(
-            local.date_naive(),
-            local.time(),
-        );
+        let naive = chrono::NaiveDateTime::new(local.date_naive(), local.time());
         match cron.classify_local(naive) {
             forge_scheduler::LocalTimeKind::Unique => {}
             forge_scheduler::LocalTimeKind::Nonexistent => anomalies.push(json!({
@@ -499,10 +495,7 @@ mod tests {
 
     #[test]
     fn schedule_type_names_match_the_storage_vocabulary() {
-        assert_eq!(
-            schedule_type_name(forge_domain::ScheduleType::Cron),
-            "CRON"
-        );
+        assert_eq!(schedule_type_name(forge_domain::ScheduleType::Cron), "CRON");
         assert_eq!(
             schedule_type_name(forge_domain::ScheduleType::OneTime),
             "ONE_TIME"
