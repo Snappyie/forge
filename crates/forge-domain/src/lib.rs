@@ -1,3 +1,4 @@
+pub mod application;
 pub mod error;
 pub mod execution;
 pub mod id;
@@ -6,6 +7,7 @@ pub mod policy;
 pub mod schedule;
 pub mod workflow;
 
+pub use application::*;
 pub use error::*;
 pub use execution::*;
 pub use id::*;

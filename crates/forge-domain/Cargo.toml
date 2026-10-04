@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# `Application::labels` is a JSONB map and the migration plan is reviewed as
+# JSON, so serde_json is a real dependency here rather than a test-only one.
+serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
