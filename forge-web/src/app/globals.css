@@ -4,6 +4,18 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * Forge console tokens.
+ *
+ * Direction: dense operator console. An operator watches this screen all day,
+ * so the system trades air for information — smaller type, tighter rows, small
+ * radii, and colour reserved strictly for status. Neutrals carry a trace of
+ * the accent hue so the greys read as authored rather than as default grey.
+ *
+ * One accent (--primary) plus the semantic status ramp. Nothing else is
+ * chromatic, which is what keeps a screen of tables from turning into confetti.
+ */
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -39,6 +51,18 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+
+  /* Status ramp. Named roles rather than raw red/green, so a state is one
+     decision everywhere it appears. */
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -49,74 +73,113 @@
 }
 
 :root {
-  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, monospace;
+
+  /* A cool graphite base. The chroma on the neutrals is well under 0.01 — it
+     only stops the greys reading as flat #808080 plastic. */
+  --background: oklch(0.988 0.002 264);
+  --foreground: oklch(0.21 0.012 264);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.21 0.012 264);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --popover-foreground: oklch(0.21 0.012 264);
+
+  /* The accent is a deep slate-teal: serious, not a product-blue default. */
+  --primary: oklch(0.44 0.07 226);
+  --primary-foreground: oklch(0.99 0.002 226);
+  --secondary: oklch(0.966 0.004 264);
+  --secondary-foreground: oklch(0.28 0.014 264);
+  --muted: oklch(0.966 0.004 264);
+  --muted-foreground: oklch(0.52 0.014 264);
+  --accent: oklch(0.945 0.008 226);
+  --accent-foreground: oklch(0.3 0.03 226);
+  --destructive: oklch(0.55 0.19 25);
+
+  --border: oklch(0.905 0.006 264);
+  --input: oklch(0.885 0.006 264);
+  --ring: oklch(0.44 0.07 226);
+
+  /* Status. Muted enough to sit in a table without shouting; the word next to
+     each one is what actually carries the state. */
+  --success: oklch(0.62 0.13 155);
+  --success-foreground: oklch(0.31 0.06 155);
+  --warning: oklch(0.72 0.14 75);
+  --warning-foreground: oklch(0.38 0.07 60);
+  --info: oklch(0.58 0.11 245);
+  --info-foreground: oklch(0.32 0.07 245);
+  --danger: oklch(0.56 0.19 25);
+  --danger-foreground: oklch(0.36 0.12 25);
+
+  --chart-1: oklch(0.62 0.13 155);
+  --chart-2: oklch(0.56 0.19 25);
+  --chart-3: oklch(0.58 0.11 245);
+  --chart-4: oklch(0.72 0.14 75);
+  --chart-5: oklch(0.52 0.06 290);
+
+  /* 6px base. Small radii are what make a dense console read as a tool rather
+     than a marketing page; large radii inflate every row. */
+  --radius: 0.375rem;
+
+  --sidebar: oklch(0.978 0.003 264);
+  --sidebar-foreground: oklch(0.3 0.014 264);
+  --sidebar-primary: oklch(0.44 0.07 226);
+  --sidebar-primary-foreground: oklch(0.99 0.002 226);
+  --sidebar-accent: oklch(0.93 0.012 226);
+  --sidebar-accent-foreground: oklch(0.26 0.03 226);
+  --sidebar-border: oklch(0.895 0.006 264);
+  --sidebar-ring: oklch(0.44 0.07 226);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: oklch(0.16 0.008 264);
+  --foreground: oklch(0.94 0.004 264);
+  /* Deliberately raised rather than inverted: in dark mode a card should sit
+     *above* the canvas, not dissolve into it. */
+  --card: oklch(0.207 0.009 264);
+  --card-foreground: oklch(0.94 0.004 264);
+  --popover: oklch(0.222 0.009 264);
+  --popover-foreground: oklch(0.94 0.004 264);
+
+  --primary: oklch(0.72 0.11 216);
+  --primary-foreground: oklch(0.17 0.02 226);
+  --secondary: oklch(0.26 0.01 264);
+  --secondary-foreground: oklch(0.92 0.004 264);
+  --muted: oklch(0.255 0.01 264);
+  --muted-foreground: oklch(0.68 0.014 264);
+  --accent: oklch(0.29 0.018 226);
+  --accent-foreground: oklch(0.95 0.008 216);
+  --destructive: oklch(0.62 0.19 25);
+
+  --border: oklch(0.29 0.01 264);
+  --input: oklch(0.32 0.012 264);
+  --ring: oklch(0.62 0.1 216);
+
+  --success: oklch(0.7 0.14 158);
+  --success-foreground: oklch(0.86 0.09 158);
+  --warning: oklch(0.78 0.13 78);
+  --warning-foreground: oklch(0.88 0.1 82);
+  --info: oklch(0.68 0.11 245);
+  --info-foreground: oklch(0.84 0.08 245);
+  --danger: oklch(0.66 0.18 25);
+  --danger-foreground: oklch(0.85 0.1 25);
+
+  --chart-1: oklch(0.7 0.14 158);
+  --chart-2: oklch(0.66 0.18 25);
+  --chart-3: oklch(0.68 0.11 245);
+  --chart-4: oklch(0.78 0.13 78);
+  --chart-5: oklch(0.6 0.08 290);
+
+  --sidebar: oklch(0.185 0.009 264);
+  --sidebar-foreground: oklch(0.85 0.006 264);
+  --sidebar-primary: oklch(0.72 0.11 216);
+  --sidebar-primary-foreground: oklch(0.17 0.02 226);
+  --sidebar-accent: oklch(0.29 0.02 216);
+  --sidebar-accent-foreground: oklch(0.95 0.01 216);
+  --sidebar-border: oklch(0.27 0.01 264);
+  --sidebar-ring: oklch(0.62 0.1 216);
 }
 
 @layer base {
@@ -128,10 +191,44 @@
   }
   html {
     @apply font-sans;
+    /* 14px console base. An operator reads this all day; 16px body text buys
+       nothing on a table-dense screen and costs several visible rows. */
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Dark type reads optically thinner, so numerals — the thing being scanned on
+   * every row — get a touch of weight and tightened tracking to compensate.
+   */
+  .dark {
+    font-synthesis-weight: none;
+  }
+
+  /*
+   * Numbers are compared down a column, never read as prose. Tabular figures
+   * make a column align; proportional digits make it wobble.
+   */
+  th,
+  td,
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Numbers must not be the only place a monospace font is wanted: cron, IDs,
+     error classes, and durations all read better aligned. */
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-feature-settings: "zero" 1;
   }
 }
-/* UI.md section 64: honour a reduced-motion preference. The console animates
-   panels and live pulses; for someone who asked for less movement, they stop. */
+
+/* UI.md §64: honour a reduced-motion preference. The console animates panels,
+   overlays and live pulses; for someone who asked for less movement, they stop. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -143,27 +240,80 @@
   }
 }
 
-/* UI.md section 64: a visible focus ring on keyboard focus, everywhere.
-   The custom properties hold raw `oklch()` values, so they are used directly:
-   wrapping them in `hsl()` would produce the invalid `hsl(oklch(...))` and the
-   ring would silently not render. */
+/*
+ * UI.md §64: a visible focus ring on keyboard focus, everywhere.
+ *
+ * The custom properties hold raw `oklch()` values, so they are used directly —
+ * wrapping them in `hsl()` would produce the invalid `hsl(oklch(...))` and the
+ * ring would silently not render. The rule uses `:focus-visible`, never bare
+ * `:focus`, so a mouse click does not leave a ring behind.
+ */
 :focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
-/* UI.md section 64: a skip link so keyboard users can bypass the sidebar. */
+/* UI.md §64: a skip link so keyboard users can bypass the sidebar. */
 .skip-link {
   position: absolute;
   left: -9999px;
   top: 0;
   z-index: 100;
-  padding: 0.5rem 1rem;
+  padding: 0.375rem 0.75rem;
   background: var(--background);
   border: 1px solid var(--border);
-  border-radius: 0.25rem;
+  border-radius: var(--radius);
+  font-size: 13px;
 }
 .skip-link:focus {
   left: 0.5rem;
   top: 0.5rem;
+}
+
+/*
+ * A scrollbar that belongs to this console rather than to the OS. Thin and
+ * self-effacing until hovered; a chunky default scrollbar steals two extra
+ * pixels of table width on every screen.
+ */
+@supports (scrollbar-width: thin) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--muted-foreground);
+}
+
+/*
+ * The live "pulse" used for RUNNING states. Transform+opacity only, so it
+ * composites on the GPU instead of triggering layout on every frame.
+ */
+@keyframes forge-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+.forge-pulse {
+  animation: forge-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }

@@ -601,6 +601,7 @@ pub struct ExecutionFilter {
     pub job_id: Option<Uuid>,
     pub workflow_id: Option<Uuid>,
     pub status: Option<ExecutionStatus>,
+    pub statuses: Vec<ExecutionStatus>,
     pub worker_id: Option<Uuid>,
     pub queue_id: Option<Uuid>,
     pub created_after: Option<DateTime<Utc>>,
@@ -617,7 +618,19 @@ impl ExecutionFilter {
         if let Some(workflow) = self.workflow_id {
             qb.push(" AND workflow_id = ").push_bind(workflow);
         }
-        if let Some(status) = self.status {
+        if !self.statuses.is_empty() {
+            if self.statuses.len() == 1 {
+                qb.push(" AND status = ")
+                    .push_bind(self.statuses[0].as_str());
+            } else {
+                qb.push(" AND status IN (");
+                let mut sep = qb.separated(", ");
+                for s in &self.statuses {
+                    sep.push_bind(s.as_str());
+                }
+                sep.push_unseparated(")");
+            }
+        } else if let Some(status) = self.status {
             qb.push(" AND status = ").push_bind(status.as_str());
         }
         if let Some(worker) = self.worker_id {

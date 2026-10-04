@@ -3,150 +3,301 @@
 /**
  * "What's running now?" (UI.md section 21).
  *
- * A dedicated operational view: what is running with its elapsed time, and what
- * is queued behind it. Elapsed is computed from `started_at`, so it is true for
- * a long-running execution rather than a value captured at render.
+ * A dedicated operational view: what is running with live elapsed time, and what
+ * is queued behind it.
+ *
+ * Elapsed is computed from `started_at` against a ticking clock, so a
+ * long-running execution keeps counting rather than freezing at whatever value
+ * was true when the page loaded.
  */
 
-import Link from "next/link";
-import { useEffect, useState } from "react";
-import { CircleDot, ListOrdered } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 import { useList } from "@/lib/useQuery";
-import { formatDuration, formatRelative, type Execution } from "@/lib/types";
-import { AsyncBoundary, EmptyState } from "@/components/states";
-import { StatusBadge } from "@/components/status-badge";
+import { useJobNames } from "@/lib/useJobNames";
+import {
+  formatDuration,
+  formatRelative,
+  formatTimestamp,
+  type Execution,
+} from "@/lib/types";
+import { Button } from "@/components/ui/button";
+import { TableBody, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  DataTable,
+  DataTableCell,
+  DataTableHead,
+  NumCell,
+  PageHeader,
+  Panel,
+  RowLink,
+  TableSkeleton,
+} from "@/components/page";
+import { PriorityBadge, StatusCell } from "@/components/status-badge";
+import { EmptyState, ErrorState, ForbiddenState } from "@/components/states";
 
-const RUNNING = "DISPATCHED,RUNNING";
+/*
+ * One request per status, merged here.
+ *
+ * `GET /executions` accepts a comma-separated `status`, and the server splits
+ * on commas — but a deployment running an older build rejects the whole value
+ * with "`DISPATCHED,RUNNING` is not a valid status". Sending the two statuses
+ * separately and concatenating the rows works against both, and the page shows
+ * what is running either way instead of silently reporting nothing.
+ */
+const RUNNING_STATUSES = ["DISPATCHED", "RUNNING"] as const;
 
 export default function RunningPage() {
-  const running = useList<Execution>(`/executions?status=${RUNNING}&limit=50`);
-  const queued = useList<Execution>(`/executions?status=QUEUED&limit=50`);
+  const dispatched = useList<Execution>(
+    `/executions?status=${RUNNING_STATUSES[0]}&limit=100`,
+  );
+  const inFlight = useList<Execution>(
+    `/executions?status=${RUNNING_STATUSES[1]}&limit=100`,
+  );
+  const queued = useList<Execution>(`/executions?status=QUEUED&limit=100`);
+  const { nameFor } = useJobNames();
 
-  // A ticking clock so elapsed time advances without polling the list again.
+  // A ticking clock so elapsed time advances without re-polling the list.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const runningRows = running.rows;
+  // Merge without duplicating: the two queries are disjoint today, but a status
+  // appearing in both would otherwise show the operator the same run twice.
+  const runningRows = useMemo(() => {
+    const seen = new Set<string>();
+    return [...dispatched.rows, ...inFlight.rows].filter((row) => {
+      if (seen.has(row.id)) return false;
+      seen.add(row.id);
+      return true;
+    });
+  }, [dispatched.rows, inFlight.rows]);
+
+  const loading =
+    dispatched.state === "loading" ||
+    inFlight.state === "loading" ||
+    queued.state === "loading";
+  const errored = dispatched.state === "error" || queued.state === "error";
+  const nothing =
+    dispatched.state === "ready" &&
+    inFlight.state === "ready" &&
+    queued.state === "ready" &&
+    runningRows.length === 0 &&
+    queued.rows.length === 0;
+
+  function reloadAll() {
+    dispatched.reload();
+    inFlight.reload();
+    queued.reload();
+  }
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header>
-        <h1 className="flex items-center gap-2 text-lg font-semibold">
-          <CircleDot className="size-4" aria-hidden />
-          What's running now?
-        </h1>
-        <p className="text-xs text-muted-foreground">
-          Executions in flight, with live elapsed time, and what is queued behind them.
-        </p>
-      </header>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Running now"
+        description="Executions in flight with live elapsed time, and what is queued behind them."
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={reloadAll}
+            disabled={loading}
+          >
+            <RefreshCw className={loading ? "animate-spin" : undefined} aria-hidden />
+            Refresh
+          </Button>
+        }
+      />
 
-      <AsyncBoundary
-        state={running.state}
-        error={running.error}
-        forbidden={running.forbidden}
-        empty={running.empty && queued.empty}
-        onRetry={() => {
-          running.reload();
-          queued.reload();
-        }}
-        loadingLabel="Reading live executions"
-        emptyTitle="Nothing is running"
-        emptyDescription="No execution is dispatched or running right now."
-      >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <Card title="Running" icon={CircleDot} count={runningRows.length}>
-            {runningRows.length === 0 ? (
-              <EmptyState
-                title="Nothing running"
-                description="Executions appear here the moment they are dispatched."
-              />
-            ) : (
-              <ul className="flex flex-col divide-y divide-border/50">
-                {runningRows.map((execution) => (
-                  <li key={execution.id}>
-                    <Link
-                      href={`/executions/${execution.id}`}
-                      className="flex items-center gap-2 py-2 text-xs hover:underline"
-                    >
-                      <span className="font-mono text-muted-foreground">
-                        {execution.id.slice(0, 8)}
-                      </span>
-                      <StatusBadge status={execution.status} />
-                      <span className="ml-auto tabular-nums">
-                        {elapsed(execution.started_at, now)}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+        {errored ? (
+          dispatched.forbidden || inFlight.forbidden || queued.forbidden ? (
+            <ForbiddenState />
+          ) : (
+            <ErrorState
+              error={dispatched.error ?? inFlight.error ?? queued.error}
+              onRetry={reloadAll}
+            />
+          )
+        ) : loading ? (
+          <Panel title="Running">
+            <DataTable>
+              <TableHeader>
+                <TableRow>
+                  <DataTableHead>Execution</DataTableHead>
+                  <DataTableHead className="w-28">Status</DataTableHead>
+                  <DataTableHead className="w-32" align="right">
+                    Elapsed
+                  </DataTableHead>
+                </TableRow>
+              </TableHeader>
+              <TableSkeleton rows={5} columns={3} />
+            </DataTable>
+          </Panel>
+        ) : nothing ? (
+          <EmptyState
+            title="Nothing is running"
+            description="No execution is dispatched or running, and nothing is waiting. Executions appear here the moment a worker claims work."
+          />
+        ) : (
+          <>
+            <Panel
+              title="Running"
+              description="In flight right now."
+              bodyClassName="p-0"
+              actions={
+                <span className="text-[12px] text-muted-foreground tabular-nums">
+                  {runningRows.length}
+                </span>
+              }
+            >
+              {runningRows.length === 0 ? (
+                <p className="px-3 py-6 text-center text-[12.5px] text-muted-foreground">
+                  Nothing running. Executions appear here the moment they are
+                  dispatched.
+                </p>
+              ) : (
+                <DataTable>
+                  <TableHeader>
+                    <TableRow>
+                      <DataTableHead>Job</DataTableHead>
+                      <DataTableHead className="w-28">Status</DataTableHead>
+                      <DataTableHead className="w-24">Priority</DataTableHead>
+                      <DataTableHead className="w-24">Worker</DataTableHead>
+                      <DataTableHead className="w-28" align="right">
+                        Started
+                      </DataTableHead>
+                      <DataTableHead className="w-28" align="right">
+                        Elapsed
+                      </DataTableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {runningRows.map((execution) => {
+                      const jobName = nameFor(execution.job_id);
+                      return (
+                        <TableRow key={execution.id} className="h-8">
+                          <DataTableCell className="font-medium">
+                            {jobName ? (
+                              <RowLink href={`/jobs/${execution.job_id}`}>
+                                {jobName}
+                              </RowLink>
+                            ) : (
+                              <RowLink href={`/executions/${execution.id}`}>
+                                <code className="font-mono text-[12px]">
+                                  {execution.id.slice(0, 8)}
+                                </code>
+                              </RowLink>
+                            )}
+                          </DataTableCell>
+                          <DataTableCell>
+                            <StatusCell status={execution.status} />
+                          </DataTableCell>
+                          <DataTableCell>
+                            <PriorityBadge priority={execution.priority} />
+                          </DataTableCell>
+                          <DataTableCell className="text-[11.5px] text-muted-foreground">
+                            {execution.worker_id
+                              ? execution.worker_id.slice(0, 8)
+                              : "—"}
+                          </DataTableCell>
+                          <DataTableCell
+                            align="right"
+                            className="text-[12px] text-muted-foreground"
+                            title={formatTimestamp(execution.started_at)}
+                          >
+                            {formatRelative(execution.started_at)}
+                          </DataTableCell>
+                          <NumCell className="text-[12.5px]">
+                            {elapsed(execution.started_at, now)}
+                          </NumCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </DataTable>
+              )}
+            </Panel>
 
-          <Card title="Queued" icon={ListOrdered} count={queued.rows.length}>
-            {queued.rows.length === 0 ? (
-              <EmptyState
-                title="Nothing queued"
-                description="Work waiting for a worker appears here."
-              />
-            ) : (
-              <ul className="flex flex-col divide-y divide-border/50">
-                {queued.rows.map((execution) => (
-                  <li key={execution.id}>
-                    <Link
-                      href={`/executions/${execution.id}`}
-                      className="flex items-center gap-2 py-2 text-xs hover:underline"
-                    >
-                      <span className="font-mono text-muted-foreground">
-                        {execution.id.slice(0, 8)}
-                      </span>
-                      <span className="text-muted-foreground">
-                        {execution.priority.toLowerCase()}
-                      </span>
-                      <span className="ml-auto text-muted-foreground">
-                        waiting {formatRelative(execution.created_at)}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
-        </div>
-      </AsyncBoundary>
-    </div>
-  );
-}
-
-function Card({
-  title,
-  icon: Icon,
-  count,
-  children,
-}: {
-  title: string;
-  icon: typeof CircleDot;
-  count: number;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-lg border border-border">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <Icon className="size-3.5 text-muted-foreground" aria-hidden />
-        <h2 className="text-sm font-medium">{title}</h2>
-        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-          {count}
-        </span>
+            <Panel
+              title="Queued"
+              description="Waiting for a worker to claim it."
+              bodyClassName="p-0"
+              actions={
+                <span className="text-[12px] text-muted-foreground tabular-nums">
+                  {queued.rows.length}
+                </span>
+              }
+            >
+              {queued.rows.length === 0 ? (
+                <p className="px-3 py-6 text-center text-[12.5px] text-muted-foreground">
+                  Nothing queued. Work waiting for a worker appears here.
+                </p>
+              ) : (
+                <DataTable>
+                  <TableHeader>
+                    <TableRow>
+                      <DataTableHead>Job</DataTableHead>
+                      <DataTableHead className="w-24">Priority</DataTableHead>
+                      <DataTableHead className="w-32" align="right">
+                        Waiting since
+                      </DataTableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {queued.rows.map((execution) => {
+                      const jobName = nameFor(execution.job_id);
+                      return (
+                        <TableRow key={execution.id} className="h-8">
+                          <DataTableCell className="font-medium">
+                            {jobName ? (
+                              <RowLink href={`/jobs/${execution.job_id}`}>
+                                {jobName}
+                              </RowLink>
+                            ) : (
+                              <RowLink href={`/executions/${execution.id}`}>
+                                <code className="font-mono text-[12px]">
+                                  {execution.id.slice(0, 8)}
+                                </code>
+                              </RowLink>
+                            )}
+                          </DataTableCell>
+                          <DataTableCell>
+                            <PriorityBadge priority={execution.priority} />
+                          </DataTableCell>
+                          <DataTableCell
+                            align="right"
+                            className="text-[12px] text-muted-foreground"
+                            title={formatTimestamp(execution.created_at)}
+                          >
+                            waiting {formatRelative(execution.created_at)}
+                          </DataTableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </DataTable>
+              )}
+            </Panel>
+          </>
+        )}
       </div>
-      <div className="p-3">{children}</div>
     </div>
   );
 }
 
+/**
+ * Wall-clock time since `started_at`.
+ *
+ * An execution with no start time has not begun, so it says so rather than
+ * reporting a zero-second run.
+ */
 function elapsed(startedAt: string | null, now: number): string {
   if (!startedAt) return "not started";
-  return formatDuration(Math.max(0, now - Date.parse(startedAt)));
+  const start = Date.parse(startedAt);
+  if (Number.isNaN(start)) return "unknown";
+  return formatDuration(Math.max(0, now - start));
 }

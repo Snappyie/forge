@@ -3,211 +3,188 @@
 /**
  * First-run checklist (UI.md section 55, section 78).
  *
- * A tenant that has never run anything starts in a state that no screen was
- * designed for: the dashboard is a wall of zeroes and the jobs list is empty,
- * and neither one tells a new operator what to do next. The spec asks for a
- * first-run state on the Jobs page, and the console has a per-page empty state
- * but no path between "signed up" and "my first execution".
+ * A tenant that has never run anything starts in a state no screen was designed
+ * for: the dashboard is a wall of zeroes and the jobs list is empty, and neither
+ * tells a new operator what to do next.
  *
- * This component is that path. Two decisions shape it:
+ * Three decisions shape it:
  *
- * - Steps are ordered by dependency and marked done from real data, never from
- *   local state, so a checklist cannot claim progress the server disagrees with.
- * - It distinguishes what is already working from what still needs the operator.
- *   A new install has a live scheduler and applied migrations long before it has
- *   a worker, and a screen that only lists what is missing makes a healthy
- *   system look broken.
+ * - Steps are marked done from real data, never from local state, so the
+ *   checklist cannot claim progress the server disagrees with.
+ * - Once the tenant is running it collapses to a single line. A 300px card of
+ *   "you are already done" above the metrics pushes the thing the operator
+ *   actually came to read below the fold.
+ * - The publish step counts ACTIVE jobs from a full page, not from the
+ *   single-row peek this component used to request — `?limit=1` could not see
+ *   a published job whenever the first job happened to be a draft.
  */
 
 import Link from "next/link";
-import { Check, Circle, ExternalLink, Terminal } from "lucide-react";
+import { useState } from "react";
+import { Check, ChevronDown, Circle, ExternalLink } from "lucide-react";
 
 import { useList, useQuery } from "@/lib/useQuery";
 import { cn } from "cn";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface DashboardSummary {
   executions?: {
-    queued?: number;
-    running?: number;
     succeeded?: number;
     failed?: number;
     dead_lettered?: number;
-    cancelled?: number;
   };
   workers?: { ready?: number; busy?: number; offline?: number };
-  queues?: unknown[];
 }
 
 interface JobRow {
   id: string;
-  name: string;
   status: string;
   current_version_id: string | null;
 }
 
-interface StepState {
-  state: "done" | "current" | "todo";
-}
-
 export function GettingStarted() {
-  // The same three aggregates the dashboard uses, so this can never disagree
-  // with the numbers shown beside it.
+  // The same aggregate the dashboard reads, so the two can never disagree.
   const dashboard = useQuery<DashboardSummary>("/dashboard");
-  const jobs = useList<JobRow>("/jobs?limit=1");
-  const queues = useList<unknown>("/queues?limit=1");
+  // A full page, because "publish" is a question about the whole set rather
+  // than about whichever job happens to sort first.
+  const jobs = useList<JobRow>("/jobs?limit=100");
+  const [expanded, setExpanded] = useState(true);
 
-  const data = dashboard.data;
   const ready = dashboard.state === "ready";
+  const data = dashboard.data;
 
-  const executions = data?.executions;
-  const workers = data?.workers;
   const hasJobs = jobs.state === "ready" && jobs.rows.length > 0;
   const hasPublished =
     hasJobs &&
     jobs.rows.some((job) => job.status === "ACTIVE" && job.current_version_id);
+
+  const workers = data?.workers;
   const workerCount =
     (workers?.ready ?? 0) + (workers?.busy ?? 0) + (workers?.offline ?? 0);
   const hasRunAnything =
-    (executions?.succeeded ?? 0) + (executions?.failed ?? 0) > 0;
-  const queueCount = queues.state === "ready" ? queues.rows.length : 0;
+    (data?.executions?.succeeded ?? 0) +
+      (data?.executions?.failed ?? 0) +
+      (data?.executions?.dead_lettered ?? 0) >
+    0;
 
-  const steps: { key: string; state: StepState; title: string; detail: string; href?: string }[] = [
+  const steps = [
     {
       key: "tenant",
-      state: { state: "done" },
+      state: "done" as const,
       title: "Create your tenant",
-      detail:
-        "Every job, worker and execution belongs to a tenant. You are its owner.",
+      detail: "Every job, worker, and execution belongs to a tenant.",
+      href: undefined,
+      cta: undefined,
     },
     {
       key: "job",
-      state: { state: hasJobs ? "done" : "current" },
+      state: hasJobs ? ("done" as const) : ("current" as const),
       title: "Define a job",
       detail: hasJobs
-        ? "A reusable definition of the work this tenant runs."
-        : "Name the work: what to run, how often, and what happens when it fails.",
+        ? `${jobs.rows.length} job${jobs.rows.length === 1 ? "" : "s"} defined.`
+        : "Name the work: what runs, how often, and what happens when it fails.",
       href: "/jobs/builder",
+      cta: "Create a job",
     },
     {
       key: "publish",
-      state: { state: hasPublished ? "done" : hasJobs ? "current" : "todo" },
+      state: hasPublished
+        ? ("done" as const)
+        : hasJobs
+          ? ("current" as const)
+          : ("todo" as const),
       title: "Publish a version",
       detail: hasPublished
         ? "A published version is immutable, so a later change cannot alter work already dispatched."
         : "A draft never runs. Publishing is what makes a job eligible for dispatch.",
       href: "/jobs",
+      cta: "Open jobs",
     },
     {
       key: "worker",
-      state: {
-        state: workerCount > 0 ? "done" : hasPublished ? "current" : "todo",
-      },
+      state:
+        workerCount > 0
+          ? ("done" as const)
+          : hasPublished
+            ? ("current" as const)
+            : ("todo" as const),
       title: "Connect a worker",
       detail:
         workerCount > 0
           ? `${workerCount} worker${workerCount === 1 ? "" : "s"} registered.`
-          : "Without a worker, executions queue and nothing runs. A worker claims work over HTTP, holds a lease, and heartbeats.",
+          : "Without a worker, executions queue and nothing runs.",
       href: "/workers",
+      cta: "Open workers",
     },
     {
       key: "run",
-      state: { state: hasRunAnything ? "done" : workerCount > 0 ? "current" : "todo" },
+      state: hasRunAnything
+        ? ("done" as const)
+        : workerCount > 0
+          ? ("current" as const)
+          : ("todo" as const),
       title: "Run it once by hand",
       detail: hasRunAnything
-        ? "At least one execution has been recorded for this tenant."
-        : "Trigger the job directly and watch the execution timeline. Once you have seen one succeed, let the schedule do it.",
+        ? "At least one execution has been recorded."
+        : "Trigger the job directly and watch the execution timeline.",
       href: "/jobs",
+      cta: "Open jobs",
     },
   ];
 
-  const doneCount = steps.filter((step) => step.state.state === "done").length;
+  const doneCount = steps.filter((step) => step.state === "done").length;
   const finished = doneCount === steps.length;
 
-  // Nothing to teach once the tenant is running. The dashboard's own first-run
-  // card and this one would otherwise say the same thing twice.
+  // Never teach onboarding to a tenant that has finished it.
   if (ready && finished) return null;
 
   return (
-    <Card className="mb-6">
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-sm">Set up your first execution</CardTitle>
-          <span className="text-[11px] tabular-nums text-muted-foreground">
-            {doneCount} of {steps.length} complete
-          </span>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Forge is running and waiting for work. Each step depends on the one
-          before it.
-        </p>
-      </CardHeader>
+    <section
+      aria-label="Setup progress"
+      className="rounded-md border border-border bg-card"
+    >
+      <div className="flex items-center gap-2 px-3 py-2">
+        <h2 className="text-[13px] font-semibold">Set up your first execution</h2>
+        <span className="text-[11.5px] text-muted-foreground tabular-nums">
+          {doneCount} of {steps.length} complete
+        </span>
+        <button
+          type="button"
+          onClick={() => setExpanded((open) => !open)}
+          aria-expanded={expanded}
+          className="ml-auto grid size-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+          aria-label={expanded ? "Hide setup steps" : "Show setup steps"}
+        >
+          <ChevronDown
+            className={cn("size-3.5 transition-transform", !expanded && "-rotate-90")}
+            aria-hidden
+          />
+        </button>
+      </div>
 
-      <CardContent className="flex flex-col gap-4">
-        <ol className="flex flex-col">
+      {/* The track stays visible when collapsed: "4 of 5 complete" is the
+          signal that something is unfinished. */}
+      <div
+        className="h-1 w-full bg-muted"
+        role="progressbar"
+        aria-valuenow={doneCount}
+        aria-valuemin={0}
+        aria-valuemax={steps.length}
+        aria-label="Setup steps complete"
+      >
+        <div
+          className="h-full bg-primary transition-[width]"
+          style={{ width: `${(doneCount / steps.length) * 100}%` }}
+        />
+      </div>
+
+      {expanded ? (
+        <ol className="px-3 py-1.5">
           {steps.map(({ key, ...step }) => (
             <Step key={key} {...step} />
           ))}
         </ol>
-
-        <div className="grid gap-4 border-t border-border pt-4 md:grid-cols-2">
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Already working
-            </p>
-            <ul className="flex flex-col gap-1.5">
-              <Working line="Scheduler loop" detail="ticks every 5s" state={ready ? "ok" : "unknown"} />
-              <Working line="Database and migrations" detail="applied at boot" state={ready ? "ok" : "unknown"} />
-              <Working line="Lease reaper" detail="sweeps every 5s" state={ready ? "ok" : "unknown"} />
-              <Working line="Outbox publisher" detail="drains events" state={ready ? "ok" : "unknown"} />
-              <Working line="Queues" detail={queueCount > 0 ? `${queueCount} defined` : "default only"} state={ready ? "ok" : "unknown"} />
-            </ul>
-          </div>
-
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Still needs you
-            </p>
-            <ul className="flex flex-col gap-1.5">
-              <Working
-                line="Workers"
-                detail={workerCount > 0 ? `${workerCount} registered` : "none registered"}
-                state={ready ? (workerCount > 0 ? "ok" : "todo") : "unknown"}
-              />
-              <Working
-                line="A job definition"
-                detail={hasJobs ? `${jobs.rows.length > 0 ? "created" : "none yet"}` : "none yet"}
-                state={ready ? (hasJobs ? "ok" : "todo") : "unknown"}
-              />
-              <Working
-                line="First execution"
-                detail={hasRunAnything ? "recorded" : "nothing has run"}
-                state={ready ? (hasRunAnything ? "ok" : "todo") : "unknown"}
-              />
-            </ul>
-
-            <div className="mt-3 rounded-md border border-border bg-muted/40 p-2.5">
-              <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium">
-                <Terminal className="size-3" aria-hidden />
-                Register a worker
-              </p>
-              <pre className="overflow-x-auto font-mono text-[10.5px] leading-relaxed text-muted-foreground">
-{`curl -X POST $FORGE_URL/api/v1/workers/register \\
-  -H "authorization: Bearer $FORGE_TOKEN" \\
-  -d '{"name":"worker-01"}'`}
-              </pre>
-              <Link
-                href="/workers"
-                className="mt-1.5 inline-flex items-center gap-1 text-[11px] underline underline-offset-4"
-              >
-                Worker setup guide
-                <ExternalLink className="size-3" aria-hidden />
-              </Link>
-            </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+      ) : null}
+    </section>
   );
 }
 
@@ -216,99 +193,69 @@ function Step({
   title,
   detail,
   href,
+  cta,
 }: {
-  state: StepState;
+  state: "done" | "current" | "todo";
   title: string;
   detail: string;
   href?: string;
+  cta?: string;
 }) {
-  const done = state.state === "done";
-  const current = state.state === "current";
+  const done = state === "done";
+  const current = state === "current";
 
   return (
-    <li className="flex gap-3 border-t border-border py-2.5 first:border-t-0">
+    <li className="flex items-start gap-2.5 border-b border-border/60 py-2 last:border-0">
       <span
         className={cn(
-          "mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border text-[10px] font-semibold",
-          done && "border-emerald-500 bg-emerald-500 text-white",
+          "mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border text-[9px]",
+          done && "border-success bg-success text-white",
           current && "border-primary bg-primary text-primary-foreground",
           !done && !current && "border-border text-muted-foreground",
         )}
         aria-hidden
       >
-        {done ? <Check className="size-3" /> : null}
-        {!done && !current ? <Circle className="size-2 fill-current" /> : null}
+        {done ? (
+          <Check className="size-2.5" />
+        ) : !current ? (
+          <Circle className="size-1.5 fill-current" />
+        ) : null}
       </span>
 
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
+          {/*
+            A tick glyph rather than a text badge: the word is already there, and
+            the badge consumed a row's width to repeat it.
+          */}
           <span
             className={cn(
-              "text-xs font-medium",
+              "text-[12.5px] font-medium",
               !done && !current && "text-muted-foreground",
             )}
           >
             {title}
           </span>
-          {done ? (
-            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-              done
-            </span>
-          ) : null}
           {current ? (
-            <span className="rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-              next
+            <span className="text-[10.5px] font-medium tracking-wide text-primary uppercase">
+              Next
             </span>
           ) : null}
         </div>
-        <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
-          {detail}
-        </p>
-        {current && href ? (
-          <Link
-            href={href}
-            className="mt-1 inline-flex items-center gap-1 text-[11px] underline underline-offset-4"
-          >
-            {title === "Connect a worker" ? "Go to workers" : "Open jobs"}
-            <ExternalLink className="size-3" aria-hidden />
-          </Link>
+        {!done ? (
+          <p className="mt-0.5 text-[11.5px] text-muted-foreground">{detail}</p>
         ) : null}
       </div>
-    </li>
-  );
-}
 
-/**
- * A single "is this working" line.
- *
- * `unknown` is rendered as such rather than as a neutral dot. A component with
- * no evidence either way is not a healthy component, and a grey dot next to
- * "healthy" would say it was.
- */
-function Working({
-  line,
-  detail,
-  state,
-}: {
-  line: string;
-  detail: string;
-  state: "ok" | "todo" | "unknown";
-}) {
-  return (
-    <li className="flex items-center gap-2 text-[11.5px]">
-      <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          state === "ok" && "bg-emerald-500",
-          state === "todo" && "bg-border",
-          state === "unknown" && "bg-border",
-        )}
-        aria-hidden
-      />
-      <span className={state === "todo" ? "text-muted-foreground" : undefined}>
-        {line}
-      </span>
-      <span className="ml-auto text-[11px] text-muted-foreground">{detail}</span>
+      {current && href && cta ? (
+        <Link
+          href={href}
+          className="mt-0.5 inline-flex shrink-0 items-center gap-1 text-[11.5px] underline-offset-2 hover:underline"
+        >
+          {cta}
+          <ExternalLink className="size-3" aria-hidden />
+        </Link>
+      ) : null}
     </li>
   );
 }

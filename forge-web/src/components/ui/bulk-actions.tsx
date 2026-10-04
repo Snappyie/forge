@@ -14,7 +14,6 @@ import { Archive, Play, RefreshCw, Square } from "lucide-react";
 import { api } from "@/lib/api";
 import { useToast } from "@/lib/useToast";
 import { Button } from "@/components/ui/button";
-import { cn } from "cn";
 
 type Action = "PAUSE" | "RESUME" | "ARCHIVE" | "RUN";
 
@@ -74,63 +73,77 @@ export function BulkActions({
 
   const failures = results.filter((r) => !r.ok);
 
+  /*
+   * A bare row, no container.
+   *
+   * The caller supplies the selection bar this renders into, so drawing another
+   * bordered box here would put a card inside a card and give the selection a
+   * second vertical edge.
+   */
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium">
-          {selected.length} selected
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-[12.5px] font-medium">
+        {selected.length} job{selected.length === 1 ? "" : "s"} selected
+      </span>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 text-[12.5px]"
+        disabled={busy !== null}
+        onClick={() => run("PAUSE")}
+      >
+        <Square aria-hidden />
+        Pause
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 text-[12.5px]"
+        disabled={busy !== null}
+        onClick={() => run("RESUME")}
+      >
+        <RefreshCw aria-hidden />
+        Resume
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 text-[12.5px]"
+        disabled={busy !== null}
+        onClick={() => run("ARCHIVE")}
+      >
+        <Archive aria-hidden />
+        Archive
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 text-[12.5px]"
+        disabled={busy !== null}
+        onClick={() => run("RUN")}
+      >
+        <Play aria-hidden />
+        Run
+      </Button>
+      {busy ? (
+        <span
+          className="text-[11.5px] text-muted-foreground"
+          role="status"
+          aria-live="polite"
+        >
+          applying {busy.toLowerCase()}…
         </span>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy !== null}
-          onClick={() => run("PAUSE")}
-        >
-          <Square className="mr-1 size-3" aria-hidden />
-          Pause
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy !== null}
-          onClick={() => run("RESUME")}
-        >
-          <RefreshCw className="mr-1 size-3" aria-hidden />
-          Resume
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy !== null}
-          onClick={() => run("ARCHIVE")}
-        >
-          <Archive className="mr-1 size-3" aria-hidden />
-          Archive
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy !== null}
-          onClick={() => run("RUN")}
-        >
-          <Play className="mr-1 size-3" aria-hidden />
-          Run
-        </Button>
-        {busy ? (
-          <span className="text-[11px] text-muted-foreground">
-            applying {busy.toLowerCase()}…
-          </span>
-        ) : null}
-      </div>
+      ) : null}
 
       {failures.length > 0 ? (
-        <ul className="flex flex-col gap-0.5 border-t border-border pt-2">
+        <ul className="flex basis-full flex-col gap-0.5 pt-1">
           {failures.map((failure) => (
             <li
               key={failure.job_id}
-              className={cn("text-[11px] text-red-600 dark:text-red-400")}
+              className="text-[11px] text-danger-foreground"
             >
-              <code>{failure.job_id.slice(0, 8)}</code>: {failure.error}
+              <code className="font-mono">{failure.job_id.slice(0, 8)}</code>:{" "}
+              {failure.error}
             </li>
           ))}
         </ul>

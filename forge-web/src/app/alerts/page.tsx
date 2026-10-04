@@ -3,25 +3,45 @@
 /**
  * Alerts (UI.md section 28).
  *
- * Reads the real alert feed and the real summary counts. Acknowledging calls the
- * acknowledge endpoint, so an alert's status reflects an actual action rather
- * than a local toggle.
+ * A central inbox. Reads the real feed and the real summary counts, and
+ * acknowledging calls the acknowledge endpoint, so an alert's status reflects an
+ * actual action rather than a local toggle.
+ *
+ * Alerts are listed as rows, not as cards. An inbox is scanned, and a screen of
+ * bordered cards pushes each row twice as tall for the same information.
  */
 
-import Link from "next/link";
 import { useState } from "react";
-import { AlertTriangle, Bell, CheckCircle2, Filter, Info } from "lucide-react";
+import { Check, RefreshCw, Search } from "lucide-react";
 
 import { useList, useQuery } from "@/lib/useQuery";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { formatRelative, formatTimestamp } from "@/lib/types";
 import { useToast } from "@/lib/useToast";
-import { AsyncBoundary } from "@/components/states";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { cn } from "cn";
+import { TableBody, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DataTable,
+  DataTableCell,
+  DataTableHead,
+  PageHeader,
+  RowLink,
+  Stat,
+  Toolbar,
+  TableFooter,
+  TableSkeleton,
+} from "@/components/page";
 import { AlertRuleBuilder } from "@/components/ui/alert-rule-builder";
+import { SeverityTag, StatusCell } from "@/components/status-badge";
+import { EmptyState, ErrorState, ForbiddenState } from "@/components/states";
 
 interface Alert {
   id: string;
@@ -42,238 +62,302 @@ interface AlertSummary {
   info: number;
 }
 
-const SEVERITIES = ["CRITICAL", "WARNING", "INFO"] as const;
 const STATUSES = ["OPEN", "ACKNOWLEDGED", "RESOLVED"] as const;
-
-const SEVERITY_TONE: Record<string, string> = {
-  CRITICAL: "border-red-500/50 bg-red-500/10 text-red-600 dark:text-red-400",
-  WARNING: "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400",
-  INFO: "border-border text-muted-foreground",
-};
-
-function SeverityIcon({ severity }: { severity: string }) {
-  if (severity === "CRITICAL") return <AlertTriangle className="size-3" aria-hidden />;
-  if (severity === "WARNING") return <AlertTriangle className="size-3" aria-hidden />;
-  return <Info className="size-3" aria-hidden />;
-}
+const SEVERITIES = ["CRITICAL", "WARNING", "INFO"] as const;
 
 export default function AlertsPage() {
   const [status, setStatus] = useState<string>("OPEN");
-  const [severity, setSeverity] = useState<string>("");
+  const [severity, setSeverity] = useState<string>("ALL");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const toast = useToast();
 
   const query = new URLSearchParams({ limit: "100" });
-  if (status) query.set("status", status);
-  if (severity) query.set("severity", severity);
+  if (status !== "ALL") query.set("status", status);
+  if (severity !== "ALL") query.set("severity", severity);
 
   const alerts = useList<Alert>(`/alerts?${query.toString()}`);
   const summary = useQuery<AlertSummary>("/alerts/summary");
+  const counts = summary.data;
 
-  const rows = search
+  const rows = search.trim()
     ? alerts.rows.filter((alert) =>
         `${alert.title} ${alert.detail ?? ""} ${alert.kind}`
           .toLowerCase()
-          .includes(search.toLowerCase()),
+          .includes(search.trim().toLowerCase()),
       )
     : alerts.rows;
+
+  const filtering =
+    status !== "ALL" || severity !== "ALL" || search.trim().length > 0;
 
   async function acknowledge(alert: Alert) {
     setBusy(alert.id);
     try {
       await api.post(`/alerts/${alert.id}/acknowledge`);
-      toast.success("Alert acknowledged", {
-        label: "View alerts",
-        onClick: () => window.location.assign("/alerts"),
-      });
+      toast.success(`Acknowledged: ${alert.title}`);
       alerts.reload();
       summary.reload();
     } catch (error) {
       toast.error(
         "Could not acknowledge",
-        error instanceof Error ? error.message : undefined,
+        error instanceof ApiError ? error.message : undefined,
       );
     } finally {
       setBusy(null);
     }
   }
 
-  const counts = summary.data;
+  function clearFilters() {
+    setStatus("ALL");
+    setSeverity("ALL");
+    setSearch("");
+  }
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header>
-        <h1 className="flex items-center gap-2 text-lg font-semibold">
-          <Bell className="size-5 text-rose-500" aria-hidden />
-          Alerts
-        </h1>
-        <p className="text-xs text-muted-foreground">
-          Conditions worth an operator&apos;s attention, newest first.
-        </p>
-      </header>
-
-      <AlertRuleBuilder />
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Alerts"
+        description="Conditions worth an operator's attention, newest first."
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              alerts.reload();
+              summary.reload();
+            }}
+            disabled={alerts.state === "loading"}
+          >
+            <RefreshCw
+              className={alerts.state === "loading" ? "animate-spin" : undefined}
+              aria-hidden
+            />
+            Refresh
+          </Button>
+        }
+      />
 
       {/* Real counts from /alerts/summary, not tallied in the browser. */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {(
-          [
-            { key: "critical", label: "Critical", value: counts?.critical, tone: "text-red-600 dark:text-red-400" },
-            { key: "warning", label: "Warning", value: counts?.warning, tone: "text-amber-700 dark:text-amber-400" },
-            { key: "info", label: "Info", value: counts?.info, tone: "text-muted-foreground" },
-          ] as const
-        ).map((card) => (
-          <div
-            key={card.key}
-            className="rounded-lg border border-border p-3"
-          >
-            <p className="text-xs text-muted-foreground">{card.label}</p>
-            <p className={cn("text-2xl font-semibold tabular-nums", card.tone)}>
-              {card.value ?? "—"}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="sr-only" htmlFor="alert-search">
-          Search alerts
-        </label>
-        <Input
-          id="alert-search"
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search alerts"
-          className="h-8 w-56"
+      <div className="grid grid-cols-2 gap-2 border-b border-border p-3 sm:grid-cols-4">
+        <Stat label="Open" value={counts?.open ?? null} />
+        <Stat
+          label="Critical"
+          value={counts?.critical ?? null}
+          tone={counts?.critical ? "danger" : "neutral"}
         />
-
-        <label className="sr-only" htmlFor="alert-status">
-          Status
-        </label>
-        <select
-          id="alert-status"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-        >
-          <option value="">All statuses</option>
-          {STATUSES.map((value) => (
-            <option key={value} value={value}>
-              {value.toLowerCase()}
-            </option>
-          ))}
-        </select>
-
-        <label className="sr-only" htmlFor="alert-severity">
-          Severity
-        </label>
-        <select
-          id="alert-severity"
-          value={severity}
-          onChange={(e) => setSeverity(e.target.value)}
-          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-        >
-          <option value="">All severities</option>
-          {SEVERITIES.map((value) => (
-            <option key={value} value={value}>
-              {value.toLowerCase()}
-            </option>
-          ))}
-        </select>
-
-        <span className="ml-auto flex items-center gap-1 text-[11px] text-muted-foreground">
-          <Filter className="size-3" aria-hidden />
-          {alerts.rows.length} shown
-        </span>
+        <Stat
+          label="Warning"
+          value={counts?.warning ?? null}
+          tone={counts?.warning ? "warning" : "neutral"}
+        />
+        <Stat label="Info" value={counts?.info ?? null} />
       </div>
 
-      <AsyncBoundary
-        state={alerts.state}
-        error={alerts.error}
-        forbidden={alerts.forbidden}
-        empty={alerts.empty}
-        onRetry={alerts.reload}
-        loadingLabel="Loading alerts"
-        emptyTitle={
-          status === "OPEN"
-            ? "No open alerts"
-            : "No alerts match these filters"
-        }
-        emptyDescription={
-          status === "OPEN"
-            ? "Nothing needs attention right now."
-            : "Clear the filters to see every alert."
-        }
-      >
-        <ul className="flex flex-col gap-2">
-          {rows.map((alert) => (
-            <li
-              key={alert.id}
-              className="flex flex-wrap items-center gap-3 rounded-lg border border-border p-3"
-            >
-              {/* Severity is spelled out, never colour-only (UI.md section 64). */}
-              <Badge
-                variant="outline"
-                className={cn("gap-1 text-[10px]", SEVERITY_TONE[alert.severity])}
-              >
-                <SeverityIcon severity={alert.severity} />
-                {alert.severity}
-              </Badge>
+      <Toolbar>
+        <div className="relative min-w-[14rem] flex-1 sm:max-w-xs">
+          <Search
+            className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <Input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter alerts"
+            aria-label="Filter alerts"
+            className="h-7 pl-7 text-[12.5px]"
+          />
+        </div>
 
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">{alert.title}</p>
-                {alert.detail ? (
-                  <p className="text-xs text-muted-foreground">{alert.detail}</p>
-                ) : null}
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {alert.kind.replace(/_/g, " ").toLowerCase()} ·{" "}
-                  {formatRelative(alert.created_at)} ·{" "}
-                  {formatTimestamp(alert.created_at)}
-                </p>
-              </div>
+        <Select value={status} onValueChange={(value) => setStatus(value ?? "OPEN")}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-36 text-[12.5px]"
+            aria-label="Filter by status"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">Any status</SelectItem>
+            {STATUSES.map((value) => (
+              <SelectItem key={value} value={value}>
+                {value.charAt(0) + value.slice(1).toLowerCase()}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
 
-              {alert.resource_type === "execution" && alert.resource_id ? (
-                <Link
-                  href={`/executions/${alert.resource_id}`}
-                  className="text-xs text-muted-foreground underline hover:text-foreground"
-                >
-                  View execution
-                </Link>
-              ) : null}
+        <Select value={severity} onValueChange={(value) => setSeverity(value ?? "ALL")}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-36 text-[12.5px]"
+            aria-label="Filter by severity"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">Any severity</SelectItem>
+            {SEVERITIES.map((value) => (
+              <SelectItem key={value} value={value}>
+                {value.charAt(0) + value.slice(1).toLowerCase()}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
 
-              <Badge variant="secondary" className="text-[10px]">
-                {alert.status.toLowerCase()}
-              </Badge>
-
-              {alert.status === "OPEN" ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy === alert.id}
-                  onClick={() => acknowledge(alert)}
-                >
-                  {busy === alert.id ? (
-                    "Acknowledging…"
-                  ) : (
-                    <>
-                      <CheckCircle2 className="mr-1 size-3.5" aria-hidden />
-                      Acknowledge
-                    </>
-                  )}
-                </Button>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-
-        {rows.length === 0 && search ? (
-          <p className="py-6 text-center text-xs text-muted-foreground">
-            No alerts match “{search}”.
-          </p>
+        {filtering ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            className="h-7 text-[12.5px] text-muted-foreground"
+          >
+            Clear filters
+          </Button>
         ) : null}
-      </AsyncBoundary>
+
+        <div className="ml-auto">
+          <AlertRuleBuilder />
+        </div>
+      </Toolbar>
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        {alerts.state === "loading" ? (
+          <DataTable>
+            <TableHeader>
+              <TableRow>
+                <DataTableHead className="w-28">Severity</DataTableHead>
+                <DataTableHead>Alert</DataTableHead>
+                <DataTableHead className="w-28">Status</DataTableHead>
+                <DataTableHead className="w-32" align="right">
+                  Raised
+                </DataTableHead>
+                <DataTableHead className="w-24" align="right">
+                  Action
+                </DataTableHead>
+              </TableRow>
+            </TableHeader>
+            <TableSkeleton rows={8} columns={5} />
+          </DataTable>
+        ) : alerts.state === "error" ? (
+          alerts.forbidden ? (
+            <ForbiddenState />
+          ) : (
+            <ErrorState error={alerts.error} onRetry={alerts.reload} />
+          )
+        ) : rows.length === 0 ? (
+          <EmptyState
+            title={
+              filtering ? "No alerts match these filters" : "No open alerts"
+            }
+            description={
+              filtering
+                ? "Clear the filters to see every alert."
+                : "Nothing needs attention right now. Alerts appear here as conditions fire."
+            }
+            action={
+              filtering ? (
+                <Button size="sm" variant="outline" onClick={clearFilters}>
+                  Clear filters
+                </Button>
+              ) : null
+            }
+          />
+        ) : (
+          <DataTable>
+            <TableHeader>
+              <TableRow>
+                <DataTableHead className="w-28">Severity</DataTableHead>
+                <DataTableHead>Alert</DataTableHead>
+                <DataTableHead className="w-28">Status</DataTableHead>
+                <DataTableHead className="w-32" align="right">
+                  Raised
+                </DataTableHead>
+                <DataTableHead className="w-28" align="right">
+                  Action
+                </DataTableHead>
+              </TableRow>
+            </TableHeader>
+
+            <TableBody>
+              {rows.map((alert) => (
+                <TableRow key={alert.id} className="h-9">
+                  <DataTableCell>
+                    <SeverityTag severity={alert.severity} />
+                  </DataTableCell>
+
+                  <DataTableCell>
+                    <span className="font-medium">{alert.title}</span>
+                    {alert.detail ? (
+                      <span
+                        className="mt-0.5 block max-w-[40rem] truncate text-[12px] text-muted-foreground"
+                        title={alert.detail}
+                      >
+                        {alert.detail}
+                      </span>
+                    ) : null}
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      {alert.kind.replace(/_/g, " ").toLowerCase()}
+                      {alert.resource_id ? (
+                        <>
+                          {" · "}
+                          {alert.resource_type === "execution" ? (
+                            <RowLink href={`/executions/${alert.resource_id}`}>
+                              view execution
+                            </RowLink>
+                          ) : alert.resource_type === "job" ? (
+                            <RowLink href={`/jobs/${alert.resource_id}`}>
+                              view job
+                            </RowLink>
+                          ) : (
+                            <code className="font-mono">
+                              {alert.resource_id.slice(0, 8)}
+                            </code>
+                          )}
+                        </>
+                      ) : null}
+                    </span>
+                  </DataTableCell>
+
+                  <DataTableCell>
+                    <StatusCell status={alert.status} />
+                  </DataTableCell>
+
+                  <DataTableCell
+                    align="right"
+                    className="text-[12px] text-muted-foreground"
+                    title={formatTimestamp(alert.created_at)}
+                  >
+                    {formatRelative(alert.created_at)}
+                  </DataTableCell>
+
+                  <DataTableCell align="right">
+                    {alert.status === "OPEN" ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[12.5px]"
+                        disabled={busy === alert.id}
+                        onClick={() => acknowledge(alert)}
+                      >
+                        <Check aria-hidden />
+                        {busy === alert.id ? "Working…" : "Acknowledge"}
+                      </Button>
+                    ) : (
+                      <span className="text-[11.5px] text-muted-foreground">
+                        {alert.status === "ACKNOWLEDGED" ? "Acknowledged" : "Resolved"}
+                      </span>
+                    )}
+                  </DataTableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </DataTable>
+        )}
+      </div>
+
+      <TableFooter shown={rows.length} total={alerts.rows.length} />
     </div>
   );
 }

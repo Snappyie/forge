@@ -127,6 +127,15 @@ export interface Schedule {
   next_run_at: string | null;
   last_run_at: string | null;
   created_at?: string;
+  /**
+   * How the schedule fires. A cron schedule carries an `expression`; an
+   * interval carries a period; a one-time schedule carries an instant.
+   */
+  schedule_type?: "CRON" | "INTERVAL" | "ONE_TIME";
+  interval_seconds?: number | null;
+  one_time_at?: string | null;
+  /** Why a schedule is not running, when it is not. */
+  disabled_reason?: string | null;
 }
 
 export type MisfirePolicy = "SKIP" | "FIRE_ONCE" | "CATCH_UP";

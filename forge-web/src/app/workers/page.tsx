@@ -1,31 +1,37 @@
 "use client";
 
 /**
- * Worker list (spec 7.12).
+ * Worker list (spec 7.12, UI.md section 25).
  *
- * Drain and revoke are gated on the `workers:admin` permission, so a viewer
- * sees the fleet without seeing controls they cannot use.
+ * Drain and revoke are gated on `workers:admin`, so a viewer sees the fleet
+ * without seeing controls they cannot use. Revoke is irreversible, so it goes
+ * through a confirmation that names the worker and states the consequence —
+ * `window.confirm` cannot show what is about to happen to which worker.
  */
 
-import Link from "next/link";
 import { useState } from "react";
 import { Loader2, Power, RefreshCw, ShieldOff } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useList } from "@/lib/useQuery";
-import { formatRelative, formatTimestamp, roleCan, type Worker } from "@/lib/types";
-import { AsyncBoundary } from "@/components/states";
-import { StatusBadge } from "@/components/status-badge";
+import {
+  formatRelative,
+  formatTimestamp,
+  roleCan,
+  type Worker,
+} from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { TableBody, TableHeader, TableRow } from "@/components/ui/table";
 import {
   Select,
   SelectContent,
@@ -33,112 +39,202 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DataTable,
+  DataTableCell,
+  DataTableHead,
+  PageHeader,
+  RowLink,
+  Toolbar,
+  TableFooter,
+  TableSkeleton,
+} from "@/components/page";
+import { ResourceId, StatusCell } from "@/components/status-badge";
+import { useToast } from "@/lib/useToast";
+import { EmptyState, ErrorState, ForbiddenState } from "@/components/states";
+
+const STATUSES = [
+  "READY",
+  "BUSY",
+  "DRAINING",
+  "OFFLINE",
+  "REVOKED",
+  "REGISTERING",
+] as const;
 
 export default function WorkersPage() {
   const { session } = useAuth();
   const [status, setStatus] = useState("ALL");
-  const path = status === "ALL" ? "/workers?limit=50" : `/workers?limit=50&status=${status}`;
-  const query = useList<Worker>(path);
+  const params = new URLSearchParams();
+  params.set("limit", "100");
+  if (status !== "ALL") params.set("status", status);
 
+  const query = useList<Worker>(`/workers?${params.toString()}`);
   const rows = query.rows;
   const canAdmin = roleCan(session?.role, "workers:admin");
+  const filtering = status !== "ALL";
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Workers</h1>
-          <p className="text-xs text-muted-foreground">
-            {rows.length} registered; a revoked worker never receives work again.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Select value={status} onValueChange={(value) => setStatus(value ?? "ALL")}>
-            <SelectTrigger className="w-40" aria-label="Filter by status">
-              <SelectValue placeholder="Status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ALL">All statuses</SelectItem>
-              <SelectItem value="READY">Ready</SelectItem>
-              <SelectItem value="BUSY">Busy</SelectItem>
-              <SelectItem value="DRAINING">Draining</SelectItem>
-              <SelectItem value="OFFLINE">Offline</SelectItem>
-              <SelectItem value="REVOKED">Revoked</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
-            <RefreshCw className="size-3.5" aria-hidden />
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Workers"
+        description="The fleet that claims and runs queued work."
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={query.reload}
+            disabled={query.state === "loading"}
+          >
+            <RefreshCw
+              className={query.state === "loading" ? "animate-spin" : undefined}
+              aria-hidden
+            />
             Refresh
           </Button>
-        </div>
-      </header>
+        }
+      />
 
-      <div className="rounded-lg border border-border">
-        <AsyncBoundary
-          state={query.state}
-          error={query.error}
-          forbidden={query.forbidden}
-          empty={query.state === "ready" && rows.length === 0}
-          onRetry={query.reload}
-          loadingLabel="Loading workers"
-          emptyTitle="No workers registered"
-          emptyDescription="Register a worker to begin executing queued work."
+      <Toolbar>
+        <Select value={status} onValueChange={(value) => setStatus(value ?? "ALL")}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-36 text-[12.5px]"
+            aria-label="Filter by status"
+          >
+            <SelectValue placeholder="Any status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">Any status</SelectItem>
+            {STATUSES.map((s) => (
+              <SelectItem key={s} value={s}>
+                {s.charAt(0) + s.slice(1).toLowerCase()}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
 
-          emptyAction={
-            <Button size="sm" variant="outline" render={<Link href="/docs" />}>
-              How workers connect
-            </Button>
-          }
-        >
-          <Table>
+        {filtering ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setStatus("ALL")}
+            className="h-7 text-[12.5px] text-muted-foreground"
+          >
+            Clear filter
+          </Button>
+        ) : null}
+      </Toolbar>
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        {query.state === "loading" ? (
+          <DataTable>
             <TableHeader>
               <TableRow>
-                <TableHead>Worker</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Draining</TableHead>
-                <TableHead>Last heartbeat</TableHead>
-                {canAdmin ? <TableHead className="text-right">Actions</TableHead> : null}
+                <DataTableHead>Worker</DataTableHead>
+                <DataTableHead className="w-28">Status</DataTableHead>
+                <DataTableHead className="w-32">Hostname</DataTableHead>
+                <DataTableHead className="w-20">Version</DataTableHead>
+                <DataTableHead className="w-32" align="right">
+                  Last heartbeat
+                </DataTableHead>
+                {canAdmin ? (
+                  <DataTableHead className="w-20" align="right">
+                    Actions
+                  </DataTableHead>
+                ) : null}
               </TableRow>
             </TableHeader>
+            <TableSkeleton rows={8} columns={canAdmin ? 6 : 5} />
+          </DataTable>
+        ) : query.state === "error" ? (
+          query.forbidden ? (
+            <ForbiddenState />
+          ) : (
+            <ErrorState error={query.error} onRetry={query.reload} />
+          )
+        ) : rows.length === 0 ? (
+          <EmptyState
+            title={
+              filtering ? "No workers with that status" : "No workers registered"
+            }
+            description={
+              filtering
+                ? "Clear the filter to see the whole fleet."
+                : "A worker registers over HTTP, claims work, holds a lease, and heartbeats. Until one connects, executions queue and nothing runs."
+            }
+            action={
+              filtering ? (
+                <Button size="sm" variant="outline" onClick={() => setStatus("ALL")}>
+                  Clear filter
+                </Button>
+              ) : null
+            }
+          />
+        ) : (
+          <DataTable>
+            <TableHeader>
+              <TableRow>
+                <DataTableHead>Worker</DataTableHead>
+                <DataTableHead className="w-28">Status</DataTableHead>
+                <DataTableHead className="w-32">Hostname</DataTableHead>
+                <DataTableHead className="w-20">Version</DataTableHead>
+                <DataTableHead className="w-32" align="right">
+                  Last heartbeat
+                </DataTableHead>
+                {canAdmin ? (
+                  <DataTableHead className="w-20" align="right">
+                    Actions
+                  </DataTableHead>
+                ) : null}
+              </TableRow>
+            </TableHeader>
+
             <TableBody>
               {rows.map((worker) => (
-                <TableRow key={worker.id}>
-                  <TableCell>
-                    <Link
-                      href={`/workers/${worker.id}`}
-                      className="font-medium underline-offset-4 hover:underline"
-                    >
-                      {worker.name ?? worker.hostname}
-                    </Link>
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      {worker.hostname}
+                <TableRow key={worker.id} className="h-8">
+                  <DataTableCell className="font-medium">
+                    <span className="flex items-baseline gap-2">
+                      <RowLink href={`/workers/${worker.id}`}>
+                        {worker.name ?? worker.hostname}
+                      </RowLink>
+                      <ResourceId id={worker.id} label="worker id" />
                     </span>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={worker.status} />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {worker.draining ? "yes" : "no"}
-                  </TableCell>
-                  <TableCell
-                    className="text-xs text-muted-foreground"
+                  </DataTableCell>
+
+                  <DataTableCell>
+                    <StatusCell status={worker.status} />
+                  </DataTableCell>
+
+                  <DataTableCell className="text-[12px] text-muted-foreground">
+                    {worker.hostname}
+                  </DataTableCell>
+
+                  <DataTableCell className="text-[12px] text-muted-foreground">
+                    {worker.version ?? "—"}
+                  </DataTableCell>
+
+                  <DataTableCell
+                    align="right"
+                    className="text-[12px] text-muted-foreground"
                     title={formatTimestamp(worker.last_heartbeat_at)}
                   >
                     {formatRelative(worker.last_heartbeat_at)}
-                  </TableCell>
+                  </DataTableCell>
+
                   {canAdmin ? (
-                    <TableCell className="text-right">
+                    <DataTableCell align="right">
                       <WorkerActions worker={worker} onDone={query.reload} />
-                    </TableCell>
+                    </DataTableCell>
                   ) : null}
                 </TableRow>
               ))}
             </TableBody>
-          </Table>
-        </AsyncBoundary>
+          </DataTable>
+        )}
       </div>
+
+      <TableFooter shown={rows.length} />
     </div>
   );
 }
@@ -150,38 +246,47 @@ function WorkerActions({
   worker: Worker;
   onDone: () => void;
 }) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<"drain" | "revoke" | null>(null);
+  const label = worker.name ?? worker.hostname;
 
-  async function act(action: "drain" | "revoke", confirm: string) {
-    if (!window.confirm(confirm)) return;
+  async function act(action: "drain" | "revoke") {
     setBusy(true);
     try {
       await api.post(`/workers/${worker.id}/${action}`);
+      toast.success(
+        action === "drain"
+          ? `${label} is draining`
+          : `${label} revoked`,
+      );
+      setConfirming(null);
       onDone();
     } catch (cause) {
-      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+      toast.error(
+        `Could not ${action} ${label}`,
+        cause instanceof ApiError ? cause.message : undefined,
+      );
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="flex items-center justify-end gap-1">
+    <div className="flex items-center justify-end gap-0.5">
       {worker.status !== "DRAINING" && worker.status !== "REVOKED" ? (
         <Button
           variant="ghost"
-          size="icon"
+          size="icon-sm"
           disabled={busy}
-          aria-label={`Drain ${worker.hostname}`}
+          aria-label={`Drain ${label}`}
           title="Drain: finish current work, accept nothing new"
-          onClick={() =>
-            act("drain", `Drain "${worker.hostname}"? It stops accepting new work.`)
-          }
+          onClick={() => setConfirming("drain")}
         >
-          {busy ? (
-            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          {busy && confirming === "drain" ? (
+            <Loader2 className="animate-spin" aria-hidden />
           ) : (
-            <Power className="size-3.5" aria-hidden />
+            <Power aria-hidden />
           )}
         </Button>
       ) : null}
@@ -189,20 +294,93 @@ function WorkerActions({
       {worker.status !== "REVOKED" ? (
         <Button
           variant="ghost"
-          size="icon"
+          size="icon-sm"
           disabled={busy}
-          aria-label={`Revoke ${worker.hostname}`}
+          aria-label={`Revoke ${label}`}
           title="Revoke: permanently"
-          onClick={() =>
-            act(
-              "revoke",
-              `Revoke "${worker.hostname}"? It can never receive work again.`,
-            )
-          }
+          onClick={() => setConfirming("revoke")}
         >
-          <ShieldOff className="size-3.5" aria-hidden />
+          {busy && confirming === "revoke" ? (
+            <Loader2 className="animate-spin" aria-hidden />
+          ) : (
+            <ShieldOff aria-hidden />
+          )}
         </Button>
       ) : null}
+
+      <ConfirmWorkerAction
+        worker={worker}
+        action={confirming}
+        busy={busy}
+        onCancel={() => setConfirming(null)}
+        onConfirm={act}
+      />
     </div>
+  );
+}
+
+/**
+ * States the consequence before the action.
+ *
+ * UI.md section 62: never "are you sure", but "revoke this worker in
+ * production, and here is what stops happening".
+ */
+function ConfirmWorkerAction({
+  worker,
+  action,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  worker: Worker;
+  action: "drain" | "revoke" | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (action: "drain" | "revoke") => void;
+}) {
+  const label = worker.name ?? worker.hostname;
+  const revoking = action === "revoke";
+
+  return (
+    <AlertDialog
+      open={action !== null}
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {revoking ? `Revoke ${label}?` : `Drain ${label}?`}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {revoking ? (
+              <>
+                This is permanent. <strong>{label}</strong> will never be
+                offered work again, and any lease it holds is abandoned. Work
+                already dispatched to it fails.
+              </>
+            ) : (
+              <>
+                <strong>{label}</strong> stops accepting new work. Anything it
+                has already claimed runs to completion.
+              </>
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogAction variant="outline" onClick={onCancel}>
+            Cancel
+          </AlertDialogAction>
+          <AlertDialogAction
+            variant={revoking ? "destructive" : "default"}
+            disabled={busy}
+            onClick={() => onConfirm(revoking ? "revoke" : "drain")}
+          >
+            {busy ? "Working…" : revoking ? "Revoke worker" : "Drain worker"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

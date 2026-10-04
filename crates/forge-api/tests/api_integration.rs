@@ -1833,3 +1833,71 @@ async fn worker_end_to_end_lifecycle_smoke_test() {
     })
     .await;
 }
+
+/// Verifies that comma-separated status query filtering works (e.g. GET /executions?status=DISPATCHED,RUNNING).
+#[tokio::test]
+async fn comma_separated_status_filter_works() {
+    with_db!(|pool: PgPool| async move {
+        let (token, tenant_id) =
+            register_user(&pool, "filter-test@example.com", "correct horse battery").await;
+        let app = router(pool.clone());
+
+        // Create a job & version
+        let (job_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO jobs (id, tenant_id, name, status, priority)
+             VALUES (gen_random_uuid(), $1, 'filter_job', 'ACTIVE', 'NORMAL') RETURNING id",
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let (version_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO job_versions (id, tenant_id, job_id, version_number, execution_type, created_at)
+             VALUES (gen_random_uuid(), $1, $2, 1, 'WORKER_TASK', NOW()) RETURNING id",
+        )
+        .bind(tenant_id)
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Insert executions in different statuses: QUEUED, DISPATCHED, RUNNING, SUCCEEDED
+        for st in ["QUEUED", "DISPATCHED", "RUNNING", "SUCCEEDED"] {
+            sqlx::query(
+                "INSERT INTO executions (id, tenant_id, job_id, job_version_id, status, priority, trigger_source, created_at)
+                 VALUES (gen_random_uuid(), $1, $2, $3, $4, 'NORMAL', 'MANUAL', NOW())",
+            )
+            .bind(tenant_id)
+            .bind(job_id)
+            .bind(version_id)
+            .bind(st)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Test GET /api/v1/executions?status=DISPATCHED,RUNNING
+        let (status, body) = send(
+            &app,
+            "GET",
+            "/api/v1/executions?status=DISPATCHED,RUNNING",
+            Some(&token),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let items = body["data"].as_array().expect("array of executions");
+        assert_eq!(items.len(), 2, "should match both DISPATCHED and RUNNING");
+        let statuses: Vec<&str> = items
+            .iter()
+            .map(|item| item["status"].as_str().unwrap())
+            .collect();
+        assert!(statuses.contains(&"DISPATCHED"));
+        assert!(statuses.contains(&"RUNNING"));
+        assert!(!statuses.contains(&"QUEUED"));
+        assert!(!statuses.contains(&"SUCCEEDED"));
+    })
+    .await;
+}

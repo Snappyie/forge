@@ -1,27 +1,22 @@
 "use client";
 
 /**
- * Job list (spec 7.5).
+ * Job list (spec 7.5, UI.md section 5).
  *
- * Reads live data through the typed client, and provides the loading, empty,
- * error and permission-denied states spec 7.2 requires.
+ * The screen an operator opens most, so it is built for scanning rather than
+ * for reading: a full-bleed table, one row per job, and every column a value
+ * they actually compare. Filtering happens client-side over the loaded page, so
+ * typing is instant and never waits on a round trip.
  */
 
-import Link from "next/link";
 import { useMemo, useState } from "react";
-import { Archive, Loader2, Play, Plus, RefreshCw, Search } from "lucide-react";
+import { Archive, Loader2, Play, Plus, RefreshCw, Search, X } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { usePaginatedQuery } from "@/lib/useQuery";
-import { cn } from "cn";
-import { BulkActions } from "@/components/ui/bulk-actions";
-import { ImportExport } from "@/components/ui/import-export";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Spinner } from "@/components/ui/spinner";
-import {
-} from "@/components/ui/pagination";
 import { compare, useTablePrefs } from "@/lib/tablePrefs";
+import { useToast } from "@/lib/useToast";
 import {
   formatRelative,
   formatTimestamp,
@@ -29,19 +24,17 @@ import {
   type Job,
   type Role,
 } from "@/lib/types";
-import { AsyncBoundary } from "@/components/states";
-import { PriorityBadge, StatusBadge } from "@/components/status-badge";
+import { BulkActions } from "@/components/ui/bulk-actions";
+import { ImportExport } from "@/components/ui/import-export";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
-  Table,
   TableBody,
-  TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -58,20 +51,35 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DataTable,
+  DataTableCell,
+  DataTableHead,
+  NumCell,
+  PinnedCell,
+  PageHeader,
+  RowLink,
+  Toolbar,
+  TableFooter,
+  TableSkeleton,
+} from "@/components/page";
+import { PriorityBadge, StatusCell } from "@/components/status-badge";
+import { EmptyState, ErrorState, ForbiddenState } from "@/components/states";
 
 export default function JobsPage() {
   const { session } = useAuth();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("ALL");
   const [selected, setSelected] = useState<string[]>([]);
-  const { prefs, toggleSort, setDensity } = useTablePrefs("jobs");
+  const { prefs, toggleSort } = useTablePrefs("jobs");
 
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize, setPageSize] = useState(50);
   const query = usePaginatedQuery<Job>("/jobs", pageSize);
   // Controlled so the empty state can offer "New job" itself, rather than only
   // describing what the user could do.
   const [createOpen, setCreateOpen] = useState(false);
-  const jobs = useMemo(() => {
+
+  const filtered = useMemo(() => {
     const rows = query.data ?? [];
     return rows.filter((job) => {
       if (status !== "ALL" && job.status !== status) return false;
@@ -84,10 +92,8 @@ export default function JobsPage() {
     });
   }, [query.data, search, status]);
 
-  // A filter that matches nothing is an empty result, not an empty collection.
-  const empty = query.state === "ready" && jobs.length === 0;
   const sorted = useMemo(() => {
-    const copy = [...jobs];
+    const copy = [...filtered];
     copy.sort((a, b) => {
       const record = a as unknown as Record<string, unknown>;
       const other = b as unknown as Record<string, unknown>;
@@ -95,39 +101,59 @@ export default function JobsPage() {
       return prefs.sortDirection === "asc" ? result : -result;
     });
     return copy;
-  }, [jobs, prefs.sortKey, prefs.sortDirection]);
+  }, [filtered, prefs.sortKey, prefs.sortDirection]);
 
   const filtering = search.trim().length > 0 || status !== "ALL";
+  const canWrite = roleCan(session?.role, "jobs:write");
+  const allSelected =
+    sorted.length > 0 && selected.length === sorted.length;
+
+  function clearFilters() {
+    setSearch("");
+    setStatus("ALL");
+  }
+
+  const columns = [
+    ["name", "Name"],
+    ["status", "Status"],
+    ["priority", "Priority"],
+    ["updated_at", "Updated"],
+  ] as const;
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Jobs</h1>
-          <p className="text-xs text-muted-foreground">
-            Definitions, versions, and schedules.
-          </p>
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Jobs"
+        description="Definitions, versions, and schedules."
+        actions={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={query.reload}
+              disabled={query.state === "loading"}
+            >
+              <RefreshCw
+                className={query.state === "loading" ? "animate-spin" : undefined}
+                aria-hidden
+              />
+              Refresh
+            </Button>
+            {canWrite ? (
+              <CreateJobDialog
+                onCreated={query.reload}
+                open={createOpen}
+                onOpenChange={setCreateOpen}
+              />
+            ) : null}
+          </>
+        }
+      />
 
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={query.reload} aria-label="Refresh">
-            <RefreshCw className="size-3.5" aria-hidden />
-            Refresh
-          </Button>
-          {roleCan(session?.role, "jobs:write") ? (
-            <CreateJobDialog
-              onCreated={query.reload}
-              open={createOpen}
-              onOpenChange={setCreateOpen}
-            />
-          ) : null}
-        </div>
-      </header>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[16rem] flex-1">
+      <Toolbar>
+        <div className="relative min-w-[14rem] flex-1 sm:max-w-xs">
           <Search
-            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+            className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
             aria-hidden
           />
           <Input
@@ -136,12 +162,16 @@ export default function JobsPage() {
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Filter by name or key"
             aria-label="Filter jobs"
-            className="pl-8"
+            className="h-7 pl-7 text-[12.5px]"
           />
         </div>
 
         <Select value={status} onValueChange={(value) => setStatus(value ?? "ALL")}>
-          <SelectTrigger className="w-36" aria-label="Filter by status">
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-32 text-[12.5px]"
+            aria-label="Filter by status"
+          >
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
@@ -152,123 +182,121 @@ export default function JobsPage() {
           </SelectContent>
         </Select>
 
-        {/* UI.md section 5: density is a persistent preference. */}
-        <label className="sr-only" htmlFor="page-size">
-          Rows per page
-        </label>
-        <select
-          id="page-size"
-          value={String(pageSize)}
-          onChange={(e) => setPageSize(Number(e.target.value))}
-          className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-        >
-          {[10, 25, 50, 100].map((size) => (
-            <option key={size} value={size}>
-              {size} / page
-            </option>
-          ))}
-        </select>
-
-        <div className="flex rounded-md border border-border">
-          {(["compact", "comfortable"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setDensity(option)}
-              aria-pressed={prefs.density === option}
-              aria-label={`${option} density`}
-              className={cn(
-                "px-2 py-1 text-[11px] capitalize",
-                prefs.density === option
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent/50",
-              )}
-            >
-              {option === "compact" ? "Dense" : "Roomy"}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
-        <span>
-          {sorted.length} loaded{query.page?.has_more ? " (more available)" : ""}
-        </span>
-        {query.page?.has_more ? (
-          <button
-            type="button"
-            onClick={query.loadMore}
-            disabled={query.state === "loading"}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 disabled:opacity-50"
+        {filtering ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            className="h-7 text-[12.5px] text-muted-foreground"
           >
-            {query.state === "loading" ? <Spinner className="size-3" /> : null}
-            Load more
-          </button>
+            <X aria-hidden />
+            Clear filters
+          </Button>
         ) : null}
-      </div>
 
-      <ImportExport onImported={query.reload} />
+        <div className="ml-auto flex items-center gap-2">
+          <ImportExport onImported={query.reload} />
+          <label htmlFor="page-size" className="sr-only">
+            Rows per page
+          </label>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(value) => value && setPageSize(Number(value))}
+          >
+            <SelectTrigger
+              size="sm"
+              id="page-size"
+              className="h-7 w-24 text-[12.5px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[25, 50, 100].map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {size} / page
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </Toolbar>
 
-      <BulkActions
-        selected={selected}
-        onDone={() => {
-          setSelected([]);
-          query.reload();
-        }}
-      />
+      {selected.length > 0 ? (
+        <div className="border-b border-border bg-accent/40 px-4 py-2">
+          <BulkActions
+            selected={selected}
+            onDone={() => {
+              setSelected([]);
+              query.reload();
+            }}
+          />
+        </div>
+      ) : null}
 
-      <div className="rounded-lg border border-border">
-        <AsyncBoundary
-          state={query.state}
-          error={query.error}
-          forbidden={query.forbidden}
-          empty={empty}
-          onRetry={query.reload}
-          loadingLabel="Loading jobs"
-          emptyTitle={filtering ? "No jobs match this filter" : "No jobs yet"}
-          emptyDescription={
-            filtering
-              ? "Try a different search or clear the status filter."
-              : "Create a job to describe the work this tenant runs."
-          }
-          emptyAction={
-            filtering ? null : (
-              <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
-                <Plus className="size-3.5" aria-hidden />
-                New job
-              </Button>
-            )
-          }
-        >
-          <Table>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {query.state === "loading" ? (
+          <DataTable>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-8">
+                <DataTableHead className="w-8" />
+                {columns.map(([, label]) => (
+                  <DataTableHead key={label}>{label}</DataTableHead>
+                ))}
+                <DataTableHead className="w-8" />
+                <DataTableHead className="w-20" align="right">
+                  Actions
+                </DataTableHead>
+              </TableRow>
+            </TableHeader>
+            <TableSkeleton rows={12} columns={7} />
+          </DataTable>
+        ) : query.state === "error" ? (
+          query.forbidden ? (
+            <ForbiddenState />
+          ) : (
+            <ErrorState error={query.error} onRetry={query.reload} />
+          )
+        ) : sorted.length === 0 ? (
+          <EmptyState
+            title={filtering ? "No jobs match these filters" : "No jobs yet"}
+            description={
+              filtering
+                ? "Nothing here matches. Clear the filters to see every job in this tenant."
+                : "A job is a reusable definition of work this tenant runs. Create one to get started."
+            }
+            action={
+              filtering ? (
+                <Button size="sm" variant="outline" onClick={clearFilters}>
+                  Clear filters
+                </Button>
+              ) : canWrite ? (
+                <Button size="sm" onClick={() => setCreateOpen(true)}>
+                  <Plus aria-hidden />
+                  Create your first job
+                </Button>
+              ) : null
+            }
+          />
+        ) : (
+          <DataTable>
+            <TableHeader>
+              <TableRow>
+                <DataTableHead className="w-8">
                   <Checkbox
                     aria-label="Select all listed jobs"
-                    checked={
-                      sorted.length > 0 && selected.length === sorted.length
-                    }
+                    checked={allSelected}
                     onCheckedChange={(checked) =>
                       setSelected(checked ? sorted.map((j) => j.id) : [])
                     }
                   />
-                </TableHead>
-                {(
-                  [
-                    ["name", "Name"],
-                    ["status", "Status"],
-                    ["priority", "Priority"],
-                    ["current_version_id", "Version"],
-                    ["updated_at", "Updated"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <TableHead key={key}>
+                </DataTableHead>
+                {columns.map(([key, label]) => (
+                  <DataTableHead key={key}>
                     <button
                       type="button"
                       onClick={() => toggleSort(key)}
                       aria-label={`Sort by ${label}`}
-                      className="flex items-center gap-1 hover:text-foreground"
+                      className="inline-flex items-center gap-1 hover:text-foreground"
                     >
                       {label}
                       {prefs.sortKey === key ? (
@@ -277,18 +305,19 @@ export default function JobsPage() {
                         </span>
                       ) : null}
                     </button>
-                  </TableHead>
+                  </DataTableHead>
                 ))}
-                <TableHead className="text-right">Actions</TableHead>
+                <DataTableHead className="w-8" />
+                <DataTableHead className="w-20" align="right">
+                  Actions
+                </DataTableHead>
               </TableRow>
             </TableHeader>
+
             <TableBody>
               {sorted.map((job) => (
-                <TableRow
-                  key={job.id}
-                  className={prefs.density === "compact" ? "h-8" : undefined}
-                >
-                  <TableCell>
+                <TableRow key={job.id} className="h-8">
+                  <DataTableCell className="w-8">
                     <Checkbox
                       aria-label={`Select ${job.name}`}
                       checked={selected.includes(job.id)}
@@ -300,46 +329,66 @@ export default function JobsPage() {
                         )
                       }
                     />
-                  </TableCell>
-                  <TableCell>
-                    <Link
-                      href={`/jobs/${job.id}`}
-                      className="font-medium underline-offset-4 hover:underline"
-                    >
-                      {job.name}
-                    </Link>
-                    {job.key ? (
-                      <code className="ml-2 text-xs text-muted-foreground">{job.key}</code>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={job.status} />
-                  </TableCell>
-                  <TableCell>
+                  </DataTableCell>
+
+                  <PinnedCell>
+                    <span className="flex items-baseline gap-2">
+                      <RowLink href={`/jobs/${job.id}`}>{job.name}</RowLink>
+                      {job.key ? (
+                        <code className="font-mono text-[11px] text-muted-foreground">
+                          {job.key}
+                        </code>
+                      ) : null}
+                    </span>
+                  </PinnedCell>
+
+                  <DataTableCell>
+                    <StatusCell status={job.status} />
+                  </DataTableCell>
+
+                  <DataTableCell>
                     <PriorityBadge priority={job.priority} />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {job.current_version_id ? (
-                      <code>{job.current_version_id.slice(0, 8)}</code>
-                    ) : (
-                      "—"
-                    )}
-                  </TableCell>
-                  <TableCell
-                    className="text-xs text-muted-foreground"
+                  </DataTableCell>
+
+                  <NumCell
+                    className="text-[12px] text-muted-foreground"
                     title={formatTimestamp(job.updated_at)}
                   >
                     {formatRelative(job.updated_at)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <RowActions job={job} role={session?.role} onDone={query.reload} />
-                  </TableCell>
+                  </NumCell>
+
+                  <DataTableCell className="w-8" />
+
+                  <DataTableCell align="right" className="w-20">
+                    <RowActions
+                      job={job}
+                      role={session?.role}
+                      onDone={query.reload}
+                    />
+                  </DataTableCell>
                 </TableRow>
               ))}
             </TableBody>
-          </Table>
-        </AsyncBoundary>
+          </DataTable>
+        )}
       </div>
+
+      <TableFooter
+        shown={sorted.length}
+        total={query.data?.length}
+        hasMore={query.page?.has_more}
+      >
+        {query.page?.has_more ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={query.loadMore}
+            disabled={query.state === "loading"}
+          >
+            Load more
+          </Button>
+        ) : null}
+      </TableFooter>
     </div>
   );
 }
@@ -353,50 +402,66 @@ function RowActions({
   role: Role | undefined;
   onDone: () => void;
 }) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
 
   async function run() {
     setBusy(true);
     try {
       // A generated idempotency key makes a double-click harmless.
-      const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
-      await api.post(`/jobs/${job.id}/trigger`, {}, idempotencyKey);
+      const idempotencyKey = crypto.randomUUID();
+      const created = await api.post<{ execution_id?: string; id?: string }>(
+        `/jobs/${job.id}/trigger`,
+        {},
+        idempotencyKey,
+      );
+      const executionId = created.execution_id ?? created.id;
+      toast.success("Execution queued", {
+        label: "Open execution",
+        onClick: () => window.location.assign(`/executions/${executionId}`),
+      });
       onDone();
     } catch (cause) {
-      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+      toast.error(
+        `Could not run ${job.name}`,
+        cause instanceof ApiError ? cause.message : undefined,
+      );
     } finally {
       setBusy(false);
     }
   }
 
   async function archive() {
-    if (!window.confirm(`Archive "${job.name}"? It will stop being scheduled.`)) return;
     setBusy(true);
     try {
       await api.delete(`/jobs/${job.id}`);
+      toast.success(`${job.name} archived`);
       onDone();
     } catch (cause) {
-      window.alert(cause instanceof ApiError ? cause.message : "the request failed");
+      toast.error(
+        `Could not archive ${job.name}`,
+        cause instanceof ApiError ? cause.message : undefined,
+      );
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="flex items-center justify-end gap-1">
+    <div className="flex items-center justify-end gap-0.5">
       {roleCan(role, "jobs:trigger") ? (
         <Button
           variant="ghost"
-          size="icon"
+          size="icon-sm"
           disabled={busy}
-          aria-label={`Run ${job.name}`}
+          aria-label={`Run ${job.name} now`}
           title="Run now"
           onClick={run}
         >
           {busy ? (
-            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            <Loader2 className="animate-spin" aria-hidden />
           ) : (
-            <Play className="size-3.5" aria-hidden />
+            <Play aria-hidden />
           )}
         </Button>
       ) : null}
@@ -404,13 +469,13 @@ function RowActions({
       {roleCan(role, "jobs:delete") && job.status !== "ARCHIVED" ? (
         <Button
           variant="ghost"
-          size="icon"
+          size="icon-sm"
           disabled={busy}
           aria-label={`Archive ${job.name}`}
           title="Archive"
           onClick={archive}
         >
-          <Archive className="size-3.5" aria-hidden />
+          <Archive aria-hidden />
         </Button>
       ) : null}
     </div>
@@ -467,10 +532,10 @@ function CreateJobDialog({
     try {
       // A client-generated idempotency key means a retried submit creates one
       // job rather than two (spec 02.15).
-      const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
+      const idempotencyKey = crypto.randomUUID();
       await api.post(
         "/jobs",
-        { name: name.trim(), key: key.trim() || undefined, priority },
+        { name: trimmedName, key: trimmedKey || undefined, priority },
         idempotencyKey,
       );
       setOpen(false);
@@ -481,7 +546,7 @@ function CreateJobDialog({
       setError(
         cause instanceof ApiError
           ? (cause.fieldError("name") ?? cause.message)
-          : "could not reach the server",
+          : "Could not reach the server.",
       );
     } finally {
       setBusy(false);
@@ -490,17 +555,19 @@ function CreateJobDialog({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button size="sm">
-          <Plus className="size-3.5" aria-hidden />
-          New job
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger
+        render={
+          <Button size="sm">
+            <Plus aria-hidden />
+            New job
+          </Button>
+        }
+      />
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Create a job</DialogTitle>
           <DialogDescription>
-            A job is a reusable definition; publish a version before running it.
+            A job is a reusable definition. Publish a version before it can run.
           </DialogDescription>
         </DialogHeader>
 
@@ -517,14 +584,14 @@ function CreateJobDialog({
               aria-describedby={nameProblem ? "job-name-problem" : undefined}
             />
             {nameProblem && name.length > 0 ? (
-              <p id="job-name-problem" className="text-xs text-destructive">
+              <p id="job-name-problem" className="text-xs text-danger-foreground">
                 {nameProblem}
               </p>
             ) : null}
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="job-key">Key (optional)</Label>
+            <Label htmlFor="job-key">Key</Label>
             <Input
               id="job-key"
               value={key}
@@ -534,20 +601,23 @@ function CreateJobDialog({
               aria-describedby={keyProblem ? "job-key-problem" : undefined}
             />
             {keyProblem ? (
-              <p id="job-key-problem" className="text-xs text-destructive">
+              <p id="job-key-problem" className="text-xs text-danger-foreground">
                 {keyProblem}
               </p>
             ) : (
               <p className="text-xs text-muted-foreground">
-                Unique within this tenant.
+                Optional. Unique within this tenant.
               </p>
             )}
           </div>
 
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="job-priority">Priority</Label>
-            <Select value={priority} onValueChange={(value) => value && setPriority(value)}>
-              <SelectTrigger id="job-priority">
+            <Select
+              value={priority}
+              onValueChange={(value) => value && setPriority(value)}
+            >
+              <SelectTrigger id="job-priority" size="sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -561,17 +631,21 @@ function CreateJobDialog({
           </div>
 
           {error ? (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-xs text-danger-foreground">
               {error}
             </p>
           ) : null}
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={busy || formProblem !== null}>
-              {busy ? "Creating…" : "Create"}
+              {busy ? "Creating…" : "Create job"}
             </Button>
           </DialogFooter>
         </form>

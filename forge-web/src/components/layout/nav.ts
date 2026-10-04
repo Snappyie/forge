@@ -3,15 +3,15 @@
 /**
  * Global navigation (UI.md section 1).
  *
- * The navigation is grouped by work pattern — Monitor, Define, Capacity,
- * Govern — rather than listed flat. A flat list of twenty destinations gives no
- * hint about how the product is organised, and it left four clock icons
- * ("Schedules", "Calendar", "Running now", "Upcoming") competing unlabelled.
- * Grouping teaches the model: watch what is happening, define the work, size
- * the capacity, then govern it.
+ * Grouped by the work the operator is doing rather than by route: Monitor
+ * (what is happening), Define (what should happen), Capacity (where it runs),
+ * Govern (who and why). A flat list of twenty destinations teaches nothing and
+ * leaves four clock icons competing unlabelled.
  *
- * Counts carry the same status colour used everywhere else in the console, so a
- * red badge beside Alerts is the same red as a failed execution.
+ * Counts come from the dashboard aggregate the shell already requests, so a
+ * badge can never disagree with the number behind it. An unknown count is
+ * omitted rather than shown as zero — "0 alerts" is a confident wrong answer
+ * when the request simply failed.
  */
 
 import type { LucideIcon } from "lucide-react";
@@ -27,8 +27,8 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
-  Workflow,
   Users,
+  Workflow,
 } from "lucide-react";
 
 export interface NavItem {
@@ -37,8 +37,8 @@ export interface NavItem {
   icon: LucideIcon;
   /** Rendered as a badge; omitted when the count is unknown. */
   count?: number;
-  /** Status tone for the count, so it agrees with the resource's own colour. */
-  tone?: "bad" | "wait";
+  /** Status tone, so the badge agrees with the resource's own colour. */
+  tone?: "danger" | "warning";
 }
 
 export interface NavGroup {
@@ -63,15 +63,27 @@ export function buildNav(counts: NavCounts): NavGroup[] {
       label: "Monitor",
       items: [
         { href: "/", label: "Dashboard", icon: Activity },
-        { href: "/running", label: "Running now", icon: CircleDot, count: counts.running },
+        {
+          href: "/running",
+          label: "Running now",
+          icon: CircleDot,
+          count: counts.running,
+          tone: "danger",
+        },
         { href: "/upcoming", label: "Upcoming", icon: CalendarClock },
-        { href: "/alerts", label: "Alerts", icon: Bell, count: counts.alerts, tone: "bad" },
+        {
+          href: "/alerts",
+          label: "Alerts",
+          icon: Bell,
+          count: counts.alerts,
+          tone: "danger",
+        },
         {
           href: "/incidents",
           label: "Incidents",
           icon: ShieldAlert,
           count: counts.incidents,
-          tone: "wait",
+          tone: "warning",
         },
       ],
     },
@@ -80,7 +92,12 @@ export function buildNav(counts: NavCounts): NavGroup[] {
       items: [
         { href: "/jobs", label: "Jobs", icon: ClipboardList, count: counts.jobs },
         { href: "/schedules", label: "Schedules", icon: CalendarClock },
-        { href: "/workflows", label: "Workflows", icon: Workflow, count: counts.workflows },
+        {
+          href: "/workflows",
+          label: "Workflows",
+          icon: Workflow,
+          count: counts.workflows,
+        },
         { href: "/calendar", label: "Calendar", icon: CalendarDays },
       ],
     },

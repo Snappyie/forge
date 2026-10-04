@@ -22,6 +22,7 @@ export FORGE_API_KEY_HASHING_SECRET="local-development-hash-secret"
 export FORGE_LOG_LEVEL="info"
 export FORGE_RATE_LIMIT_PER_SECOND="1000"
 export FORGE_RATE_LIMIT_BURST="5000"
+export FORGE_ALLOW_OPEN_REGISTRATION="true"
 
 echo "Starting Forge API Server (Rust) in the background..."
 # This will compile and run the API server natively

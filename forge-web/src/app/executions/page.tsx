@@ -1,30 +1,33 @@
 "use client";
 
+/**
+ * Execution list (UI.md section 13, spec 7.6).
+ *
+ * The page an operator opens when something went wrong, so the columns are the
+ * ones that answer "what happened and why": status, which job, what triggered
+ * it, which attempt, on which worker, for how long, and what it failed with.
+ *
+ * Every filter here is wired to a real query parameter the API accepts
+ * (`job`, `status`, `worker`, `queue`, `created_after`). A filter button that
+ * renders a fixed string and changes nothing is worse than no filter at all.
+ */
+
 import Link from "next/link";
-import { useState } from "react";
-import { Search, Download, GitCompare, RefreshCw, MoreHorizontal } from "lucide-react";
+import { useMemo, useState } from "react";
+import { RefreshCw, Search, X } from "lucide-react";
 
 import { useList } from "@/lib/useQuery";
+import { useJobNames } from "@/lib/useJobNames";
 import {
+  formatDuration,
   formatRelative,
   formatTimestamp,
   type Execution,
   type ExecutionStatus,
 } from "@/lib/types";
-import { AsyncBoundary } from "@/components/states";
-import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { TableBody, TableHeader, TableRow } from "@/components/ui/table";
 import {
   Select,
   SelectContent,
@@ -32,6 +35,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DataTable,
+  DataTableCell,
+  DataTableHead,
+  NumCell,
+  PinnedCell,
+  PageHeader,
+  RowLink,
+  Toolbar,
+  TableFooter,
+  TableSkeleton,
+} from "@/components/page";
+import { ErrorClassBadge, PriorityBadge, StatusCell } from "@/components/status-badge";
+import { EmptyState, ErrorState, ForbiddenState } from "@/components/states";
 
 const STATUSES: ExecutionStatus[] = [
   "QUEUED",
@@ -48,55 +65,119 @@ const STATUSES: ExecutionStatus[] = [
   "SCHEDULED",
 ];
 
-/** How each trigger source is named in the table (spec 02.9). */
+/**
+ * How each trigger source is named (spec 02.9).
+ *
+ * `TriggerSource` spells the scheduled case "SCHEDULE"; "SCHEDULED" is an
+ * execution *status*, not a trigger. Mapping by trigger keeps a retried or
+ * recovered run honest about where it actually came from.
+ */
 const TRIGGER_LABELS: Record<string, string> = {
   SCHEDULE: "Schedule",
   MANUAL: "Manual",
-  API: "Api",
+  API: "API",
   WORKFLOW: "Workflow",
   RETRY: "Retry",
   RECOVERY: "Recovery",
 };
 
+/** Wall-clock time between `started_at` and `ended_at`, in ms. */
+function durationMs(execution: Execution): number | null {
+  if (!execution.started_at || !execution.ended_at) return null;
+  const start = new Date(execution.started_at).getTime();
+  const end = new Date(execution.ended_at).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  const delta = end - start;
+  return delta >= 0 ? delta : null;
+}
+
 export default function ExecutionsPage() {
   const [status, setStatus] = useState("ALL");
-  const path = status === "ALL" ? "/executions?limit=50" : `/executions?limit=50&status=${status}`;
-  const query = useList<Execution>(path);
+  const [search, setSearch] = useState("");
+
+  // Filters the API actually supports, built rather than hardcoded as text.
+  const params = useMemo(() => {
+    const query = new URLSearchParams();
+    query.set("limit", "100");
+    if (status !== "ALL") query.set("status", status);
+    return query.toString();
+  }, [status]);
+
+  const query = useList<Execution>(`/executions?${params}`);
   const rows = query.rows;
+  // The API returns a job id per execution; this resolves it to a name so the
+  // table is scannable, falling back to the id when it cannot.
+  const { nameFor } = useJobNames();
+
+  // Free-text narrows the loaded page. The API has no text filter, so this is
+  // explicitly a client-side filter rather than a pretend server query.
+  const visible = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter(
+      (row) =>
+        row.id.includes(needle) ||
+        (row.error_message ?? "").toLowerCase().includes(needle) ||
+        (row.error_class ?? "").toLowerCase().includes(needle) ||
+        (row.job_id ?? "").includes(needle) ||
+        (nameFor(row.job_id) ?? "").toLowerCase().includes(needle),
+    );
+  }, [rows, search, nameFor]);
+
+  const filtering = status !== "ALL" || search.trim() !== "";
+
+  function clearFilters() {
+    setStatus("ALL");
+    setSearch("");
+  }
 
   return (
-    <div className="flex flex-col gap-6 p-6 lg:p-8">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Executions</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Every run, across every job, with the reason it ended the way it did.
-          </p>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Executions"
+        description="Every run across every job, with the reason it ended the way it did."
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={query.reload}
+            disabled={query.state === "loading"}
+          >
+            <RefreshCw
+              className={query.state === "loading" ? "animate-spin" : undefined}
+              aria-hidden
+            />
+            Refresh
+          </Button>
+        }
+      />
+
+      <Toolbar>
+        <div className="relative min-w-[14rem] flex-1 sm:max-w-xs">
+          <Search
+            className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <Input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter by id, job, or error"
+            aria-label="Filter loaded executions"
+            className="h-7 pl-7 text-[12.5px]"
+          />
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="h-9">
-            <Download className="mr-2 size-4" />
-            Export
-          </Button>
-          <Button variant="outline" size="sm" className="h-9">
-            <GitCompare className="mr-2 size-4" />
-            Compare
-          </Button>
-        </div>
-      </header>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search execution or job..." className="pl-8 h-9" />
-        </div>
         <Select value={status} onValueChange={(value) => setStatus(value ?? "ALL")}>
-          <SelectTrigger className="w-40 h-9" aria-label="Filter by status">
-            <div className="flex gap-1.5"><span className="text-muted-foreground">Status:</span><SelectValue placeholder="any" /></div>
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-36 text-[12.5px]"
+            aria-label="Filter by status"
+          >
+            <SelectValue placeholder="Any status" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="ALL">any</SelectItem>
+            <SelectItem value="ALL">Any status</SelectItem>
             {STATUSES.map((s) => (
               <SelectItem key={s} value={s}>
                 {s.replace(/_/g, " ").toLowerCase()}
@@ -104,110 +185,187 @@ export default function ExecutionsPage() {
             ))}
           </SelectContent>
         </Select>
-        <Button variant="outline" className="h-9 text-muted-foreground font-normal">After: 2026-10-01</Button>
-        <Button variant="outline" className="h-9 text-muted-foreground font-normal">Trigger: Schedule</Button>
-        <Button variant="outline" className="h-9 text-muted-foreground font-normal">Queue: default</Button>
-        <div className="ml-auto">
-          <Button variant="ghost" size="sm" className="h-9 text-muted-foreground hover:text-foreground" onClick={query.reload}>
-            <RefreshCw className="mr-2 size-3.5" />
-            Live · 5s
-          </Button>
-        </div>
-      </div>
 
-      <div className="rounded-lg border border-border bg-card">
-        <AsyncBoundary
-          state={query.state}
-          error={query.error}
-          forbidden={query.forbidden}
-          empty={query.state === "ready" && rows.length === 0}
-          onRetry={query.reload}
-          loadingLabel="Loading executions"
-          emptyTitle={status === "ALL" ? "No executions yet" : "No executions with this status"}
-          emptyDescription={status === "ALL" ? "Trigger a job or wait for a schedule to fire." : "Clear the status filter to see other executions."}
-          emptyAction={
-            status === "ALL" ? (
-              <Button size="sm" variant="outline" render={<Link href="/jobs" />}>Go to jobs</Button>
-            ) : null
-          }
-        >
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader className="bg-transparent">
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="w-12 pl-4"><Checkbox /></TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Status</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Job</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Trigger</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Attempt</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Worker</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Duration</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Started</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Error</TableHead>
-                  <TableHead className="w-12"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((execution) => (
-                  <TableRow key={execution.id} className="group">
-                    <TableCell className="pl-4"><Checkbox /></TableCell>
-                    <TableCell>
-                      <StatusBadge status={execution.status} />
-                    </TableCell>
-                    <TableCell>
-                      <Link href={`/executions/${execution.id}`} className="block">
-                        <div className="font-medium text-sm">{(execution as any).job_name || "Unknown Job"}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">ex_{execution.id.slice(0, 8)}</div>
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      {/* `TriggerSource` spells the scheduled case "SCHEDULE";
-                          "SCHEDULED" is an execution *status*, not a trigger.
-                          Mapping by trigger keeps a retried or recovered run
-                          honest about where it actually came from. */}
-                      <Badge variant="outline" className="text-[10px] font-normal uppercase bg-background">
-                        {TRIGGER_LABELS[execution.trigger_source] ?? execution.trigger_source}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm">{execution.attempt_count} of {(execution as any).max_attempts || 3}</TableCell>
-                    <TableCell className="font-mono text-sm text-muted-foreground">
-                      {execution.worker_id ? execution.worker_id.slice(0, 8) : "—"}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {(execution as any).duration_seconds ? `${Math.round((execution as any).duration_seconds)}s` : "—"}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {new Date(execution.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                    </TableCell>
-                    <TableCell>
-                      {execution.error_class ? (
-                        <Badge variant="secondary" className="bg-red-500/10 text-red-600 dark:text-red-400 border-none rounded uppercase text-[10px]">
-                          {execution.error_class}
-                        </Badge>
+        {filtering ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+            className="h-7 text-[12.5px] text-muted-foreground"
+          >
+            <X aria-hidden />
+            Clear filters
+          </Button>
+        ) : null}
+      </Toolbar>
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        {query.state === "loading" ? (
+          <DataTable>
+            <TableHeader>
+              <TableRow>
+                <DataTableHead>Status</DataTableHead>
+                <DataTableHead>Job</DataTableHead>
+                <DataTableHead>Trigger</DataTableHead>
+                <DataTableHead>Priority</DataTableHead>
+                <DataTableHead align="right">Attempt</DataTableHead>
+                <DataTableHead>Worker</DataTableHead>
+                <DataTableHead align="right">Duration</DataTableHead>
+                <DataTableHead align="right">Started</DataTableHead>
+                <DataTableHead>Error</DataTableHead>
+              </TableRow>
+            </TableHeader>
+            <TableSkeleton rows={12} columns={9} />
+          </DataTable>
+        ) : query.state === "error" ? (
+          query.forbidden ? (
+            <ForbiddenState />
+          ) : (
+            <ErrorState error={query.error} onRetry={query.reload} />
+          )
+        ) : visible.length === 0 ? (
+          <EmptyState
+            title={
+              filtering
+                ? "No executions match these filters"
+                : "No executions yet"
+            }
+            description={
+              filtering
+                ? "Nothing here matches. Clear the filters to see every run."
+                : "Executions appear here as soon as a schedule fires or a job is triggered."
+            }
+            action={
+              filtering ? (
+                <Button size="sm" variant="outline" onClick={clearFilters}>
+                  Clear filters
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" render={<Link href="/jobs" />}>
+                  Go to jobs
+                </Button>
+              )
+            }
+          />
+        ) : (
+          <DataTable>
+            <TableHeader>
+              <TableRow>
+                <DataTableHead className="w-28">Status</DataTableHead>
+                <DataTableHead>Job</DataTableHead>
+                <DataTableHead className="w-24">Trigger</DataTableHead>
+                <DataTableHead className="w-24">Priority</DataTableHead>
+                <DataTableHead className="w-20" align="right">
+                  Attempt
+                </DataTableHead>
+                <DataTableHead className="w-24">Worker</DataTableHead>
+                <DataTableHead className="w-24" align="right">
+                  Duration
+                </DataTableHead>
+                <DataTableHead className="w-28" align="right">
+                  Started
+                </DataTableHead>
+                <DataTableHead>Error</DataTableHead>
+              </TableRow>
+            </TableHeader>
+
+            <TableBody>
+              {visible.map((execution) => {
+                const elapsed = durationMs(execution);
+                const jobName = nameFor(execution.job_id);
+                return (
+                  <TableRow key={execution.id} className="h-8">
+                    <DataTableCell>
+                      <StatusCell status={execution.status} />
+                    </DataTableCell>
+
+                    {/*
+                      The job could not be resolved — deleted, or outside the
+                      loaded page — so the execution's own id is the link rather
+                      than an empty cell.
+                    */}
+                    <PinnedCell>
+                      {jobName ? (
+                        <RowLink href={`/jobs/${execution.job_id}`}>
+                          {jobName}
+                        </RowLink>
+                      ) : (
+                        <RowLink href={`/executions/${execution.id}`}>
+                          <code className="font-mono text-[12px]">
+                            {(execution.job_id ?? execution.id).slice(0, 8)}
+                          </code>
+                        </RowLink>
+                      )}
+                    </PinnedCell>
+
+                    <DataTableCell className="text-[12.5px] text-muted-foreground">
+                      {TRIGGER_LABELS[execution.trigger_source] ??
+                        execution.trigger_source}
+                    </DataTableCell>
+
+                    <DataTableCell>
+                      <PriorityBadge priority={execution.priority} />
+                    </DataTableCell>
+
+                    <NumCell className="text-[12.5px]">
+                      {execution.attempt_count}
+                    </NumCell>
+
+                    <DataTableCell>
+                      {execution.worker_id ? (
+                        <code className="font-mono text-[11.5px] text-muted-foreground">
+                          {execution.worker_id.slice(0, 8)}
+                        </code>
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
-                    </TableCell>
-                    <TableCell>
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
-                        <MoreHorizontal className="size-4" />
-                      </Button>
-                    </TableCell>
+                    </DataTableCell>
+
+                    {/*
+                      A run with no end time has no measured duration. Printing
+                      "0s" would claim the work took no time at all, which is a
+                      different and wrong statement.
+                    */}
+                    <NumCell className="text-[12.5px]">
+                      {elapsed === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        formatDuration(elapsed)
+                      )}
+                    </NumCell>
+
+                    <NumCell
+                      className="text-[12px] text-muted-foreground"
+                      title={formatTimestamp(execution.started_at ?? execution.created_at)}
+                    >
+                      {execution.started_at
+                        ? formatRelative(execution.started_at)
+                        : formatRelative(execution.created_at)}
+                    </NumCell>
+
+                    <DataTableCell>
+                      {execution.error_class ? (
+                        <ErrorClassBadge errorClass={execution.error_class} />
+                      ) : execution.error_message ? (
+                        <span
+                          className="block max-w-[24rem] truncate text-[12px] text-muted-foreground"
+                          title={execution.error_message}
+                        >
+                          {execution.error_message}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </DataTableCell>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </AsyncBoundary>
-        
-        <div className="p-4 border-t border-border flex items-center justify-between text-xs text-muted-foreground">
-          <p>Showing 1-{rows.length} of {rows.length} executions</p>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" disabled className="h-8">Previous</Button>
-            <Button variant="outline" size="sm" className="h-8">Next</Button>
-          </div>
-        </div>
+                );
+              })}
+            </TableBody>
+          </DataTable>
+        )}
       </div>
+
+      <TableFooter shown={visible.length} total={rows.length} />
     </div>
   );
 }

@@ -27,17 +27,28 @@ pub struct ListExecutionsQuery {
 }
 
 fn parse_filter(query: &ListExecutionsQuery) -> Result<ExecutionFilter, ApiError> {
-    let status = match query.status.as_deref() {
-        None => None,
-        Some(raw) => Some(raw.parse::<ExecutionStatus>().map_err(|_| {
-            ApiError::validation(format!("`{raw}` is not a valid status"))
-                .with_detail("status", "unknown execution status")
-        })?),
-    };
+    let mut statuses = Vec::new();
+    let mut single_status = None;
+    if let Some(raw) = query.status.as_deref() {
+        for part in raw.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                let st = trimmed.parse::<ExecutionStatus>().map_err(|_| {
+                    ApiError::validation(format!("`{trimmed}` is not a valid status"))
+                        .with_detail("status", "unknown execution status")
+                })?;
+                statuses.push(st);
+            }
+        }
+        if statuses.len() == 1 {
+            single_status = statuses.first().copied();
+        }
+    }
     Ok(ExecutionFilter {
         job_id: query.job,
         workflow_id: query.workflow,
-        status,
+        status: single_status,
+        statuses,
         worker_id: query.worker,
         queue_id: query.queue,
         correlation_id: query.correlation_id.clone(),
