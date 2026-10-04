@@ -108,6 +108,10 @@ function useNavCounts(): NavCounts {
     executions?: { running?: number };
     alerts?: { critical?: number; warning?: number };
     needs_attention?: unknown[];
+    queues?: { id: string }[];
+    workers?: { ready?: number; busy?: number; offline?: number };
+    jobs_total?: number;
+    workflows_total?: number;
   }>("/dashboard");
 
   if (dashboard.state !== "ready" || !dashboard.data) return {};
@@ -117,6 +121,10 @@ function useNavCounts(): NavCounts {
   const critical = alerts?.critical ?? 0;
   const warning = alerts?.warning ?? 0;
 
+  const w = dashboard.data.workers;
+  const totalWorkers =
+    w ? (w.ready ?? 0) + (w.busy ?? 0) + (w.offline ?? 0) : undefined;
+
   return {
     running,
     // Only badge Alerts when something needs a human, otherwise every tenant
@@ -125,6 +133,10 @@ function useNavCounts(): NavCounts {
     incidents: dashboard.data.needs_attention?.length
       ? dashboard.data.needs_attention.length
       : undefined,
+    jobs: dashboard.data.jobs_total,
+    workflows: dashboard.data.workflows_total,
+    queues: dashboard.data.queues?.length,
+    workers: totalWorkers,
   };
 }
 
@@ -342,11 +354,11 @@ function Header({
 
       {tenantId ? (
         <span
-          className="hidden shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground lg:flex"
+          className="hidden shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground lg:flex"
           title="Active tenant"
         >
-          tenant
-          <code className="max-w-[10ch] truncate">{tenantId.slice(0, 8)}</code>
+          <span className="size-1.5 rounded-full bg-emerald-500" />
+          <code className="max-w-[16ch] truncate font-medium">{tenantId.slice(0, 8)}</code>
         </span>
       ) : null}
 
@@ -368,6 +380,9 @@ function Header({
           title="Signed-in role"
         >
           {role ?? "—"}
+        </span>
+        <span className="grid size-7 shrink-0 place-items-center rounded-full bg-zinc-200 text-xs font-semibold text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200">
+          {(role ?? "U").slice(0, 2).toUpperCase()}
         </span>
         <button
           type="button"

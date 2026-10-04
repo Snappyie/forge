@@ -9,7 +9,15 @@
  * a replay is refused by the server.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { api, configureApi, request, type AccessToken } from "@/lib/api";
 import type { Role } from "@/lib/types";
@@ -71,11 +79,52 @@ interface TokensResponse {
   expires_in_secs?: number;
 }
 
+/**
+ * Exchanges a refresh token for a new pair, collapsing concurrent callers.
+ *
+ * Forge refresh tokens are single-use: spending one revokes it and issues a new
+ * one, so presenting the same token twice fails with 401. A mount effect can run
+ * more than once, and the console issues several authenticated requests the
+ * moment it boots, so the same token can reach this function twice.
+ *
+ * The in-flight exchange is keyed by the token it is spending. That matters:
+ * clearing the entry as soon as the exchange settles would let a caller that
+ * arrives moments later start a *second* exchange with a token that has already
+ * been rotated away. Keying it means a repeat caller with the same token reuses
+ * the result, while a genuine sign-in with a new token still gets its own
+ * exchange.
+ *
+ * The exchange bypasses `request()`, which would call `onUnauthorized` on a 401
+ * and sign the operator out while they are still establishing a session.
+ */
+let exchangeInFlight: { token: string; promise: Promise<TokensResponse> } | null = null;
+
+function exchangeRefreshToken(token: string): Promise<TokensResponse> {
+  if (exchangeInFlight?.token === token) return exchangeInFlight.promise;
+
+  const promise = request<TokensResponse>("/auth/refresh", {
+    method: "POST",
+    body: { refresh_token: token },
+  }).finally(() => {
+    // Only released once it settles, so a repeat caller still joins it. A
+    // later sign-in carries a different token and starts a fresh exchange.
+    if (exchangeInFlight?.promise === promise) exchangeInFlight = null;
+  });
+
+  exchangeInFlight = { token, promise };
+  return promise;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Mirrors `session` for the API client's token reader, which is called from
+  // outside React's render cycle and so cannot close over the state value.
+  const sessionRef = useRef<Session | null>(null);
+
   const applySession = useCallback((next: Session | null) => {
+    sessionRef.current = next;
     setSession(next);
     writeStoredSession(next);
   }, []);
@@ -91,10 +140,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     try {
-      const data = await request<TokensResponse>("/auth/refresh", {
-        method: "POST",
-        body: { refresh_token: current.refreshToken },
-      });
+      // Same single-use hazard as the mount path, so it goes through the same
+      // collapsing exchange rather than issuing its own request.
+      const data = await exchangeRefreshToken(current.refreshToken);
       applySession({
         accessToken: data.access_token,
         refreshToken: data.refresh_token,
@@ -107,7 +155,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [applySession]);
 
-  // On mount, try to trade the stored refresh token for a fresh access token.
+  // On mount, trade the stored refresh token for a fresh access token.
+  //
+  // The controller matters more than it looks. A Forge refresh token is
+  // single-use: exchanging it revokes it and issues a new one, so a second
+  // exchange of the same token is refused with a 401. React runs mount effects
+  // more than once (StrictMode in development, and remounts on navigation), and
+  // without an abort the superseded request stays in flight, spends the token,
+  // and its 401 then trips `onUnauthorized` and signs the user out — which
+  // looks exactly like a session that never worked.
+  //
+  // `exchangeRefreshToken` is module-level and shared, so a re-run joins the
+  // in-flight exchange instead of starting a second one with the same token.
   useEffect(() => {
     let cancelled = false;
 
@@ -117,12 +176,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    (async () => {
-      try {
-        const data = await request<TokensResponse>("/auth/refresh", {
-          method: "POST",
-          body: { refresh_token: stored.refreshToken },
-        });
+    exchangeRefreshToken(stored.refreshToken)
+      .then((data) => {
         if (cancelled) return;
         applySession({
           accessToken: data.access_token,
@@ -130,12 +185,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           tenantId: data.tenant_id,
           role: data.role,
         });
-      } catch {
+      })
+      .catch(() => {
         if (!cancelled) applySession(null);
-      } finally {
+      })
+      .finally(() => {
         if (!cancelled) setLoading(false);
-      }
-    })();
+      });
 
     return () => {
       cancelled = true;
@@ -143,12 +199,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [applySession]);
 
   // Keep the API client pointed at the current session.
+  //
+  // The token is published imperatively rather than through an effect that
+  // depends on `session`. The console fires its first authenticated requests
+  // from a child effect that runs *before* this one, so wiring the client in an
+  // effect left those early requests going out with no Authorization header.
+  // They came back 401, `onUnauthorized` fired, and the operator was bounced to
+  // sign-in despite holding a perfectly good session.
+  //
+  // Reading through a ref keeps `getToken` correct for the current session
+  // without re-running anything that might issue a request.
   useEffect(() => {
+    sessionRef.current = session;
     configureApi({
-      getToken: () =>
-        session
-          ? ({ accessToken: session.accessToken, refreshToken: session.refreshToken } as AccessToken)
-          : null,
+      getToken: () => {
+        const current = sessionRef.current;
+        return current
+          ? ({
+              accessToken: current.accessToken,
+              refreshToken: current.refreshToken,
+            } as AccessToken)
+          : null;
+      },
       // A 401 anywhere clears the session so the shell can route to sign-in.
       onUnauthorized: () => signOut(),
     });

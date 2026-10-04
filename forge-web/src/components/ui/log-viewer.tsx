@@ -33,6 +33,39 @@ export interface LogLine {
 
 type StreamFilter = "all" | "stdout" | "stderr";
 
+/**
+ * Wraps every case-insensitive occurrence of `needle` in a highlight.
+ *
+ * Matching is done on a lowercased copy for comparison while the original text
+ * is returned, so the log line is never re-cased.
+ */
+function highlight(text: string, needle: string): React.ReactNode {
+  if (!needle) return text;
+
+  const lowerText = text.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+
+  for (;;) {
+    const at = lowerText.indexOf(needle, cursor);
+    if (at === -1) break;
+    if (at > cursor) parts.push(text.slice(cursor, at));
+    parts.push(
+      <mark
+        key={key++}
+        className="rounded-sm bg-yellow-300/50 px-px text-foreground dark:bg-yellow-500/30"
+      >
+        {text.slice(at, at + needle.length)}
+      </mark>,
+    );
+    cursor = at + needle.length;
+  }
+  if (cursor === 0) return text;
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
 export function LogViewer({
   lines,
   loading,
@@ -66,7 +99,8 @@ export function LogViewer({
   }, [numbered, query, stream]);
 
   const matched = filtered.length;
-  const filtering = query.trim().length > 0 || stream !== "all";
+  const needle = query.trim().toLowerCase();
+  const filtering = needle.length > 0 || stream !== "all";
 
   function exportAll() {
     const body = lines
@@ -202,15 +236,12 @@ export function LogViewer({
                 >
                   {line.stream}
                 </span>
-                <span
-                  className={cn(
-                    "min-w-0 flex-1 break-words whitespace-pre-wrap",
-                    // The matched span is highlighted so the eye lands on the
-                    // hit without having to re-read the line.
-                    query.trim() ? "bg-yellow-200/40 dark:bg-yellow-500/20" : "",
-                  )}
-                >
-                  {line.content}
+                <span className="min-w-0 flex-1 break-words whitespace-pre-wrap">
+                  {/* Highlight only the matched substring, not the whole line.
+                      A row-sized highlight reads as "this line is an error"
+                      rather than "this phrase matched", which is a different
+                      and wrong claim about the log. */}
+                  {needle ? highlight(line.content, needle) : line.content}
                 </span>
               </div>
             ))}

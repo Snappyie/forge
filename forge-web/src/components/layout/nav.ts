@@ -46,11 +46,15 @@ export interface NavGroup {
   items: NavItem[];
 }
 
-/** The live counts behind the Monitor group. */
+/** The live counts behind the sidebar badges. */
 export interface NavCounts {
   running?: number;
   alerts?: number;
   incidents?: number;
+  jobs?: number;
+  workflows?: number;
+  queues?: number;
+  workers?: number;
 }
 
 export function buildNav(counts: NavCounts): NavGroup[] {
@@ -74,17 +78,17 @@ export function buildNav(counts: NavCounts): NavGroup[] {
     {
       label: "Define",
       items: [
-        { href: "/jobs", label: "Jobs", icon: ClipboardList },
+        { href: "/jobs", label: "Jobs", icon: ClipboardList, count: counts.jobs },
         { href: "/schedules", label: "Schedules", icon: CalendarClock },
-        { href: "/workflows", label: "Workflows", icon: Workflow },
+        { href: "/workflows", label: "Workflows", icon: Workflow, count: counts.workflows },
         { href: "/calendar", label: "Calendar", icon: CalendarDays },
       ],
     },
     {
       label: "Capacity",
       items: [
-        { href: "/queues", label: "Queues", icon: Layers },
-        { href: "/workers", label: "Workers", icon: Users },
+        { href: "/queues", label: "Queues", icon: Layers, count: counts.queues },
+        { href: "/workers", label: "Workers", icon: Users, count: counts.workers },
       ],
     },
     {

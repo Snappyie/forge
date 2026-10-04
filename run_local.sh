@@ -36,6 +36,7 @@ if [ ! -d "node_modules" ]; then
 fi
 
 export NEXT_PUBLIC_API_URL="http://localhost:3000/api/v1"
+export NEXT_PUBLIC_FORGE_ENVIRONMENT="Local"
 # npm run dev typically starts on 3000, so we force 3001 to match docker-compose mapping
 export PORT=3001
 npm run dev &
