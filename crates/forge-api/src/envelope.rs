@@ -301,6 +301,13 @@ impl From<forge_auth::AuthError> for ApiError {
                 ApiError::forbidden(format!("missing permission `{permission}`"))
             }
             TenantIsolation(_) => ApiError::not_found("resource"),
+            // An identity-provider failure is a configuration or upstream
+            // problem, not a problem with the caller's credentials — so 502,
+            // and the provider's own message stays in the log rather than the
+            // response body.
+            Oidc(_) => ApiError::unavailable(
+                "the identity provider could not be reached. Try again shortly.",
+            ),
             WeakPassword(message) => {
                 ApiError::validation(message.clone()).with_detail("password", message)
             }

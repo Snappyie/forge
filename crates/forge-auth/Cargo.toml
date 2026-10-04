@@ -19,3 +19,8 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 forge-domain = { path = "../forge-domain" }
+# OIDC: discovery, the authorization-code exchange, and JWKS signature
+# verification. `reqwest` is used directly rather than pulling a provider
+# framework, because the console only needs authorization-code + PKCE and a
+# framework would bring its own session and retry behaviour to reason about.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

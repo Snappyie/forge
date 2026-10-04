@@ -361,6 +361,110 @@ than tidiness: two environments both marked production would mean a change
 guardrail protects one and silently skips the other — the "operator believes it
 is isolated and it is not" failure that `EnvironmentKind` exists to prevent.
 
+## ADR-0023 Single sign-on is OpenID Connect authorization-code with PKCE
+
+Status: Accepted.
+
+Amends: 11-security.md §11.2 (passwords only); 08-storage-specification.md §8.2.
+
+Decision:
+Federated login uses OpenID Connect authorization code with PKCE (`S256`).
+The ID token is verified against the provider's JWKS, checking signature,
+`iss`, `aud` and `exp`. An identity provider is registered in the database, and
+a provider may be restricted to a list of email domains.
+
+Reason:
+`redesign.md` §G requires SSO "through OIDC/OAuth2 and enterprise identity
+providers", and the `user_identities` table had existed since migration 005
+without a line of code reading it.
+
+Three decisions are load-bearing rather than incidental:
+
+- **PKCE is not optional.** The authorization code travels through the browser.
+  A confidential client keeps its secret server-side, but without PKCE anyone
+  who observes the redirect can redeem the code. RFC 9700 requires it.
+- **The ID token is never decoded without verification.** An unverified ID
+  token is an attacker-chosen user identity. There is deliberately no
+  "unverified" code path, and an unexpected `alg` is refused rather than skipped
+  — silently declining to verify is how `alg: none` bypasses happen.
+- **The discovery document's `iss` must match what was configured.** Otherwise a
+  hijacked DNS entry can redirect the whole flow at a substitute IdP whose
+  tokens would then verify.
+
+Domain restriction is the control that stops a misconfigured IdP from granting
+access to arbitrary accounts: a provider limited to verified domains refuses an
+identity outside them instead of provisioning one.
+
+## ADR-0024 An external identity is not tenant-scoped
+
+Status: Accepted.
+
+Amends: 08-storage-specification.md §8.2.
+
+Decision:
+`user_identities` is keyed on `(issuer, provider, provider_subject)` and carries
+no `tenant_id`.
+
+Reason:
+Migration 005 declared `(provider, subject)` unique **per tenant**, which is
+wrong: an identity provider's `sub` identifies a person, and one person may be a
+member of several tenants. Keying per tenant would let the same provider
+identity be recorded once per tenant with nothing tying the duplicates to one
+`user_id`, so a login would resolve to whichever tenant the row happened to
+carry.
+
+The `issuer` is part of the key because two providers can each issue a `sub` of
+`42`; without it, any deployment configured with more than one provider collides
+on the first login.
+
+## ADR-0025 A tenant switch issues a new session
+
+Status: Accepted.
+
+Amends: 05-api-specification.md (no tenant addressing); 11-security.md §11.
+
+Decision:
+`POST /auth/switch-tenant` returns a **new** access/refresh pair rather than
+mutating the current one. Login accepts an optional `tenant_slug`; when omitted
+the user gets the tenant they last used, never an arbitrary one.
+
+Reason:
+The login query was a `LEFT JOIN tenant_memberships ... LIMIT 1` with no
+ordering, so a user in several tenants landed in whichever row the planner
+returned first — varying between deployments and between restarts. A login that
+silently picks a tenant is unmanageable in exactly the deployments that need
+multi-tenancy.
+
+Returning a new token pair follows from the token's shape: an access token
+carries exactly one `tenant_id`, so a switch is a new session by construction.
+Mutating in place would leave the previously issued token valid for a tenant the
+user has since left.
+
+`users.last_tenant_id` is guarded by a trigger so it can only ever point at a
+tenant the user is a member of; otherwise a revoked membership would leave an
+operator defaulting into a tenant they can no longer enter.
+
+## ADR-0026 Service accounts carry scopes, not a role
+
+Status: Accepted.
+
+Amends: 11-security.md §11.4; 02-domain-model.md §2.
+
+Decision:
+A service account is a non-human principal with an explicit list of
+`resource:action` scopes. An empty scope list means no access, not full access.
+
+Reason:
+Service accounts are neither users nor workers, and both of those models were
+already spoken for: a user has a password or an SSO identity, and a worker may
+only claim and complete its own work. A deployment token is a third thing —
+"deploy the production jobs from CI" and "read the audit log" are different
+grants, and a role would imply one implies the other.
+
+Defaulting an empty list to "everything" is the failure this avoids: an account
+created without scopes would otherwise be maximally privileged, which is the
+opposite of the intent.
+
 ## Future ADR candidates
 
 - Queue implementation.

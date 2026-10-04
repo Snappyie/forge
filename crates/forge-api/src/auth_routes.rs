@@ -251,6 +251,104 @@ async fn ensure_tenant(state: &AppState, tenant_name: Option<&str>) -> Result<Te
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    /// Which tenant to sign into, when the user belongs to several.
+    ///
+    /// Optional so an existing single-tenant client keeps working, but a user in
+    /// more than one tenant who does not name one gets the tenant they last used
+    /// — never an arbitrary row. The console sends this from its tenant picker.
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SwitchTenantRequest {
+    /// The tenant to move to.
+    pub tenant_slug: String,
+}
+
+/// `GET /auth/tenants` — the tenants the signed-in user belongs to.
+///
+/// Lets a console render a tenant switcher without embedding the list in the
+/// login response, and lets it refresh after an administrator adds a
+/// membership.
+pub async fn list_tenants(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let memberships = load_memberships(&state, auth.user_id).await?;
+
+    let mut tenants = Vec::with_capacity(memberships.len());
+    for membership in &memberships {
+        // The role is per (user, tenant), so it cannot be read once for all of
+        // them — a user can be an admin in one tenant and a viewer in another.
+        let role = role_for(&state, auth.user_id, membership.tenant).await?;
+        tenants.push(json!({
+            "id": membership.tenant.into_uuid(),
+            "slug": membership.slug,
+            "name": membership.name,
+            "role": role.as_str(),
+            "current": membership.tenant == auth.tenant_id,
+        }));
+    }
+
+    Ok(Json(ApiResponse::new(
+        json!({ "tenants": tenants }),
+        auth.request_id,
+    )))
+}
+
+/// `POST /auth/switch-tenant` — issue a new session for another tenant.
+///
+/// Returns a *new* token pair rather than mutating the current one. An access
+/// token carries exactly one tenant, so a tenant switch is a new session by
+/// construction; mutating in place would leave the old token valid for a tenant
+/// the user has since left.
+pub async fn switch_tenant(
+    State(state): State<AppState>,
+    Auth(auth): Auth,
+    Json(body): Json<SwitchTenantRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let memberships = load_memberships(&state, auth.user_id).await?;
+
+    let chosen = memberships
+        .iter()
+        .find(|m| m.slug.eq_ignore_ascii_case(body.tenant_slug.trim()))
+        .ok_or_else(|| ApiError::forbidden("you are not a member of that tenant"))?;
+
+    // A suspended tenant must not be enterable by signing in to it: its
+    // schedules and workers are supposed to have stopped.
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(chosen.tenant.into_uuid())
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(ApiError::from)?;
+    if status.as_deref() == Some("SUSPENDED") {
+        return Err(ApiError::forbidden("this tenant is suspended"));
+    }
+
+    let role = role_for(&state, auth.user_id, chosen.tenant).await?;
+
+    let _ = sqlx::query("UPDATE users SET last_tenant_id = $1 WHERE id = $2")
+        .bind(chosen.tenant.into_uuid())
+        .bind(auth.user_id)
+        .execute(&state.pool)
+        .await;
+
+    let tokens = issue_session(&state, auth.user_id, chosen.tenant, role).await?;
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "user_id": auth.user_id,
+            "tenant_id": chosen.tenant.into_uuid(),
+            "tenant_slug": chosen.slug,
+            "role": role.as_str(),
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_in_secs": state.jwt.access_ttl().num_seconds(),
+        }),
+        auth.request_id,
+    )))
 }
 
 /// `POST /auth/login`.
@@ -264,19 +362,17 @@ pub async fn login(
     // time does not reveal whether the address exists.
     // `tenant_id` is a native `uuid` column; `users.password_hash` is nullable
     // because an SSO-only account has no password.
-    let row: Option<(Uuid, Option<String>, Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT u.id, u.password_hash, tm.tenant_id, u.disabled
+    let row: Option<(Uuid, Option<String>, bool)> = sqlx::query_as(
+        "SELECT u.id, u.password_hash, u.disabled
          FROM users u
-         LEFT JOIN tenant_memberships tm ON tm.user_id = u.id
-         WHERE u.email = $1
-         LIMIT 1",
+         WHERE u.email = $1",
     )
     .bind(&email)
     .fetch_optional(&state.pool)
     .await
     .map_err(ApiError::from)?;
 
-    let Some((user_id, password_hash, tenant_uuid, disabled)) = row else {
+    let Some((user_id, password_hash, disabled)) = row else {
         // No such user: do the work anyway, then refuse.
         let _ = forge_auth::verify_password(
             &body.password,
@@ -298,25 +394,137 @@ pub async fn login(
         return Err(ApiError::unauthenticated("invalid email or password"));
     }
 
-    let tenant = match tenant_uuid {
-        Some(id) => TenantId::from_uuid(id),
-        None => return Err(ApiError::forbidden("this account has no tenant")),
+    // Every tenant this user belongs to, not one arbitrary row.
+    //
+    // This query used to be a `LEFT JOIN tenant_memberships ... LIMIT 1` with no
+    // ordering, so a user in several tenants landed in whichever one the planner
+    // returned first — different between deployments and between restarts. A
+    // login that silently picks a tenant is unmanageable in exactly the
+    // multi-tenant deployments that need it.
+    let memberships = load_memberships(&state, user_id).await?;
+
+    if memberships.is_empty() {
+        return Err(ApiError::forbidden("this account has no tenant"));
+    }
+
+    let previous = last_tenant(&state, user_id).await?;
+
+    // An explicit `tenant_slug` wins; otherwise use the last tenant this user
+    // worked in, and otherwise fall back to the first by name.
+    let chosen = match body.tenant_slug.as_deref() {
+        Some(slug) => memberships
+            .iter()
+            .find(|m| m.slug.eq_ignore_ascii_case(slug))
+            .ok_or_else(|| {
+                // Refused rather than silently substituted: signing the user
+                // into a tenant they did not name is the failure mode this whole
+                // change exists to remove.
+                ApiError::forbidden("you are not a member of that tenant")
+            })?,
+        None => memberships
+            .iter()
+            .find(|m| Some(m.tenant) == previous)
+            .or_else(|| memberships.first())
+            .expect("memberships is non-empty"),
     };
-    let role = role_for(&state, user_id, tenant).await?;
 
-    let tokens = issue_session(&state, user_id, tenant, role).await?;
+    let role = role_for(&state, user_id, chosen.tenant).await?;
 
-    Ok(Json(ApiResponse::new(
-        json!({
-            "user_id": user_id,
-            "tenant_id": tenant.into_uuid(),
-            "role": role.as_str(),
-            "access_token": tokens.access_token,
-            "refresh_token": tokens.refresh_token,
-            "expires_in_secs": state.jwt.access_ttl().num_seconds(),
-        }),
-        uuid::Uuid::new_v4().to_string(),
-    )))
+    // Remember the choice, so a user who works in one tenant lands there by
+    // default and one who switches does not have to every time.
+    let _ = sqlx::query("UPDATE users SET last_tenant_id = $1 WHERE id = $2")
+        .bind(chosen.tenant.into_uuid())
+        .bind(user_id)
+        .execute(&state.pool)
+        .await;
+
+    let tokens = issue_session(&state, user_id, chosen.tenant, role).await?;
+
+    // The full list, so a client can offer a tenant switcher without a
+            // second round trip. Each tenant's role is read in its own
+            // query: the role is per (user, tenant), so a user can be an
+            // admin in one and a viewer in another.
+            let mut tenants = Vec::with_capacity(memberships.len());
+            for membership in &memberships {
+                let role = role_for(&state, user_id, membership.tenant).await?;
+                tenants.push(json!({
+                    "id": membership.tenant.into_uuid(),
+                    "slug": membership.slug,
+                    "name": membership.name,
+                    "role": role.as_str(),
+                }));
+            }
+
+            Ok(Json(ApiResponse::new(
+                json!({
+                    "user_id": user_id,
+                    "tenant_id": chosen.tenant.into_uuid(),
+                    "tenant_slug": chosen.slug,
+                    "role": role.as_str(),
+                    "access_token": tokens.access_token,
+                    "refresh_token": tokens.refresh_token,
+                    "expires_in_secs": state.jwt.access_ttl().num_seconds(),
+                    "tenants": tenants,
+                }),
+                uuid::Uuid::new_v4().to_string(),
+            )))
+}
+
+/// A tenant a user belongs to.
+struct Membership {
+    tenant: TenantId,
+    slug: String,
+    name: String,
+}
+
+/// Loads every tenant a user belongs to, plus the one they last used.
+///
+/// The last-used tenant is read alongside rather than in a second query because
+/// the login path issues it once and a separate round trip here would be a
+/// latency cost on every sign-in.
+async fn load_memberships(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Vec<Membership>, ApiError> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT m.tenant_id, t.slug, t.name
+         FROM tenant_memberships m
+         JOIN tenants t ON t.id = m.tenant_id
+         WHERE m.user_id = $1
+         ORDER BY t.name",
+    )
+    .bind(user_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
+    let memberships: Vec<Membership> = rows
+        .into_iter()
+        .map(|(tenant, slug, name)| Membership {
+            tenant: TenantId::from_uuid(tenant),
+            slug,
+            name,
+        })
+        .collect();
+
+    Ok(memberships)
+}
+
+/// Reads the tenant a user last signed in to, if any.
+///
+/// A user with several tenants and no history gets `None` rather than an
+/// arbitrary first row, so "no preference" stays distinguishable from "prefers
+/// the alphabetically first tenant".
+async fn last_tenant(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Option<TenantId>, ApiError> {
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT last_tenant_id FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(row.and_then(|(id,)| id).map(TenantId::from_uuid))
 }
 
 #[derive(Debug, Deserialize)]

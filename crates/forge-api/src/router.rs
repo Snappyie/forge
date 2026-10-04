@@ -115,7 +115,20 @@ pub fn create_router(
         );
 
     // --- tenant-scoped routes ---
+    //
+    // `auth/tenants` and `auth/switch-tenant` live here rather than with the
+    // public auth routes: they need a valid session (the `Auth` extractor
+    // supplies it) but must not be scoped to a single tenant, because choosing
+    // the tenant is what they do.
     let api = Router::new()
+        .route(
+            &format!("{PREFIX}/auth/tenants"),
+            get(crate::auth_routes::list_tenants),
+        )
+        .route(
+            &format!("{PREFIX}/auth/switch-tenant"),
+            post(crate::auth_routes::switch_tenant),
+        )
         // jobs (spec 05 endpoints 1-5)
         .route(
             &format!("{PREFIX}/jobs"),

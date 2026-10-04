@@ -881,7 +881,14 @@ fn paths() -> Value {
                     "required": ["email", "password"],
                     "properties": {
                         "email": { "type": "string", "format": "email" },
-                        "password": { "type": "string" }
+                        "password": { "type": "string" },
+                        // Optional so a single-tenant client is unaffected. A
+                        // user in several tenants who omits this gets the one
+                        // they last used, never an arbitrary one.
+                        "tenant_slug": {
+                            "type": "string",
+                            "description": "Tenant to sign in to; defaults to the tenant last used"
+                        }
                     }
                 }))),
                     success_status: "200",
@@ -914,6 +921,46 @@ fn paths() -> Value {
         "/auth/logout".into(),
         // Sign-out consumes the token it revokes, so it stays authenticated.
         json!({ "post": op("Sign out", "auth", "logout", None, vec![], None, "200") }),
+    );
+    // --- tenant selection ---
+    //
+    // Authenticated, but deliberately not tenant-scoped: these endpoints decide
+    // which tenant the session is for, so scoping them to the current one would
+    // make a switch impossible.
+    paths.insert(
+        "/auth/tenants".into(),
+        json!({
+            "get": op(
+                "List the tenants you belong to",
+                "auth",
+                "listTenants",
+                None,
+                vec![],
+                None,
+                "200",
+            )
+        }),
+    );
+    paths.insert(
+        "/auth/switch-tenant".into(),
+        json!({
+            "post": op_public(
+                true,
+                Op {
+                    summary: "Issue a session for another tenant",
+                    tag: "auth",
+                    id: "switchTenant",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: Some(json_body(json!({
+                        "type": "object",
+                        "required": ["tenant_slug"],
+                        "properties": { "tenant_slug": { "type": "string" } }
+                    }))),
+                    success_status: "200",
+                },
+            )
+        }),
     );
 
     // --- system (spec 05 endpoints 60-62) ---

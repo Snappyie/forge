@@ -1,11 +1,15 @@
 //! Authentication and authorization (spec 05 §5.10, spec 11).
 //!
-//! Three things live here:
+//! Four things live here:
 //!
 //! * password hashing with argon2 (spec 11.2 requires Argon2 or bcrypt);
 //! * JWT access tokens plus **rotating** refresh tokens, with reuse detection;
 //! * resource-scoped RBAC, expressed as `resource:action` strings so a grant can
-//!   be stored in the database and audited.
+//!   be stored in the database and audited;
+//! * OIDC single sign-on ([`oidc`]), which `redesign.md` §G requires and which
+//!   the `user_identities` table has been carrying unused since migration 005.
+
+pub mod oidc;
 
 use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
@@ -599,6 +603,11 @@ pub enum AuthError {
     TenantIsolation(String),
     #[error("cryptographic failure: {0}")]
     Crypto(String),
+    /// OIDC failures are grouped rather than enumerated so a provider's own
+    /// error text never reaches a user-facing message, while the reason is still
+    /// available to a log.
+    #[error("identity provider error: {0}")]
+    Oidc(String),
 }
 
 #[cfg(test)]
