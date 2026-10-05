@@ -58,7 +58,7 @@ class SdkAgainstLiveServer(unittest.TestCase):
         # worker. The one-time bootstrap slot is a single claim per deployment,
         # so this suite cannot rely on registering as OWNER; it borrows a token
         # when one is offered and registers its own tenant otherwise.
-        borrowed = os.environ.get("FORGE_TEST_ADMIN_TOKEN")
+        borrowed = os.environ.get("FORGE_TEST_TOKEN") or os.environ.get("FORGE_TEST_ADMIN_TOKEN")
         if borrowed:
             cls.token = borrowed
             cls.tenant = os.environ.get("FORGE_TEST_TENANT", "")
