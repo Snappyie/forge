@@ -261,6 +261,73 @@ pub struct LoginRequest {
     pub tenant_slug: Option<String>,
 }
 
+/// `POST /auth/token-login` — exchange an API key for a console session.
+///
+/// The console's "sign in with token" form has always called this. The route
+/// did not exist, so the form returned 404 and the documented path into the
+/// console for a CI or headless operator was dead on arrival.
+///
+/// The key's own tenant and role are carried onto the session; neither is read
+/// from the request, so a caller cannot ask for a tenant the key does not
+/// belong to.
+pub async fn token_login(
+    State(state): State<AppState>,
+    Json(body): Json<TokenLoginRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use forge_storage::ApiKeyRepository;
+
+    let token = body.token.trim();
+    if token.is_empty() {
+        return Err(ApiError::validation("a token is required").with_detail("token", "required"));
+    }
+
+    let hash = forge_auth::hash_api_key(&state.api_key_pepper, token);
+    let record = ApiKeyRepository::new(&state.pool)
+        .find_by_hash(&hash)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::unauthenticated("that token is not valid"))?;
+
+    if record.revoked_at.is_some() {
+        return Err(ApiError::unauthenticated("that token has been revoked"));
+    }
+    if let Some(expires_at) = record.expires_at {
+        if expires_at <= Utc::now() {
+            return Err(ApiError::unauthenticated("that token has expired"));
+        }
+    }
+
+    // Fail closed on an unparseable role rather than defaulting.
+    let role = forge_auth::Role::parse(&record.role).ok_or_else(|| {
+        ApiError::unauthenticated("that token is misconfigured and cannot be used")
+    })?;
+
+    // The key's own tenant, never one from the request body.
+    let tenant = TenantId::from_uuid(record.tenant_id);
+    let user_id = record.owner_id.unwrap_or(record.id);
+
+    let _ = ApiKeyRepository::new(&state.pool).touch(record.id).await;
+    let tokens = issue_session(&state, user_id, tenant, role).await?;
+
+    Ok(Json(ApiResponse::new(
+        json!({
+            "user_id": user_id,
+            "tenant_id": tenant.into_uuid(),
+            "role": role.as_str(),
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_in_secs": state.jwt.access_ttl().num_seconds(),
+        }),
+        Uuid::new_v4().to_string(),
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TokenLoginRequest {
+    /// An API key issued under Administration -> API keys.
+    pub token: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SwitchTenantRequest {
     /// The tenant to move to.
@@ -977,6 +1044,12 @@ pub async fn list_oidc_providers(
                 "issuer": row.issuer,
                 "client_id": row.client_id,
                 "enabled": row.enabled,
+                // The actual list, not only a boolean. The console showed
+                // "Any domain" whenever the array was absent, so a provider
+                // restricted to one domain was reported as unrestricted - an
+                // operator inspecting SSO configuration was told the opposite
+                // of the truth.
+                "allowed_email_domains": row.allowed_email_domains,
                 "domains_restricted": row.allowed_email_domains.as_ref().is_some_and(|d| !d.is_empty()),
             })
         })

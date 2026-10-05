@@ -205,6 +205,38 @@ impl<'a> WorkflowDriver<'a> {
                     }
                 }
 
+                WorkflowAction::CallWebhook {
+                    node_id,
+                    url,
+                    method,
+                    headers,
+                    timeout_seconds,
+                } => {
+                    // The engine decided the call should happen; it happens
+                    // here, so the decision layer stays free of I/O.
+                    match call_webhook(&url, method, &headers, timeout_seconds).await {
+                        // The status code is stored as the node's output so a
+                        // downstream condition can branch on it, and a 4xx/5xx
+                        // fails the node with that status rather than leaving
+                        // the workflow stuck with no explanation.
+                        Ok(status) => {
+                            let output = serde_json::json!({
+                                "status": status,
+                                "ok": (200..400).contains(&status),
+                            });
+                            if (200..400).contains(&status) {
+                                execution.complete_node(&node_id, Some(output));
+                            } else {
+                                execution.fail_node(
+                                    &node_id,
+                                    &format!("webhook returned HTTP {status}"),
+                                );
+                            }
+                        }
+                        Err(reason) => execution.fail_node(&node_id, &reason),
+                    }
+                }
+
                 WorkflowAction::ScheduleDelay { .. } | WorkflowAction::NodeFailed { .. } => {
                     // The engine already recorded the node's new state; the
                     // write-back below is what makes it durable.
@@ -716,6 +748,59 @@ fn children_by_node(rows: &[NodeStateRow]) -> HashMap<String, Vec<Uuid>> {
 
     children
 }
+
+/// Performs a webhook node's HTTP call.
+///
+/// Two things are deliberate here:
+///
+/// - **The destination is checked before the request.** `redesign.md` §I asks
+///   for event-driven triggers, and a workflow node that fetches an
+///   operator-supplied URL is an SSRF primitive: it would reach loopback,
+///   RFC1918 space, and cloud metadata endpoints from inside the cluster. The
+///   same rules `forge_auth::check_outbound_url` applies to every other outbound
+///   request apply here, so a workflow cannot become a way around them.
+/// - **A 2xx is not the only success.** A 3xx that the client did not follow
+///   (a redirect to an internal host, for instance) is surfaced as the status it
+///   is rather than followed.
+async fn call_webhook(
+    url: &str,
+    method: forge_domain::workflow::HttpMethod,
+    headers: &std::collections::BTreeMap<String, String>,
+    timeout_seconds: u64,
+) -> Result<u16, String> {
+    if let forge_auth::UrlVerdict::Blocked(reason) = forge_auth::check_outbound_url(url) {
+        return Err(format!("webhook destination refused: {reason}"));
+    }
+
+    let client = reqwest::Client::builder()
+        // Redirects are not followed: following one would defeat the
+        // destination check above, since only the first URL is validated.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(timeout_seconds.clamp(1, 300)))
+        .build()
+        .map_err(|e| format!("cannot build an HTTP client: {e}"))?;
+
+    let verb = match method {
+        forge_domain::workflow::HttpMethod::Get => reqwest::Method::GET,
+        forge_domain::workflow::HttpMethod::Post => reqwest::Method::POST,
+        forge_domain::workflow::HttpMethod::Put => reqwest::Method::PUT,
+        forge_domain::workflow::HttpMethod::Patch => reqwest::Method::PATCH,
+        forge_domain::workflow::HttpMethod::Delete => reqwest::Method::DELETE,
+    };
+
+    let mut request = client.request(verb, url);
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("webhook call failed: {e}"))?;
+
+    Ok(response.status().as_u16())
+}
+
 
 #[cfg(test)]
 mod tests {

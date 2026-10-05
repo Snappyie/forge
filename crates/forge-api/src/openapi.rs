@@ -951,6 +951,30 @@ fn paths() -> Value {
         }),
     );
     paths.insert(
+        "/auth/token-login".into(),
+        // Exchanging an API key for a console session. The console's "sign in
+        // with token" form calls this; the route did not exist, so that
+        // documented path into the console returned 404.
+        json!({
+            "post": op_public(
+                true,
+                Op {
+                    summary: "Sign in with an API key",
+                    tag: "public",
+                    id: "tokenLogin",
+                    permission: None,
+                    parameters: vec![],
+                    request_body: Some(json_body(json!({
+                        "type": "object",
+                        "required": ["token"],
+                        "properties": { "token": { "type": "string" } }
+                    }))),
+                    success_status: "200",
+                },
+            )
+        }),
+    );
+    paths.insert(
         "/auth/logout".into(),
         // Sign-out consumes the token it revokes, so it stays authenticated.
         json!({ "post": op("Sign out", "auth", "logout", None, vec![], None, "200") }),

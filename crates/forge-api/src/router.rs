@@ -109,6 +109,12 @@ pub fn create_router(
             &format!("{PREFIX}/auth/refresh"),
             post(crate::auth_routes::refresh),
         )
+        // The console's "sign in with token" form calls this; the route did
+        // not exist, so that documented path returned 404.
+        .route(
+            &format!("{PREFIX}/auth/token-login"),
+            post(crate::auth_routes::token_login),
+        )
         .route(
             &format!("{PREFIX}/auth/logout"),
             post(crate::auth_routes::logout),

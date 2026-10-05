@@ -957,7 +957,89 @@ fn to_domain_workflow(
                     workflow_id: target_workflow_id,
                 }
             }
-            "WEBHOOK" => NodeType::Delay { seconds: 0 },
+            "WEBHOOK" => {
+                // A real node, parsed from its configuration.
+                //
+                // This used to be `NodeType::Delay { seconds: 0 }`: the designer
+                // offered a webhook node, the API accepted it, and it executed
+                // as an instantaneous no-op with its URL read by nobody — the
+                // workflow reported success for work it had never done. It is
+                // now either configured correctly or refused.
+                let url = node
+                    .config
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ApiError::validation(format!(
+                            "node `{}` must supply a url",
+                            node.key
+                        ))
+                        .with_detail("nodes", "missing url")
+                    })?
+                    .trim()
+                    .to_string();
+
+                if url.is_empty() {
+                    return Err(ApiError::validation(format!(
+                        "node `{}` has an empty url",
+                        node.key
+                    ))
+                    .with_detail("nodes", "empty url"));
+                }
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(ApiError::validation(format!(
+                        "node `{}` url must be http or https",
+                        node.key
+                    ))
+                    .with_detail("nodes", "unsupported url scheme"));
+                }
+
+                let method = node
+                    .config
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("GET")
+                    .parse::<forge_domain::workflow::HttpMethod>()
+                    .map_err(|_| {
+                        ApiError::validation(format!(
+                            "`{}` is not a supported HTTP method",
+                            node.config
+                                .get("method")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("GET")
+                        ))
+                        .with_detail("nodes", "unsupported method")
+                    })?;
+
+                let headers = node
+                    .config
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|object| {
+                        object
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                value.as_str().map(|v| (name.clone(), v.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // A default rather than zero: a zero timeout means "give up
+                // immediately", which is never intended and fails every run.
+                let timeout_seconds = node
+                    .config
+                    .get("timeout_seconds")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30);
+
+                NodeType::Webhook {
+                    url,
+                    method,
+                    headers,
+                    timeout_seconds,
+                }
+            }
             other => {
                 return Err(
                     ApiError::validation(format!("`{other}` is not a known node type"))

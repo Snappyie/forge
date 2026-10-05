@@ -809,13 +809,63 @@ fn node_type_from_storage(raw_type: &str, config: &Value, node_key: &str) -> Res
                 })?;
             Ok(NodeType::SubWorkflow { workflow_id })
         }
-        // A webhook node is an outbound HTTP call. Until the dispatcher performs
-        // it, treating it as a zero-second delay would silently succeed, so it
-        // is refused loudly instead: a node that never fires is worse than one
-        // that fails with a reason.
-        "WEBHOOK" => Err(invalid(format!(
-            "webhook node `{node_key}` is not supported by this runtime yet"
-        ))),
+        // A webhook node is an outbound HTTP call, performed by the executor's
+        // driver.
+        //
+        // This was deliberately refused while no dispatcher existed, because
+        // the API decoded it as a zero-second delay and a node that silently
+        // succeeds without doing anything is worse than one that fails with a
+        // reason. The driver now performs the call, so the node decodes into a
+        // real `Webhook` and a missing URL is refused here rather than at run
+        // time.
+        "WEBHOOK" => {
+            let url = config
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "webhook node `{node_key}` does not supply a url"
+                    ))
+                })?
+                .to_string();
+
+            let method = match config.get("method").and_then(Value::as_str) {
+                None => forge_domain::workflow::HttpMethod::Get,
+                Some(raw) => raw.parse::<forge_domain::workflow::HttpMethod>().map_err(|_| {
+                    invalid(format!(
+                        "webhook node `{node_key}` has an unsupported method `{raw}`"
+                    ))
+                })?,
+            };
+
+            let headers = config
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value.as_str().map(|v| (name.clone(), v.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let timeout_seconds = config
+                .get("timeout_seconds")
+                .and_then(Value::as_u64)
+                .filter(|seconds| *seconds > 0)
+                .unwrap_or(30);
+
+            Ok(NodeType::Webhook {
+                url,
+                method,
+                headers,
+                timeout_seconds,
+            })
+        }
         other => Err(invalid(format!("`{other}` is not a known node type"))),
     }
 }

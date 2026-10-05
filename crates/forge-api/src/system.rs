@@ -445,11 +445,47 @@ pub async fn create_service_account(
     let raw_token = token.raw;
     let hash = token.hash;
 
-    let id = Uuid::new_v4();
-    let expires_at = body
-        .expires_in_days
-        .map(|days| Utc::now() + chrono::Duration::days(days.max(1)));
+    /*
+     * Scopes are validated rather than stored verbatim.
+     *
+     * `*` is refused here. It was honoured in `AuthContext::can`, which meant
+     * any caller with `users:write` could mint an account strictly more
+     * privileged than every human role except OWNER, including
+     * `tenants:delete` — while the whole point of a scoped credential is that
+     * its reach is explicit. An account that needs everything should be an
+     * OWNER, which is a named, attributable, revocable human decision.
+     */
+    for scope in &body.scopes {
+        if scope == "*" {
+            return Err(ApiError::validation(
+                "`*` is not a valid scope; name the permissions this account \
+                 needs, or issue an owner session instead",
+            )
+            .with_detail("scopes", "wildcard refused"));
+        }
+        if scope.trim().is_empty() {
+            return Err(ApiError::validation("a scope must not be empty")
+                .with_detail("scopes", "empty scope"));
+        }
+    }
 
+    /*
+     * Expiry is bounded and defaults to a year.
+     *
+     * Previously `days.max(1)` silently clamped zero and negatives, accepted
+     * `999999`, and defaulted to NULL — never expires. A CI credential that
+     * outlives the project that made it is a credential nobody rotates.
+     */
+    let days = body.expires_in_days.unwrap_or(365);
+    if !(1..=3650).contains(&days) {
+        return Err(
+            ApiError::validation("expires_in_days must be between 1 and 3650")
+                .with_detail("expires_in_days", "out of range"),
+        );
+    }
+    let expires_at = Utc::now() + chrono::Duration::days(days);
+
+    let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO service_accounts (id, tenant_id, name, description, token_hash, token_prefix, scopes, expires_at, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
@@ -506,8 +542,16 @@ pub async fn list_service_accounts(
     let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
         "SELECT json_build_object(
              'id', id, 'name', name, 'description', description,
-             'prefix', token_prefix, 'scopes', scopes,
+             -- Named to match the column and the console's type. The list
+             -- originally returned `prefix`, which the console read as
+             -- `token_prefix` and rendered as undefined on every row.
+             'token_prefix', token_prefix, 'scopes', scopes,
+             -- Both the boolean and the timestamp: the console needs to show
+             -- *when* an account was revoked, and `revoked_at` alone in the
+             -- type while the API sent `revoked` meant every account rendered
+             -- as Active and the Revoke button never disappeared.
              'revoked', revoked_at IS NOT NULL,
+             'revoked_at', revoked_at,
              'expires_at', expires_at, 'created_at', created_at,
              'last_used_at', last_used_at
          )

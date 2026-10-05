@@ -67,6 +67,19 @@ pub enum WorkflowAction {
         node_id: String,
         workflow_id: uuid::Uuid,
     },
+    /// Call an external HTTP endpoint on behalf of this node.
+    ///
+    /// The engine decides *that* the call happens and never performs it: an
+    /// HTTP request inside the decision layer would make `advance_at`
+    /// impossible to test and would put a network call on the scheduler's
+    /// critical path.
+    CallWebhook {
+        node_id: String,
+        url: String,
+        method: forge_domain::workflow::HttpMethod,
+        headers: std::collections::BTreeMap<String, String>,
+        timeout_seconds: u64,
+    },
     /// The node finished unsuccessfully.
     NodeFailed { node_id: String, reason: String },
 }
@@ -335,6 +348,26 @@ impl WorkflowExecution {
                 Some(WorkflowAction::DispatchJob {
                     node_id: node_id.to_string(),
                     job_id: job_id.into_uuid(),
+                })
+            }
+
+            NodeType::Webhook {
+                url,
+                method,
+                headers,
+                timeout_seconds,
+            } => {
+                // Running, not Completed: the call has not happened yet, and
+                // completing it here would let downstream nodes start before the
+                // endpoint answered.
+                self.node_states
+                    .insert(node_id.to_string(), NodeState::Running);
+                Some(WorkflowAction::CallWebhook {
+                    node_id: node_id.to_string(),
+                    url: url.clone(),
+                    method: *method,
+                    headers: headers.clone(),
+                    timeout_seconds: *timeout_seconds,
                 })
             }
 
@@ -721,6 +754,77 @@ mod tests {
         run.complete_node("start", None);
 
         assert_eq!(run.advance().unwrap().len(), 2, "both branches start");
+    }
+
+    /// A webhook node is dispatched, not silently completed.
+    ///
+    /// This is the regression the fix exists for: the node used to decode as a
+    /// zero-second delay, so the engine completed it without any HTTP call and
+    /// the workflow reported success for work that never happened.
+    #[test]
+    fn a_webhook_node_is_dispatched_rather_than_completed() {
+        use forge_domain::workflow::{HttpMethod, NodeType};
+        use std::collections::BTreeMap;
+
+        let mut wf = Workflow::new(TenantId::new(), "hook".into());
+        wf.add_node(forge_domain::workflow::Node {
+            id: "hook".into(),
+            node_type: NodeType::Webhook {
+                url: "https://api.example.com/notify".into(),
+                method: HttpMethod::Post,
+                headers: BTreeMap::new(),
+                timeout_seconds: 15,
+            },
+            name: "hook".into(),
+        });
+        wf.add_node(job_node("after"));
+        wf.add_edge("hook".into(), "after".into(), None);
+
+        let mut run = WorkflowExecution::new(wf);
+        let actions = run.advance().unwrap();
+
+        assert_eq!(actions.len(), 1, "exactly one action is outstanding");
+        match &actions[0] {
+            WorkflowAction::CallWebhook {
+                node_id,
+                url,
+                method,
+                timeout_seconds,
+                ..
+            } => {
+                assert_eq!(node_id, "hook");
+                assert_eq!(url, "https://api.example.com/notify");
+                assert_eq!(*method, HttpMethod::Post);
+                assert_eq!(*timeout_seconds, 15);
+            }
+            other => panic!("expected a webhook dispatch, got {other:?}"),
+        }
+
+        // Running, not Completed: the call has not happened yet, so a
+        // downstream node must not be released.
+        assert_eq!(
+            run.node_states.get("hook"),
+            Some(&NodeState::Running),
+            "a webhook node stays Running until the call reports back"
+        );
+
+        // The downstream node must still be waiting.
+        let after_first = run.advance().unwrap();
+        assert!(
+            after_first.is_empty(),
+            "nothing starts until the webhook completes: {after_first:?}"
+        );
+
+        run.complete_node("hook", None);
+        let after_completion = run.advance().unwrap();
+        assert!(
+            matches!(
+                after_completion.as_slice(),
+                [WorkflowAction::DispatchJob { node_id, .. }] if node_id == "after"
+            ),
+            "the downstream node starts once the call reports success: \
+             {after_completion:?}"
+        );
     }
 
     // AT-WF-005: fan-in waits for every required branch.

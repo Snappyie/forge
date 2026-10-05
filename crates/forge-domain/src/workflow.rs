@@ -50,6 +50,65 @@ pub enum NodeType {
     Map { target_node_id: String },
     /// Executes a nested sub-workflow.
     SubWorkflow { workflow_id: Uuid },
+    /// Calls an external HTTP endpoint and branches on its response.
+    ///
+    /// This existed as a designer-only "WEBHOOK" node that decoded to
+    /// `Delay { seconds: 0 }` — an operator could build one, publish it, and it
+    /// executed as an instantaneous no-op with its `url` read by nobody. It is a
+    /// real variant now so the configuration is either honoured or refused at
+    /// validation, never silently discarded.
+    Webhook {
+        url: String,
+        method: HttpMethod,
+        /// Header names and values. Redacted from logs by the observability
+        /// layer's existing `is_sensitive` matching.
+        headers: BTreeMap<String, String>,
+        /// How long to wait for a response before failing the node.
+        timeout_seconds: u64,
+    },
+}
+
+/// The HTTP verb a webhook node uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    #[default]
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+        }
+    }
+}
+
+impl std::str::FromStr for HttpMethod {
+    type Err = DomainError;
+
+    /// Case-insensitive, because an author writing a node's configuration in a
+    /// JSON file will not reliably match the serialised upper case.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "GET" => Ok(HttpMethod::Get),
+            "POST" => Ok(HttpMethod::Post),
+            "PUT" => Ok(HttpMethod::Put),
+            "PATCH" => Ok(HttpMethod::Patch),
+            "DELETE" => Ok(HttpMethod::Delete),
+            other => Err(DomainError::InvalidWorkflow(format!(
+                "`{other}` is not a supported HTTP method"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +215,36 @@ impl Workflow {
                         "condition node `{}` has an empty expression",
                         node.id
                     )));
+                }
+                NodeType::Webhook {
+                    url, timeout_seconds, ..
+                } => {
+                    // A webhook node is validated here rather than at run time.
+                    // The previous implementation accepted a node whose URL was
+                    // never read, so an operator published a configuration that
+                    // could not do what it said — the worst outcome, because the
+                    // workflow still ran and reported success.
+                    if url.trim().is_empty() {
+                        return Err(DomainError::InvalidWorkflow(format!(
+                            "webhook node `{}` has no URL",
+                            node.id
+                        )));
+                    }
+                    if !url.starts_with("https://") && !url.starts_with("http://") {
+                        return Err(DomainError::InvalidWorkflow(format!(
+                            "webhook node `{}` URL must be http or https",
+                            node.id
+                        )));
+                    }
+                    // A zero timeout would mean "give up immediately", which is
+                    // never what an author means and produces a node that fails
+                    // on every run.
+                    if *timeout_seconds == 0 {
+                        return Err(DomainError::InvalidWorkflow(format!(
+                            "webhook node `{}` needs a non-zero timeout",
+                            node.id
+                        )));
+                    }
                 }
                 _ => {}
             }
@@ -290,6 +379,84 @@ mod tests {
         assert_eq!(workflow.edges.len(), 2);
         assert_eq!(workflow.edges[0].from_node, "a");
         assert_eq!(workflow.edges[0].to_node, "b");
+    }
+
+    fn webhook_workflow(node_type: NodeType) -> Workflow {
+        let mut wf = Workflow::new(TenantId::new(), "hook".to_string());
+        wf.add_node(Node {
+            id: "hook".to_string(),
+            node_type,
+            name: "hook".to_string(),
+        });
+        wf
+    }
+
+    fn webhook(url: &str, timeout_seconds: u64) -> NodeType {
+        NodeType::Webhook {
+            url: url.to_string(),
+            method: HttpMethod::Post,
+            headers: BTreeMap::new(),
+            timeout_seconds,
+        }
+    }
+
+    #[test]
+    fn a_configured_webhook_node_validates() {
+        let wf = webhook_workflow(webhook("https://api.example.com/notify", 30));
+        assert!(
+            wf.validate().is_ok(),
+            "a webhook node with a URL and a timeout must validate: {:?}",
+            wf.validate()
+        );
+    }
+
+    #[test]
+    fn a_webhook_node_without_a_url_is_refused() {
+        // The whole point of the fix: this configuration used to be accepted and
+        // then executed as an instantaneous no-op, so the workflow reported
+        // success for work it had never done.
+        let wf = webhook_workflow(webhook("", 30));
+        let error = wf.validate().expect_err("an empty URL must be refused");
+        assert!(
+            error.to_string().contains("no URL"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn a_webhook_node_with_a_non_http_url_is_refused() {
+        // `file://` would be an SSRF and local-read primitive, and the runtime
+        // check does not fetch it, so it is refused at publish time.
+        for url in ["file:///etc/passwd", "ftp://example.com", "example.com"] {
+            let wf = webhook_workflow(webhook(url, 30));
+            assert!(
+                wf.validate().is_err(),
+                "`{url}` must not validate as a webhook URL"
+            );
+        }
+    }
+
+    #[test]
+    fn a_webhook_node_with_a_zero_timeout_is_refused() {
+        // Zero means "give up immediately", which fails on every run and is
+        // never what an author meant.
+        let wf = webhook_workflow(webhook("https://api.example.com", 0));
+        assert!(wf.validate().is_err());
+    }
+
+    #[test]
+    fn http_methods_parse_case_insensitively_and_reject_the_rest() {
+        for (raw, expected) in [
+            ("get", HttpMethod::Get),
+            ("POST", HttpMethod::Post),
+            ("  put  ", HttpMethod::Put),
+            ("Patch", HttpMethod::Patch),
+            ("delete", HttpMethod::Delete),
+        ] {
+            assert_eq!(raw.parse::<HttpMethod>().unwrap(), expected, "{raw}");
+        }
+        assert!("TRACE".parse::<HttpMethod>().is_err());
+        assert!("".parse::<HttpMethod>().is_err());
     }
 
     // AT-WF-001: a valid DAG validates

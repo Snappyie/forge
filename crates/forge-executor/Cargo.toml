@@ -6,6 +6,8 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+# Webhook workflow nodes make outbound HTTP calls.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio.workspace = true
 chrono.workspace = true
 uuid.workspace = true
@@ -14,5 +16,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sqlx.workspace = true
+forge-auth = { path = "../forge-auth" }
 forge-domain = { path = "../forge-domain" }
 forge-storage = { path = "../forge-storage" }

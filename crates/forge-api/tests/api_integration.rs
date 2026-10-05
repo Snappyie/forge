@@ -1960,7 +1960,32 @@ async fn service_account_lifecycle_and_scope_enforcement() {
         .await;
         assert_eq!(status, 200);
         let items = list["data"].as_array().unwrap();
-        assert!(items.iter().any(|item| item["id"] == sa_id));
+        let listed = items
+            .iter()
+            .find(|item| item["id"] == sa_id)
+            .unwrap_or_else(|| panic!("service account missing from the list"));
+
+        // Field names are a contract with the console. It read `token_prefix`
+        // and `revoked_at`; the list returned `prefix` and `revoked`, so the
+        // table rendered "undefined" on every row and every account showed as
+        // Active with a Revoke button still visible. Asserting the exact keys
+        // here is what stops that recurring.
+        assert!(
+            listed["token_prefix"].is_string(),
+            "list must return token_prefix, got: {listed}"
+        );
+        assert!(
+            listed["revoked"].is_boolean(),
+            "list must return a `revoked` boolean, got: {listed}"
+        );
+        assert!(
+            listed.get("revoked_at").is_some(),
+            "list must return revoked_at so the console can show when: {listed}"
+        );
+        assert_eq!(
+            listed["revoked"], false,
+            "a freshly created account is not revoked: {listed}"
+        );
 
         // 3. Service account authenticates successfully for granted scope (jobs:read)
         let (status, _) = send(&app, "GET", "/api/v1/jobs", Some(sa_token), None, &[]).await;

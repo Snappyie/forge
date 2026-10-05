@@ -43,8 +43,12 @@ impl AuthContext {
             return WORKER_PERMISSIONS.contains(&permission);
         }
         if self.service_account_id.is_some() {
-            return self.scopes.contains(&"*".to_string())
-                || self.scopes.iter().any(|s| s == permission);
+            // No wildcard. `create_service_account` refuses `*`, and honouring
+            // it here anyway would let a row written by any other path (an
+            // import, a migration, a future service) hold more authority than
+            // every human role except OWNER. A scoped credential's reach is the
+            // list it was given.
+            return self.scopes.iter().any(|scope| scope == permission);
         }
         self.role.allows(permission)
     }
@@ -430,8 +434,33 @@ mod tests {
         assert!(!sa.can("jobs:write"));
         assert!(!sa.can("users:write"));
 
-        let wildcard_sa = service_account(Uuid::new_v4(), vec!["*"]);
-        assert!(wildcard_sa.can("jobs:read"));
-        assert!(wildcard_sa.can("tenants:delete"));
+        // An account with no scopes is inert. The fallback from a service
+        // account to the ambient role is the exact mistake this guards: an
+        // account created without scopes would otherwise inherit ADMIN.
+        let empty = service_account(Uuid::new_v4(), vec![]);
+        assert!(!empty.can("jobs:read"));
+        assert!(!empty.can("users:write"));
+        assert!(!empty.can("tenants:delete"));
+    }
+
+    /// A `*` scope grants nothing.
+    ///
+    /// It used to short-circuit every permission check, which made a service
+    /// account strictly more powerful than every human role except OWNER —
+    /// including `tenants:delete`. `create_service_account` refuses the value;
+    /// this pins that honouring it again would be a privilege escalation, not a
+    /// feature. A row written by an import or a migration must not be able to
+    /// reintroduce it.
+    #[test]
+    fn a_wildcard_scope_grants_nothing() {
+        let wildcard = service_account(Uuid::new_v4(), vec!["*"]);
+        assert!(!wildcard.can("jobs:read"));
+        assert!(!wildcard.can("tenants:delete"));
+        assert!(!wildcard.can("users:write"));
+
+        // And it does not become a prefix match either.
+        let wildcard_and_one = service_account(Uuid::new_v4(), vec!["*", "jobs:read"]);
+        assert!(wildcard_and_one.can("jobs:read"), "the named scope still works");
+        assert!(!wildcard_and_one.can("jobs:write"));
     }
 }
