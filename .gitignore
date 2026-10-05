@@ -4,3 +4,6 @@ crates/forge-domain/target
 .env.*
 .env
 **/.env
+# Python bytecode
+__pycache__/
+*.pyc
