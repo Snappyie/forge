@@ -1,49 +1,84 @@
 package io.forge.sdk;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.util.Map;
 
+/**
+ * What a handler is given for one execution.
+ *
+ * <p>The logger is injected rather than the transport so that a log line cannot
+ * hang on its own: the worker owns the HTTP client, its timeouts and its
+ * credentials, and this class only decides what to say.
+ */
 public class JobContext {
-    private final String executionId;
-    private final Map<String, Object> payload;
-    private final String baseUrl;
-    private final String apiKey;
-    private final HttpClient client;
-    private final ObjectMapper mapper = new ObjectMapper();
+    /** Sends one log line for an execution. Implementations must not block. */
+    @FunctionalInterface
+    public interface LogSink {
+        void send(String executionId, String stream, String message);
+    }
 
-    public JobContext(String executionId, Map<String, Object> payload, String baseUrl, String apiKey, HttpClient client) {
+    private final String executionId;
+    private final String jobName;
+    private final Map<String, Object> payload;
+    private final String leaseId;
+    private final String workerId;
+    private final LogSink sink;
+
+    public JobContext(String executionId, String jobName, Map<String, Object> payload,
+                       String leaseId, String workerId, LogSink sink) {
         this.executionId = executionId;
+        this.jobName = jobName;
         this.payload = payload;
-        this.baseUrl = baseUrl;
-        this.apiKey = apiKey;
-        this.client = client;
+        this.leaseId = leaseId;
+        this.workerId = workerId;
+        this.sink = sink;
     }
 
     public String getExecutionId() {
         return executionId;
     }
 
+    public String getJobName() {
+        return jobName;
+    }
+
     public Map<String, Object> getPayload() {
         return payload;
     }
 
+    /**
+     * The lease that came with this execution.
+     *
+     * <p>Must accompany every heartbeat and completion; the server rejects a
+     * completion whose lease has been reassigned.
+     */
+    public String getLeaseId() {
+        return leaseId;
+    }
+
+    public String getWorkerId() {
+        return workerId;
+    }
+
+    /**
+     * Streams a log line back to Forge.
+     *
+     * <p>Best-effort by design: a log line is never worth failing an execution
+     * over, so a transport failure is swallowed rather than raised.
+     */
     public void log(String message) {
+        log(message, "stdout");
+    }
+
+    public void log(String message, String stream) {
         System.out.println("[" + executionId + "] " + message);
         try {
-            String body = mapper.writeValueAsString(Map.of("message", message));
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + "/executions/" + executionId + "/logs"))
-                    .header("Authorization", "Bearer " + apiKey)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
-            client.sendAsync(request, HttpResponse.BodyHandlers.discarding());
-        } catch (Exception e) {
-            // Best effort
+            sink.send(executionId, stream, message);
+        } catch (Exception ignored) {
+            // Logging must never fail a healthy run.
         }
+    }
+
+    public void logf(String format, Object... args) {
+        log(String.format(format, args));
     }
 }
