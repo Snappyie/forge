@@ -297,7 +297,7 @@ pub async fn put_definition(
         // Reject an unknown type here as well, so the row cannot be written
         // with a value the engine will not understand later.
         let stored_type = match node.node_type.as_str() {
-            "JOB" | "APPROVAL" | "DELAY" | "CONDITION" | "MAP" | "WEBHOOK" => {
+            "JOB" | "APPROVAL" | "DELAY" | "CONDITION" | "MAP" | "WEBHOOK" | "JOIN" => {
                 node.node_type.clone()
             }
             other => {
@@ -690,7 +690,7 @@ fn validate_graph(definition: &GraphDefinition) -> Result<(), ApiError> {
     }
 
     for node in &definition.nodes {
-        if !["JOB", "APPROVAL", "DELAY", "CONDITION", "MAP", "WEBHOOK"]
+        if !["JOB", "APPROVAL", "DELAY", "CONDITION", "MAP", "WEBHOOK", "JOIN"]
             .contains(&node.node_type.as_str())
         {
             return Err(ApiError::validation(format!(
@@ -933,6 +933,27 @@ fn to_domain_workflow(
                     .unwrap_or_default()
                     .to_string(),
             },
+            "JOIN" => {
+                // Defaults to the safe barrier: a join that proceeded on partial
+                // failure would run downstream work against incomplete state.
+                let raw = node
+                    .config
+                    .get("policy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("all_succeeded");
+                let policy = match raw.to_ascii_lowercase().replace('-', "_").as_str() {
+                    "all_succeeded" => forge_domain::workflow::JoinPolicy::AllSucceeded,
+                    "all_completed" => forge_domain::workflow::JoinPolicy::AllCompleted,
+                    "any_succeeded" => forge_domain::workflow::JoinPolicy::AnySucceeded,
+                    other => {
+                        return Err(ApiError::validation(format!(
+                            "`{other}` is not a join policy"
+                        ))
+                        .with_detail("nodes", "unknown join policy"))
+                    }
+                };
+                NodeType::Join { policy }
+            }
             "SUB_WORKFLOW" => {
                 let target_workflow_id = node
                     .config

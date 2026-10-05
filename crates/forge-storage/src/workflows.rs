@@ -797,6 +797,29 @@ fn node_type_from_storage(raw_type: &str, config: &Value, node_key: &str) -> Res
                 target_node_id: target,
             })
         }
+        "JOIN" => {
+            // The policy defaults to ALL_SUCCEEDED, which is the safe barrier:
+            // a join that proceeded on partial failure would run downstream work
+            // against incomplete state.
+            let policy = match config.get("policy").and_then(Value::as_str) {
+                None => forge_domain::workflow::JoinPolicy::AllSucceeded,
+                Some("all_succeeded") | Some("ALL_SUCCEEDED") => {
+                    forge_domain::workflow::JoinPolicy::AllSucceeded
+                }
+                Some("all_completed") | Some("ALL_COMPLETED") => {
+                    forge_domain::workflow::JoinPolicy::AllCompleted
+                }
+                Some("any_succeeded") | Some("ANY_SUCCEEDED") => {
+                    forge_domain::workflow::JoinPolicy::AnySucceeded
+                }
+                Some(other) => {
+                    return Err(invalid(format!(
+                        "join node `{node_key}` has an unknown policy `{other}`"
+                    )))
+                }
+            };
+            Ok(NodeType::Join { policy })
+        }
         "SUB_WORKFLOW" => {
             let workflow_id = config
                 .get("workflow_id")

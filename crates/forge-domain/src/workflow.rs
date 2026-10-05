@@ -50,6 +50,14 @@ pub enum NodeType {
     Map { target_node_id: String },
     /// Executes a nested sub-workflow.
     SubWorkflow { workflow_id: Uuid },
+    /// An explicit fan-in point.
+    ///
+    /// Fan-in already works through edge conditions — a node with several
+    /// incoming edges waits for all of them by default. A `Join` makes that
+    /// intent visible in the graph and carries its own policy, because
+    /// "wait for everything" and "wait for any one" are different barriers and a
+    /// reader of the graph should not have to infer which one an edge list means.
+    Join { policy: JoinPolicy },
     /// Calls an external HTTP endpoint and branches on its response.
     ///
     /// This existed as a designer-only "WEBHOOK" node that decoded to
@@ -107,6 +115,35 @@ impl std::str::FromStr for HttpMethod {
             other => Err(DomainError::InvalidWorkflow(format!(
                 "`{other}` is not a supported HTTP method"
             ))),
+        }
+    }
+}
+
+/// What an explicit join waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinPolicy {
+    /// Every incoming branch must succeed. The default, and the safe one: a
+    /// join that proceeds on partial failure runs downstream work against
+    /// incomplete state.
+    #[default]
+    AllSucceeded,
+    /// Every incoming branch must reach a terminal state, whatever the outcome.
+    /// For cleanup paths that must run even when part of the work failed.
+    AllCompleted,
+    /// The first branch to succeed releases the join, and the rest are abandoned.
+    AnySucceeded,
+}
+
+impl NodeType {
+    /// Whether this node type is a barrier other nodes wait on.
+    ///
+    /// A join is decided by its own policy rather than by the conditions on its
+    /// incoming edges, so the engine consults it directly.
+    pub fn join_policy(&self) -> Option<JoinPolicy> {
+        match self {
+            NodeType::Join { policy } => Some(*policy),
+            _ => None,
         }
     }
 }
@@ -215,6 +252,16 @@ impl Workflow {
                         "condition node `{}` has an empty expression",
                         node.id
                     )));
+                }
+                NodeType::Join { .. } => {
+                    let incoming = self.edges.iter().filter(|e| e.to_node == node.id).count();
+                    if incoming < 2 {
+                        return Err(DomainError::InvalidWorkflow(format!(
+                            "join node `{}` has {} incoming edge(s); a join needs at \
+                             least two branches",
+                            node.id, incoming
+                        )));
+                    }
                 }
                 NodeType::Webhook {
                     url, timeout_seconds, ..

@@ -351,6 +351,17 @@ impl WorkflowExecution {
                 })
             }
 
+            NodeType::Join { policy } => {
+                // A join does no work; it is a barrier, so completing it here is
+                // correct. `dependencies_satisfied` already refused to start it
+                // until its policy was met.
+                debug_assert!(self.dependencies_satisfied(node_id), "join started early");
+                self.node_states
+                    .insert(node_id.to_string(), NodeState::Completed);
+                let _ = policy;
+                None
+            }
+
             NodeType::Webhook {
                 url,
                 method,
@@ -514,6 +525,40 @@ impl WorkflowExecution {
 
         if incoming.is_empty() {
             return true;
+        }
+
+        /*
+         * An explicit join is decided by its own policy, not by the conditions
+         * on its incoming edges.
+         *
+         * Without this, a `Join` with `AnySucceeded` among edges that are all
+         * `ALL_SUCCEEDED` would behave as an all-succeeded barrier, making the
+         * node type decorative: a second spelling of the default that silently
+         * ignores the policy it was given.
+         */
+        if let Some(policy) = self
+            .workflow
+            .nodes
+            .get(node_id)
+            .and_then(|node| node.node_type.join_policy())
+        {
+            use forge_domain::workflow::JoinPolicy;
+            // `incoming` holds `&Edge`, so `iter()` yields `&&Edge`; the
+            // deref keeps the predicates reading as plain functions.
+            return match policy {
+                JoinPolicy::AllSucceeded => incoming.iter().all(|edge| {
+                    matches!(self.node_states.get(&edge.from_node), Some(NodeState::Completed))
+                }),
+                JoinPolicy::AllCompleted => incoming.iter().all(|edge| {
+                    matches!(
+                        self.node_states.get(&edge.from_node),
+                        Some(NodeState::Completed) | Some(NodeState::Failed { .. })
+                    )
+                }),
+                JoinPolicy::AnySucceeded => incoming.iter().any(|edge| {
+                    matches!(self.node_states.get(&edge.from_node), Some(NodeState::Completed))
+                }),
+            };
         }
 
         let require_all = incoming
@@ -824,6 +869,130 @@ mod tests {
             ),
             "the downstream node starts once the call reports success: \
              {after_completion:?}"
+        );
+    }
+
+    fn join_node(policy: forge_domain::workflow::JoinPolicy) -> Node {
+        forge_domain::workflow::Node {
+            id: "join".into(),
+            node_type: forge_domain::workflow::NodeType::Join { policy },
+            name: "join".into(),
+        }
+    }
+
+    /// A join's own policy decides the barrier, not its edge conditions.
+    ///
+    /// These edges are all `ALL_SUCCEEDED`, which is what an edge list means by
+    /// default. If the engine ignored `Join::AnySucceeded`, the node type would
+    /// be a second spelling of the default that silently discards the policy it
+    /// was given.
+    #[test]
+    fn an_explicit_join_waits_for_every_branch_by_default() {
+        use forge_domain::workflow::JoinPolicy;
+
+        let mut wf = Workflow::new(TenantId::new(), "join".into());
+        for id in ["start", "left", "right"] {
+            wf.add_node(job_node(id));
+        }
+        wf.add_node(join_node(JoinPolicy::AllSucceeded));
+        wf.add_node(job_node("after"));
+        wf.add_edge("start".into(), "left".into(), None);
+        wf.add_edge("start".into(), "right".into(), None);
+        wf.add_edge("left".into(), "join".into(), None);
+        wf.add_edge("right".into(), "join".into(), None);
+        wf.add_edge("join".into(), "after".into(), None);
+
+        let mut run = WorkflowExecution::new(wf);
+        run.advance().unwrap();
+        run.complete_node("start", None);
+
+        // Both branches start.
+        run.advance().unwrap();
+        // One completes: the join must still hold.
+        run.complete_node("left", None);
+        let waiting = run.advance().unwrap();
+        assert!(
+            !waiting
+                .iter()
+                .any(|a| matches!(a, WorkflowAction::DispatchJob { node_id, .. } if node_id == "after")),
+            "the join must wait for both branches: {waiting:?}"
+        );
+
+        // The second completes: now it releases.
+        run.complete_node("right", None);
+        let released = run.advance().unwrap();
+        assert!(
+            released
+                .iter()
+                .any(|a| matches!(a, WorkflowAction::DispatchJob { node_id, .. } if node_id == "after")),
+            "the join releases once every branch succeeded: {released:?}"
+        );
+    }
+
+    #[test]
+    fn an_any_succeeded_join_releases_on_the_first_success() {
+        use forge_domain::workflow::JoinPolicy;
+
+        let mut wf = Workflow::new(TenantId::new(), "race".into());
+        for id in ["start", "left", "right"] {
+            wf.add_node(job_node(id));
+        }
+        wf.add_node(join_node(JoinPolicy::AnySucceeded));
+        wf.add_node(job_node("after"));
+        wf.add_edge("start".into(), "left".into(), None);
+        wf.add_edge("start".into(), "right".into(), None);
+        wf.add_edge("left".into(), "join".into(), None);
+        wf.add_edge("right".into(), "join".into(), None);
+        wf.add_edge("join".into(), "after".into(), None);
+
+        let mut run = WorkflowExecution::new(wf);
+        run.advance().unwrap();
+        run.complete_node("start", None);
+        run.advance().unwrap();
+
+        // Only one branch finishes. An all-succeeded barrier would hold here;
+        // `AnySucceeded` must release.
+        run.complete_node("left", None);
+        let released = run.advance().unwrap();
+        assert!(
+            released
+                .iter()
+                .any(|a| matches!(a, WorkflowAction::DispatchJob { node_id, .. } if node_id == "after")),
+            "an ANY_SUCCEEDED join releases on the first success: {released:?}"
+        );
+    }
+
+    #[test]
+    fn an_all_completed_join_releases_even_when_a_branch_failed() {
+        use forge_domain::workflow::JoinPolicy;
+
+        let mut wf = Workflow::new(TenantId::new(), "cleanup".into());
+        for id in ["start", "left", "right"] {
+            wf.add_node(job_node(id));
+        }
+        wf.add_node(join_node(JoinPolicy::AllCompleted));
+        wf.add_node(job_node("after"));
+        wf.add_edge("start".into(), "left".into(), None);
+        wf.add_edge("start".into(), "right".into(), None);
+        wf.add_edge("left".into(), "join".into(), None);
+        wf.add_edge("right".into(), "join".into(), None);
+        wf.add_edge("join".into(), "after".into(), None);
+
+        let mut run = WorkflowExecution::new(wf);
+        run.advance().unwrap();
+        run.complete_node("start", None);
+        run.advance().unwrap();
+
+        // A cleanup path must run even when part of the work failed; this is the
+        // reason ALL_COMPLETED exists as a separate policy.
+        run.fail_node("left", "upstream unavailable");
+        run.complete_node("right", None);
+        let released = run.advance().unwrap();
+        assert!(
+            released
+                .iter()
+                .any(|a| matches!(a, WorkflowAction::DispatchJob { node_id, .. } if node_id == "after")),
+            "an ALL_COMPLETED join releases once every branch finished: {released:?}"
         );
     }
 
