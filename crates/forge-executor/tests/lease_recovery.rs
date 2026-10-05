@@ -156,6 +156,8 @@ async fn scaffold(db: &PgPool) -> (TenantId, JobId, JobVersionId) {
             None,
             forge_domain::Priority::Normal,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();

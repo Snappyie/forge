@@ -479,7 +479,7 @@ async fn planning_to_the_same_environment_is_refused() {
 }
 
 #[tokio::test]
-async fn applying_without_binding_resolution_is_refused() {
+async fn applying_a_plan_carries_its_keyed_jobs_across() {
     with_db!(|pool: PgPool| async move {
         let f = fixture(&pool).await;
         let app = router(pool.clone());
@@ -492,35 +492,38 @@ async fn applying_without_binding_resolution_is_refused() {
             Some(serde_json::json!({})),
         )
         .await;
+        let plan = planned["data"]["plan"].clone();
 
         let (status, body) = send(
             &app,
             "POST",
             "/api/v1/migration/apply",
             &f.token,
-            Some(serde_json::json!({ "plan": planned["data"]["plan"] })),
+            Some(serde_json::json!({ "plan": plan })),
         )
         .await;
-        // Refused rather than creating jobs pointing at a dev queue. 400 is
-        // this API's validation status; the point is that it is a refusal with
-        // a reason, not a 501 "not implemented" and not a silent success.
-        assert_eq!(status, 400, "{body}");
-        assert!(
-            body["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("binding"),
-            "{body}"
-        );
+        assert_eq!(status, 200, "{body}");
 
-        // And nothing was created.
-        let prod_jobs: (i64,) =
+        // The keyed job crossed with its key intact, which is what lets a second
+        // migration match it rather than duplicating it.
+        let carried: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM jobs WHERE tenant_id = $1 AND environment_id = $2 AND key = 'nightly'",
+        )
+        .bind(f.tenant_id)
+        .bind(f.prod_env)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(carried, Some("nightly-settlement".to_string()), "{body}");
+
+        // The source keeps its jobs: a migration copies, it does not move.
+        let dev_jobs: (i64,) =
             sqlx::query_as("SELECT count(*) FROM jobs WHERE environment_id = $1")
-                .bind(f.prod_env)
+                .bind(f.dev_env)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(prod_jobs.0, 0);
+        assert_eq!(dev_jobs.0, 2);
     })
     .await;
 }

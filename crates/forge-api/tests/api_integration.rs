@@ -1521,8 +1521,13 @@ async fn dispatch_honours_worker_state_and_concurrency() {
 
     // A job bounded to one concurrent execution.
     let (job_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO jobs (id, tenant_id, name, status, priority)
-         VALUES (gen_random_uuid(), $1, 'bounded', 'ACTIVE', 'NORMAL') RETURNING id",
+        "INSERT INTO jobs (id, tenant_id, name, status, priority, environment_id)
+         SELECT gen_random_uuid(), t.id, 'bounded', 'ACTIVE', 'NORMAL',
+                (SELECT e.id FROM environments e
+                  WHERE e.tenant_id = t.id
+                  ORDER BY (e.slug = 'default') DESC, e.created_at LIMIT 1)
+           FROM tenants t WHERE t.id = $1
+         RETURNING id",
     )
     .bind(tenant_id)
     .fetch_one(&pool)
@@ -1863,8 +1868,13 @@ async fn comma_separated_status_filter_works() {
 
         // Create a job & version
         let (job_id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO jobs (id, tenant_id, name, status, priority)
-             VALUES (gen_random_uuid(), $1, 'filter_job', 'ACTIVE', 'NORMAL') RETURNING id",
+            "INSERT INTO jobs (id, tenant_id, name, status, priority, environment_id)
+             SELECT gen_random_uuid(), t.id, 'filter_job', 'ACTIVE', 'NORMAL',
+                    (SELECT e.id FROM environments e
+                      WHERE e.tenant_id = t.id
+                      ORDER BY (e.slug = 'default') DESC, e.created_at LIMIT 1)
+               FROM tenants t WHERE t.id = $1
+             RETURNING id",
         )
         .bind(tenant_id)
         .fetch_one(&pool)

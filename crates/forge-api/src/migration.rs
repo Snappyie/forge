@@ -39,13 +39,6 @@ pub struct PlanMigrationQuery {
     pub application: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ApplyMigrationRequest {
-    /// A plan previously returned by `POST /migration/plan`, echoed back so the
-    /// applied set is exactly the reviewed set.
-    pub plan: MigrationPlan,
-}
-
 /// `POST /migration/plan` — compute what would cross between environments.
 ///
 /// Applies nothing. Every entry reports what would happen and which bindings
@@ -192,43 +185,6 @@ pub async fn plan_migration(
         }),
         auth.request_id,
     )))
-}
-
-/// `POST /migration/apply` — carry the approved plan across.
-///
-/// Refuses rather than partially applying: the plan is echoed back from
-/// `POST /migration/plan` precisely so the applied set is the reviewed set, and
-/// a plan that has drifted from what the operator saw is a reason to stop.
-pub async fn apply_migration(
-    Auth(auth): Auth,
-    Json(body): Json<ApplyMigrationRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    auth.require("jobs:write")?;
-
-    let plan = &body.plan;
-    if plan.entries.is_empty() {
-        return Err(ApiError::validation("the plan carries no jobs").with_detail(
-            "plan",
-            "empty",
-        ));
-    }
-
-    /*
-     * Applying a migration needs the destination's resolved object ids for every
-     * binding, and no such mapping has been agreed yet. Rather than create jobs
-     * that point at a dev queue, this refuses.
-     *
-     * A 400 rather than a 501: nothing is missing from the *server*, the request
-     * is missing a precondition. 501 would say "this endpoint does not exist",
-     * which is the opposite of the problem, and this API maps validation
-     * failures to 400 consistently.
-     */
-    Err(ApiError::validation(format!(
-        "applying a migration needs binding resolution: {} job(s) are planned but \
-         no queue, worker-pool, or secret mapping has been supplied",
-        plan.entries.len()
-    ))
-    .with_detail("bindings", plan.entries.len().to_string()))
 }
 
 /// Two jobs are the same when their portable definition matches.

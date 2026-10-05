@@ -146,8 +146,15 @@ async fn seed_job(pool: &PgPool, tenant: TenantId, published: bool) -> Uuid {
     let job_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
 
+    // `environment_id` is required as of migration 026; a subquery picks this
+    // tenant's default rather than any environment, so the fixture cannot file a
+    // job under another tenant's.
     sqlx::query(
-        "INSERT INTO jobs (id, tenant_id, key, name, status) VALUES ($1, $2, $3, $4, 'ACTIVE')",
+        "INSERT INTO jobs (id, tenant_id, key, name, status, environment_id)
+         VALUES ($1, $2, $3, $4, 'ACTIVE',
+                 (SELECT e.id FROM environments e
+                   WHERE e.tenant_id = $2
+                   ORDER BY (e.slug = 'default') DESC, e.created_at LIMIT 1))",
     )
     .bind(job_id)
     .bind(tenant.into_uuid())

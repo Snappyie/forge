@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use forge_domain::{ApplicationId, EnvironmentId, EnvironmentKind, Slug};
+use forge_domain::{ApplicationId, EnvironmentId, EnvironmentKind, Slug, TenantId};
 use forge_storage::{
     ApplicationRepository, DeleteEnvironmentError, EnvironmentRepository, NewApplication,
     NewEnvironment,
@@ -483,4 +483,22 @@ fn validate_name(field: &str, value: &str) -> Result<(), ApiError> {
         );
     }
     Ok(())
+}
+
+/// Resolves an environment slug within a tenant.
+///
+/// Public because job creation and the migration path both file jobs under an
+/// environment, and both must resolve it the same way — a second, subtly
+/// different lookup is how a job ends up in the wrong environment.
+pub async fn resolve_environment_slug(
+    state: &AppState,
+    tenant_id: TenantId,
+    slug: &str,
+) -> Result<Uuid, ApiError> {
+    forge_storage::EnvironmentRepository::new(&state.pool)
+        .get_by_slug(tenant_id, slug.trim())
+        .await
+        .map_err(ApiError::from)?
+        .map(|row| row.id)
+        .ok_or_else(|| ApiError::not_found("environment"))
 }

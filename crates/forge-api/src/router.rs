@@ -171,7 +171,11 @@ pub fn create_router(
         )
         .route(
             &format!("{PREFIX}/migration/apply"),
-            post(crate::migration::apply_migration),
+            post(crate::migration_apply::apply),
+        )
+        .route(
+            &format!("{PREFIX}/migration/bindings"),
+            post(crate::migration_apply::plan_bindings),
         )
         .route(
             &format!("{PREFIX}/environments/:id"),

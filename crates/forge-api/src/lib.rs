@@ -10,6 +10,7 @@ pub mod insights;
 pub mod jobs;
 pub mod middleware;
 pub mod migration;
+pub mod migration_apply;
 pub mod openapi;
 pub mod ops;
 pub mod parity;

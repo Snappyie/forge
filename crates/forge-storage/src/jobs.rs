@@ -24,6 +24,10 @@ pub struct JobRow {
     pub priority: String,
     pub owner_id: Option<Uuid>,
     pub labels: serde_json::Value,
+    /// Where this job runs. Required as of migration 026.
+    pub environment_id: Uuid,
+    /// Which application groups it, when it is grouped at all.
+    pub application_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -100,7 +104,8 @@ impl JobFilter {
 }
 
 const JOB_COLUMNS: &str = "id, tenant_id, key, name, description, status, current_version_id, \
-     default_queue_id, priority, owner_id, labels, created_at, updated_at";
+     default_queue_id, priority, owner_id, labels, environment_id, application_id, \
+     created_at, updated_at";
 
 pub struct JobRepository<'a> {
     pool: &'a PgPool,
@@ -114,6 +119,7 @@ impl<'a> JobRepository<'a> {
     /// Creates a job in `DRAFT`. Invariant: `tenant_id` is immutable and is
     /// supplied by the caller from the authenticated identity, never from the
     /// request body.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         tenant_id: TenantId,
@@ -122,11 +128,38 @@ impl<'a> JobRepository<'a> {
         description: Option<String>,
         priority: Priority,
         owner_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
+        application_id: Option<Uuid>,
     ) -> Result<JobRow> {
         let id = Uuid::new_v4();
+        /*
+         * `environment_id` is required by the schema, so a caller that supplies
+         * none gets the tenant's default rather than a constraint failure. The
+         * lookup is scoped to the tenant: falling back to another tenant's
+         * environment would place a job somewhere it cannot be administered.
+         */
+        let environment_id = match environment_id {
+            Some(id) => id,
+            None => sqlx::query_scalar(
+                "SELECT id FROM environments WHERE tenant_id = $1
+                 ORDER BY (slug = 'default') DESC, created_at LIMIT 1",
+            )
+            .bind(tenant_id.into_uuid())
+            .fetch_optional(self.pool)
+            .await
+            .map_err(StorageError::from_sqlx)?
+            .ok_or_else(|| {
+                StorageError::Validation(
+                    "this tenant has no environment to create the job in".to_string(),
+                )
+            })?,
+        };
+
         sqlx::query_as::<_, JobRow>(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO jobs (id, tenant_id, key, name, description, status, priority, owner_id)
-             VALUES ($1, $2, $3, $4, $5, 'DRAFT', $6, $7)
+            "INSERT INTO jobs
+                 (id, tenant_id, key, name, description, status, priority, owner_id,
+                  environment_id, application_id)
+             VALUES ($1, $2, $3, $4, $5, 'DRAFT', $6, $7, $8, $9)
              RETURNING {JOB_COLUMNS}"
         )))
         .bind(id)
@@ -136,6 +169,8 @@ impl<'a> JobRepository<'a> {
         .bind(&description)
         .bind(priority.as_str())
         .bind(owner_id)
+        .bind(environment_id)
+        .bind(application_id)
         .fetch_one(self.pool)
         .await
         .map_err(StorageError::from_sqlx)

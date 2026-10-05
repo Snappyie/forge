@@ -186,6 +186,8 @@ async fn scaffold(pool: &PgPool, tenant: TenantId) -> (JobId, JobVersionId) {
             None,
             Priority::Normal,
             None,
+            None,
+            None,
         )
         .await
         .expect("create job");
@@ -233,6 +235,8 @@ async fn job_round_trips_through_the_repository() {
                 None,
                 Priority::High,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();
@@ -267,6 +271,8 @@ async fn cross_tenant_job_read_is_not_found() {
                 None,
                 Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();
@@ -297,6 +303,8 @@ async fn job_key_is_unique_within_a_tenant_but_across_tenants() {
             None,
             Priority::Normal,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -307,6 +315,8 @@ async fn job_key_is_unique_within_a_tenant_but_across_tenants() {
             "B1",
             None,
             Priority::Normal,
+            None,
+            None,
             None,
         )
         .await
@@ -321,6 +331,8 @@ async fn job_key_is_unique_within_a_tenant_but_across_tenants() {
                 None,
                 Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await;
         assert!(matches!(dup, Err(StorageError::Conflict(_))), "got {dup:?}");
@@ -364,6 +376,8 @@ async fn stale_update_is_rejected_by_optimistic_concurrency() {
                 None,
                 Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();
@@ -415,6 +429,8 @@ async fn archiving_is_soft_and_idempotent() {
                 None,
                 Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();
@@ -450,6 +466,8 @@ async fn version_numbers_increment_and_publishing_is_idempotent() {
                 None,
                 Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();
@@ -753,6 +771,8 @@ async fn cursor_pagination_walks_every_row_exactly_once() {
                 None,
                 Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();
@@ -795,6 +815,8 @@ async fn job_filters_narrow_results() {
             None,
             Priority::Normal,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -804,6 +826,8 @@ async fn job_filters_narrow_results() {
             "Beta",
             None,
             Priority::Critical,
+            None,
+            None,
             None,
         )
         .await

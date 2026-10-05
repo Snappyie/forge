@@ -148,6 +148,8 @@ async fn scaffold(pool: &PgPool, tenant: TenantId) -> (JobId, JobVersionId) {
             None,
             forge_domain::Priority::Normal,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -254,6 +256,8 @@ async fn at_con_001_limit_is_scoped_to_one_job() {
                 None,
                 forge_domain::Priority::Normal,
                 None,
+            None,
+            None,
             )
             .await
             .unwrap();

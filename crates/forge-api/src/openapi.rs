@@ -774,6 +774,22 @@ fn paths() -> Value {
         }),
     );
     paths.insert(
+        "/migration/bindings".into(),
+        json!({
+            "post": op(
+                "List the bindings a plan needs resolved", "migration",
+                "listMigrationBindings", Some("jobs:read"), vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "description": "The migration plan itself",
+                    "required": ["entries"],
+                    "properties": { "entries": { "type": "array" } }
+                }))),
+                "200",
+            )
+        }),
+    );
+    paths.insert(
         "/migration/apply".into(),
         json!({
             "post": op(

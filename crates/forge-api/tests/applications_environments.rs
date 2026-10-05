@@ -462,8 +462,19 @@ async fn an_environment_in_use_is_not_deleted() {
         assert_eq!(status, 409, "{refused}");
         assert_eq!(refused["error"]["details"][0]["field"], "job_count");
 
-        // Once the job moves away, the delete succeeds.
-        sqlx::query("UPDATE jobs SET environment_id = NULL")
+        // Once the job moves away, the delete succeeds. It has to move to
+        // another environment rather than to NULL: migration 026 made
+        // `environment_id` NOT NULL, because every job runs somewhere.
+        let spare: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (id, tenant_id, slug, name, kind)
+             SELECT gen_random_uuid(), t.id, 'spare', 'Spare', 'other'
+               FROM tenants t LIMIT 1 RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE jobs SET environment_id = $1")
+            .bind(spare)
             .execute(&pool)
             .await
             .unwrap();
@@ -498,8 +509,11 @@ async fn an_application_holding_jobs_is_not_deleted() {
         let id = created["data"]["id"].as_str().unwrap().to_string();
 
         sqlx::query(
-            "INSERT INTO jobs (id, tenant_id, name, status, application_id)
-             SELECT gen_random_uuid(), t.id, 'score', 'DRAFT', $1
+            "INSERT INTO jobs (id, tenant_id, name, status, application_id, environment_id)
+             SELECT gen_random_uuid(), t.id, 'score', 'DRAFT', $1,
+                    (SELECT e.id FROM environments e
+                      WHERE e.tenant_id = t.id
+                      ORDER BY (e.slug = 'default') DESC, e.created_at LIMIT 1)
                FROM tenants t LIMIT 1",
         )
         .bind(Uuid::parse_str(&id).unwrap())

@@ -118,8 +118,12 @@ impl IsolationDb {
         }
         for (tenant, label) in [(TENANT_A, "A"), (TENANT_B, "B")] {
             pool.execute(sqlx::AssertSqlSafe(format!(
-                "INSERT INTO jobs (id, tenant_id, name, status)
-                 VALUES (gen_random_uuid(), '{tenant}', 'secret-job-{label}', 'DRAFT')"
+                "INSERT INTO jobs (id, tenant_id, name, status, environment_id)
+                 SELECT gen_random_uuid(), t.id, 'secret-job-{label}', 'DRAFT',
+                        (SELECT e.id FROM environments e
+                          WHERE e.tenant_id = t.id
+                          ORDER BY (e.slug = 'default') DESC, e.created_at LIMIT 1)
+                   FROM tenants t WHERE t.id = '{tenant}'"
             )))
             .await
             .ok()?;
@@ -268,8 +272,14 @@ fn rls_blocks_a_cross_tenant_write() {
         // WITH CHECK, not just USING: without it a row could be *read* in
         // isolation yet still be *written* into someone else's tenant.
         let result = sqlx::query(
-            "INSERT INTO jobs (id, tenant_id, name, status)
-             VALUES (gen_random_uuid(), $1, 'injected', 'DRAFT')",
+            // This insert is *meant* to violate the cross-tenant write policy,
+            // so it needs an environment to get far enough to be refused.
+            "INSERT INTO jobs (id, tenant_id, name, status, environment_id)
+             SELECT gen_random_uuid(), t.id, 'injected', 'DRAFT',
+                    (SELECT e.id FROM environments e
+                      WHERE e.tenant_id = t.id
+                      ORDER BY (e.slug = 'default') DESC, e.created_at LIMIT 1)
+               FROM tenants t WHERE t.id = $1",
         )
         .bind(TENANT_B)
         .execute(&mut *conn)

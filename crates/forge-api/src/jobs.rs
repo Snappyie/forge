@@ -29,6 +29,14 @@ pub struct CreateJobRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub priority: Option<String>,
+    /// Which environment the job runs in. Optional so an existing client is
+    /// unaffected; omitted means the tenant's default.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Which application groups it, by slug. Optional, and a job may be
+    /// ungrouped.
+    #[serde(default)]
+    pub application: Option<String>,
 }
 
 /// `POST /jobs` (spec 05 endpoint 1).
@@ -61,6 +69,30 @@ pub async fn create(
         &request_body,
         &auth.request_id,
         || async {
+            // Resolved by slug and scoped to the caller's tenant, so a job
+            // cannot be filed under another tenant's environment by naming it.
+            let environment_id = match body.environment.as_deref() {
+                Some(slug) => Some(
+                    crate::applications::resolve_environment_slug(
+                        &state,
+                        auth.tenant_id,
+                        slug,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            let application_id = match body.application.as_deref() {
+                Some(slug) => Some(
+                    forge_storage::ApplicationRepository::new(&state.pool)
+                        .get_by_slug(auth.tenant_id, slug.trim())
+                        .await?
+                        .ok_or_else(|| ApiError::not_found("application"))?
+                        .id,
+                ),
+                None => None,
+            };
+
             let repo = JobRepository::new(&state.pool);
             let row = repo
                 .create(
@@ -70,6 +102,8 @@ pub async fn create(
                     body.description.clone(),
                     priority,
                     Some(auth.user_id),
+                    environment_id,
+                    application_id,
                 )
                 .await?;
             Ok((StatusCode::CREATED, JobView::from_row(&row), Some(row.id)))
@@ -760,6 +794,8 @@ mod tests {
             priority: "HIGH".into(),
             owner_id: None,
             labels: json!({}),
+            environment_id: Uuid::new_v4(),
+            application_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

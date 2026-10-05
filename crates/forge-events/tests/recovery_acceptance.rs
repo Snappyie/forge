@@ -156,6 +156,8 @@ async fn scaffold(pool: &PgPool) -> Fixture {
             None,
             forge_domain::Priority::Normal,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
