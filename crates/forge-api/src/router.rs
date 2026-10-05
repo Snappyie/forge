@@ -131,6 +131,44 @@ pub fn create_router(
             get(crate::auth_routes::oidc_callback),
         );
 
+    // --- applications and environments ---
+    //
+    // Registered before the jobs block so the console's app picker and the
+    // migration wizard have real endpoints to call. `redesign.md` section D
+    // treats the application as the primary grouping, which nothing could
+    // create before this.
+    let applications = Router::new()
+        .route(
+            &format!("{PREFIX}/applications"),
+            get(crate::applications::list_applications)
+                .post(crate::applications::create_application),
+        )
+        .route(
+            &format!("{PREFIX}/applications/by-slug/:slug"),
+            get(crate::applications::get_application_by_slug),
+        )
+        .route(
+            &format!("{PREFIX}/applications/:id"),
+            get(crate::applications::get_application)
+                .patch(crate::applications::update_application)
+                .delete(crate::applications::delete_application),
+        )
+        .route(
+            &format!("{PREFIX}/environments"),
+            get(crate::applications::list_environments)
+                .post(crate::applications::create_environment),
+        )
+        .route(
+            &format!("{PREFIX}/environments/by-slug/:slug"),
+            get(crate::applications::get_environment_by_slug),
+        )
+        .route(
+            &format!("{PREFIX}/environments/:id"),
+            get(crate::applications::get_environment)
+                .patch(crate::applications::update_environment)
+                .delete(crate::applications::delete_environment),
+        );
+
     // --- tenant-scoped routes ---
     //
     // `auth/tenants` and `auth/switch-tenant` live here rather than with the
@@ -601,6 +639,7 @@ pub fn create_router(
         );
 
     public
+        .merge(applications)
         .merge(api)
         .layer(
             ServiceBuilder::new()

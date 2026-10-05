@@ -120,6 +120,8 @@ pub fn document(base_url: &str) -> Value {
         "tags": [
             { "name": "public" },
             { "name": "auth" },
+            { "name": "applications" },
+            { "name": "environments" },
             { "name": "jobs" },
             { "name": "schedules" },
             { "name": "queues" },
@@ -628,6 +630,118 @@ fn paths() -> Value {
     paths.insert(
         "/workers/{id}/revoke".into(),
         json!({ "post": op("Revoke a worker", "workers", "revokeWorker", Some("workers:admin"), vec![worker_id.clone()], None, "200") }),
+    );
+
+    // --- applications and environments (`redesign.md` section D) ---
+    //
+    // The application is PowerJob's grouping and the environment is the axis a
+    // job migrates along; neither existed before, so neither appears in
+    // 05-api-spec. Documented here because amending the spec is separate work.
+    //
+    // `id_param` below is the file-level helper. A local binding of the same
+    // name would shadow it for every other call site.
+    let slug_path = |name: &str| {
+        vec![json!({
+            "name": name,
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+        })]
+    };
+    let app_id = vec![id_param("id")];
+    paths.insert(
+        "/applications".into(),
+        json!({
+            "get": op("List applications", "applications", "listApplications", Some("jobs:read"), vec![], None, "200"),
+            "post": op(
+                "Create an application", "applications", "createApplication", Some("jobs:write"), vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        // Optional: derived from `name` when omitted, so an
+                        // operator types a display name and gets a usable slug.
+                        "slug": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+                        "description": { "type": "string" }
+                    }
+                }))),
+                "201",
+            ),
+        }),
+    );
+    paths.insert(
+        "/applications/by-slug/{slug}".into(),
+        json!({
+            "get": op("Read an application by slug", "applications", "getApplicationBySlug", Some("jobs:read"), slug_path("slug"), None, "200")
+        }),
+    );
+    paths.insert(
+        "/applications/{id}".into(),
+        json!({
+            "get": op("Read an application", "applications", "getApplication", Some("jobs:read"), app_id.clone(), None, "200"),
+            "patch": op(
+                "Rename an application", "applications", "updateApplication", Some("jobs:write"), app_id.clone(),
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }))),
+                "200",
+            ),
+            "delete": op("Delete an application", "applications", "deleteApplication", Some("jobs:write"), app_id.clone(), None, "200"),
+        }),
+    );
+    paths.insert(
+        "/environments".into(),
+        json!({
+            "get": op("List environments", "environments", "listEnvironments", Some("jobs:read"), vec![], None, "200"),
+            "post": op(
+                "Create an environment", "environments", "createEnvironment", Some("settings:write"), vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name", "kind"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        // A closed set: an unrecognised value is refused rather
+                        // than defaulted, because `production` is what the
+                        // change-guardrail reads.
+                        "kind": { "type": "string", "enum": ["development", "staging", "production", "other"] },
+                        "slug": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }))),
+                "201",
+            ),
+        }),
+    );
+    paths.insert(
+        "/environments/by-slug/{slug}".into(),
+        json!({
+            "get": op("Read an environment by slug", "environments", "getEnvironmentBySlug", Some("jobs:read"), slug_path("slug"), None, "200")
+        }),
+    );
+    paths.insert(
+        "/environments/{id}".into(),
+        json!({
+            "get": op("Read an environment", "environments", "getEnvironment", Some("jobs:read"), app_id.clone(), None, "200"),
+            "patch": op(
+                "Rename an environment", "environments", "updateEnvironment", Some("settings:write"), app_id.clone(),
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }))),
+                "200",
+            ),
+            "delete": op("Delete an environment", "environments", "deleteEnvironment", Some("settings:write"), app_id, None, "200"),
+        }),
     );
 
     // --- queues (spec 05 endpoints 39-44) ---
