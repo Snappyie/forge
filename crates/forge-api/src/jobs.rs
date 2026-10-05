@@ -37,6 +37,15 @@ pub struct CreateJobRequest {
     /// ungrouped.
     #[serde(default)]
     pub application: Option<String>,
+    /// The queue the job's executions run in.
+    ///
+    /// Settable here because a job with no queue is unrunnable: `claim_next`
+    /// filters on `default_queue_id`, so an unbound job is invisible to every
+    /// worker's dequeue and its executions sit `QUEUED` forever. Accepting it at
+    /// creation avoids a create-then-PATCH pair that leaves a window in which the
+    /// job exists but cannot be claimed.
+    #[serde(default)]
+    pub default_queue_id: Option<Uuid>,
 }
 
 /// `POST /jobs` (spec 05 endpoint 1).
@@ -93,6 +102,24 @@ pub async fn create(
                 None => None,
             };
 
+            // Verified as belonging to this tenant: a caller-supplied uuid must
+            // not file a job into another tenant's queue.
+            if let Some(queue_id) = body.default_queue_id {
+                let owned: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM queues WHERE id = $1 AND tenant_id = $2)",
+                )
+                .bind(queue_id)
+                .bind(auth.tenant_id.into_uuid())
+                .fetch_one(&state.pool)
+                .await?;
+                if !owned {
+                    return Err(ApiError::validation(
+                        "that queue does not exist in this tenant",
+                    )
+                    .with_detail("default_queue_id", "not found"));
+                }
+            }
+
             let repo = JobRepository::new(&state.pool);
             let row = repo
                 .create(
@@ -106,6 +133,14 @@ pub async fn create(
                     application_id,
                 )
                 .await?;
+
+            if let Some(queue_id) = body.default_queue_id {
+                sqlx::query("UPDATE jobs SET default_queue_id = $2 WHERE id = $1")
+                    .bind(row.id)
+                    .bind(queue_id)
+                    .execute(&state.pool)
+                    .await?;
+            }
             Ok((StatusCode::CREATED, JobView::from_row(&row), Some(row.id)))
         },
     )
@@ -568,6 +603,19 @@ pub async fn trigger(
         }
     };
 
+    /*
+     * The execution inherits the job's queue.
+     *
+     * `claim_next` filters on `executions.queue_id`, so an execution created
+     * without one is invisible to every worker's dequeue and its work sits
+     * QUEUED forever. Resolved once here, before the idempotency wrapper, so it
+     * is in scope for the closure below.
+     */
+    let job_queue_id = JobRepository::new(&state.pool)
+        .get(auth.tenant_id, JobId::from_uuid(job_id))
+        .await?
+        .default_queue_id;
+
     let request_body = serde_json::to_value(&body).unwrap_or(json!({}));
 
     let outcome = idempotency::run(
@@ -584,7 +632,13 @@ pub async fn trigger(
                     tenant_id: auth.tenant_id,
                     job_id: JobId::from_uuid(job_id),
                     job_version_id: version_id,
-                    queue_id: None,
+                    // Inherited from the job. This was hardcoded to `None`,
+                    // which discarded the job's queue binding entirely:
+                    // `claim_next` filters on `executions.queue_id`, so every
+                    // triggered execution sat QUEUED with no queue and no worker
+                    // could ever claim it. Read here because `job` above is
+                    // scoped to the version-resolution branch.
+                    queue_id: job_queue_id,
                     schedule_id: None,
                     trigger_source: forge_domain::TriggerSource::Manual,
                     priority: Priority::Normal,

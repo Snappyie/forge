@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-sdk"
+version = "0.2.0"
+description = "Forge worker SDK: register, claim work, and report results"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["scheduler", "jobs", "queue", "worker", "forge"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+]
+# No runtime dependencies, deliberately. The SDK previously imported `requests`
+# without declaring it, so `import forge_sdk` failed on any machine that had not
+# happened to have it installed. Standard library only means a minimal container
+# image can run a worker.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["forge_sdk*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
