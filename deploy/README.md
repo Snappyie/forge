@@ -53,6 +53,37 @@ helm upgrade --install forge deploy/helm/forge -n forge \
   --set database.existingSecret=forge-db
 ```
 
+## One binary, no Node
+
+The console is statically exported and compiled into `forge-server`, so the
+image contains one executable and no Node runtime, no `node_modules` and no
+static file tree. The chart deploys a single workload; there is no separate
+console Deployment to keep in step with the API.
+
+That works because the console needs no server: every page is a client component
+that fetches from the API on mount, and the API sits at `/api/v1` on the same
+origin, so requests are same-origin and no CORS configuration is involved.
+
+Two consequences worth knowing:
+
+- **Rebuilding the console changes the binary.** `NEXT_PUBLIC_*` values are
+  inlined at build time, so a console change is a new `forge-server` - not a new
+  file copied into a running pod. A pod restart alone will not pick it up.
+- **Deep links work.** `/jobs/<uuid>` boots the console and the client router
+  resolves the segment. The export cannot enumerate UUIDs, so it emits one shell
+  per dynamic route and the server falls back to it; the id is then read from the
+  URL in the browser. Pasting or bookmarking a detail URL is safe.
+
+## Building the image
+
+```bash
+docker build -t forge/server:0.3.0 .
+```
+
+The builder stage installs Node to produce the export; the runtime stage does not
+have it. The first `cargo build` on a clean checkout also builds the export
+automatically, so no separate step is needed locally.
+
 ## What the chart refuses to do
 
 These fail the render with an explanation rather than producing a deployment that
