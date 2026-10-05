@@ -320,8 +320,14 @@ impl<'a> CompletionGate<'a> {
             return Err(CompletionRejection::ExecutionTerminal);
         }
 
+        // Scoped by the execution's own tenant rather than a caller's: the gate
+        // is reached from a worker credential that has no tenant in scope, and the
+        // execution is what decides which tenant's lease is being claimed.
         let lease = leases
-            .active_for_execution(execution_id)
+            .active_for_execution(
+                forge_domain::TenantId::from_uuid(execution.tenant_id),
+                execution_id,
+            )
             .await
             .map_err(|_| CompletionRejection::StaleLease)?
             .ok_or(CompletionRejection::StaleLease)?;

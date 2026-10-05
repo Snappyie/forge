@@ -304,17 +304,23 @@ pub async fn get(
         .get(auth.tenant_id, worker_id)
         .await?;
 
-    // Include the worker's held leases so the detail page can show load.
-    let leases = LeaseRepository::new(&state.pool)
-        .active_for_execution(Uuid::nil())
+    // Include the leases this worker currently holds so the detail page can show
+    // load.
+    //
+    // This asked for the active lease on `Uuid::nil()` - an execution id that
+    // cannot exist - so the query always returned `None` and the page reported no
+    // load however busy the worker was. A worker can hold several leases at once,
+    // so this asks by worker rather than by execution.
+    let held = LeaseRepository::new(&state.pool)
+        .active_for_worker(auth.tenant_id, worker_id)
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_default();
 
     Ok(Json(ApiResponse::new(
         json!({
             "worker": worker_view(&row),
-            "active_lease": leases.map(|l| json!({
+            "active_leases": held.len(),
+            "active_lease": held.first().map(|l| json!({
                 "execution_id": l.execution_id,
                 "expires_at": l.expires_at,
             })),

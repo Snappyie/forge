@@ -368,7 +368,7 @@ pub async fn heartbeat(
 
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let lease = LeaseRepository::new(&state.pool)
-        .active_for_execution(execution_id)
+        .active_for_execution(auth.tenant_id, execution_id)
         .await?
         .ok_or_else(|| ApiError::conflict("this execution has no active lease"))?;
 
@@ -410,7 +410,7 @@ pub async fn complete(
     auth.require("executions:write")?;
 
     let lease = LeaseRepository::new(&state.pool)
-        .active_for_execution(execution_id)
+        .active_for_execution(auth.tenant_id, execution_id)
         .await?;
 
     // The reported holder is authoritative only when it comes from the caller's

@@ -642,6 +642,9 @@ impl<'a> WorkerRepository<'a> {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct LeaseRow {
     pub id: Uuid,
+    /// Carried so the platform-wide reaper can check each recovery against the
+    /// tenant that owns the execution, rather than trusting the id alone.
+    pub tenant_id: Uuid,
     pub execution_id: Uuid,
     pub worker_id: Uuid,
     pub attempt_id: Option<Uuid>,
@@ -677,7 +680,7 @@ impl<'a> LeaseRepository<'a> {
             "INSERT INTO worker_leases
                  (id, tenant_id, execution_id, worker_id, attempt_id, expires_at, renewed_at)
              VALUES ($1, $2, $3, $4, $5, NOW() + make_interval(secs => $6), NOW())
-             RETURNING id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
+             RETURNING id, tenant_id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
                        renewed_at, released_at",
         )
         .bind(Uuid::new_v4())
@@ -700,7 +703,7 @@ impl<'a> LeaseRepository<'a> {
             "UPDATE worker_leases
              SET expires_at = NOW() + make_interval(secs => $3), renewed_at = NOW()
              WHERE id = $1 AND worker_id = $2 AND released_at IS NULL AND expires_at > NOW()
-             RETURNING id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
+             RETURNING id, tenant_id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
                        renewed_at, released_at",
         )
         .bind(lease_id)
@@ -729,10 +732,17 @@ impl<'a> LeaseRepository<'a> {
 
     /// Active leases that have passed their expiry, for the reaper
     /// (spec 10.11).
+    ///
+    /// Deliberately not tenant-scoped: the reaper runs on a timer with no tenant
+    /// in scope and has to recover executions across the whole deployment, or a
+    /// single quiet tenant would strand its own work forever. The tenant travels
+    /// back on each row so `LeaseRow` and the recovery path can be checked
+    /// against it, and row-level security is enabled on `worker_leases` so any
+    /// *other* query that forgets a predicate fails closed.
     pub async fn claim_expired(&self, limit: i64) -> Result<Vec<LeaseRow>> {
         sqlx::query_as::<_, LeaseRow>(
-            "SELECT id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
-                    renewed_at, released_at
+            "SELECT id, tenant_id, execution_id, worker_id, attempt_id, acquired_at,
+                    expires_at, renewed_at, released_at
              FROM worker_leases
              WHERE released_at IS NULL AND expires_at <= NOW()
              ORDER BY expires_at ASC
@@ -745,14 +755,48 @@ impl<'a> LeaseRepository<'a> {
         .map_err(StorageError::from_sqlx)
     }
 
-    /// The active lease on an execution, if any.
-    pub async fn active_for_execution(&self, execution_id: Uuid) -> Result<Option<LeaseRow>> {
+    /// The active leases a worker currently holds.
+    ///
+    /// Used by the worker detail page to show load. Scoped by tenant: the
+    /// execution id is a uuid the caller supplies, so scoping only by it would
+    /// let a caller ask about another tenant's leases.
+    pub async fn active_for_worker(
+        &self,
+        tenant_id: forge_domain::TenantId,
+        worker_id: Uuid,
+    ) -> Result<Vec<LeaseRow>> {
         sqlx::query_as::<_, LeaseRow>(
-            "SELECT id, execution_id, worker_id, attempt_id, acquired_at, expires_at,
-                    renewed_at, released_at
+            "SELECT id, tenant_id, execution_id, worker_id, attempt_id, acquired_at,
+                    expires_at, renewed_at, released_at
              FROM worker_leases
-             WHERE execution_id = $1 AND released_at IS NULL",
+             WHERE tenant_id = $1 AND worker_id = $2
+               AND released_at IS NULL AND expires_at > NOW()
+             ORDER BY expires_at ASC",
         )
+        .bind(tenant_id.into_uuid())
+        .bind(worker_id)
+        .fetch_all(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)
+    }
+
+    /// The active lease on an execution, if any.
+    ///
+    /// Scoped by tenant. This is reached from a request handler that has a tenant
+    /// in scope, and the execution id is a uuid the caller supplies - so scoping
+    /// only by the id would let a caller ask about another tenant's lease.
+    pub async fn active_for_execution(
+        &self,
+        tenant_id: forge_domain::TenantId,
+        execution_id: Uuid,
+    ) -> Result<Option<LeaseRow>> {
+        sqlx::query_as::<_, LeaseRow>(
+            "SELECT id, tenant_id, execution_id, worker_id, attempt_id, acquired_at,
+                    expires_at, renewed_at, released_at
+             FROM worker_leases
+             WHERE tenant_id = $1 AND execution_id = $2 AND released_at IS NULL",
+        )
+        .bind(tenant_id.into_uuid())
         .bind(execution_id)
         .fetch_optional(self.pool)
         .await
