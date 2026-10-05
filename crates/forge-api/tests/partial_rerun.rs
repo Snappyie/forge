@@ -166,7 +166,6 @@ async fn send(
 struct Fixture {
     token: String,
     run_id: Uuid,
-    version_id: Uuid,
 }
 
 /// A settled run: `extract` succeeded, `transform` failed, `load` never ran.
@@ -297,7 +296,6 @@ async fn fixture(pool: &PgPool) -> Fixture {
             .issue(user_id, tenant_id, forge_auth::Role::Owner)
             .unwrap(),
         run_id,
-        version_id,
     }
 }
 
