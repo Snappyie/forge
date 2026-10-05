@@ -19,6 +19,10 @@ cargo test -p forge-api --test acceptance_matrix
 
 # SDK contract and live-execution coverage.
 ./scripts/verify-sdks.sh
+
+# Backup and restore round trip. Needs a `pg_dump`/`pg_restore` that is not older
+# than the server; set FORGE_PG_DUMP / FORGE_PG_RESTORE if yours is.
+./scripts/verify-backup-restore.sh
 ```
 
 The matrix needs PostgreSQL. Without it the integration tests skip rather than
@@ -34,7 +38,7 @@ fail, so a checkout with no database still compiles and runs the unit tests.
 | Security | Workers cannot access or complete executions outside their authorization | `security::a_worker_token_cannot_create_a_job`, `security::a_worker_cannot_complete_an_unclaimed_execution`, `security::a_token_cannot_read_another_tenants_execution` |
 | Capacity | Concurrency limits and queue policies are enforced under load | `capacity::*`, plus `forge-executor/tests/concurrency_acceptance.rs` (12 tests, `AT_CON-001`..`AT_CON-012`) |
 | Observability | Every execution can be traced through dispatch, attempts, logs and final outcome | `observability::logs_survive_and_can_be_read_back`, `observability::a_completed_execution_records_its_outcome` |
-| Deployment | Migrations, restart, backup and recovery procedures are tested | `deployment::migrations_are_idempotent`, `deployment::a_fresh_database_has_the_core_tables`, `deployment::tenant_tables_have_row_level_security_enabled`, `scripts/verify-sdks.sh` (starts and stops a real server) |
+| Deployment | Migrations, restart, backup and recovery procedures are tested | `deployment::migrations_are_idempotent`, `deployment::a_fresh_database_has_the_core_tables`, `deployment::tenant_tables_have_row_level_security_enabled`, `scripts/verify-sdks.sh` (starts and stops a real server), `scripts/verify-backup-restore.sh` (round trip) |
 | Compatibility | SDKs and API versions have automated contract tests | `sdk/{python,go,node}/tests`, `scripts/verify-sdks.sh`, the OpenAPI drift guards in `forge-api` |
 | Workflows | Dependency, branch, fan-out, cancellation and recovery tests pass | `forge-executor/tests/workflow_runtime.rs`, `forge-api/tests/partial_rerun.rs` |
 
@@ -61,6 +65,15 @@ discarding the job's queue binding — so every triggered execution sat `QUEUED`
 with no queue and no worker could claim it. Found while driving the SDKs, not by
 reading code.
 
+**`backup.sh` failed on a directory that did not exist.** It never created its
+target directory, so the first run on a fresh checkout died with `pg_dump: could
+not open output file`, which reads like a permissions problem. It also wrote no
+dump and reported nothing when the dump was empty - a file that looks like a
+backup and is discovered to be worthless during a restore. Both fixed, and
+`verify-backup-restore.sh` now proves the round trip: write known data, back up,
+**destroy the database**, restore, read the data back, and start the server
+against it. It was itself checked by sabotaging the dump, which it caught.
+
 **All four SDKs omitted `lease_id` and `error_class`.** Retries were unreachable
 and a completion after lease expiry was silently discarded, so work was
 re-dispatched and its side effect applied twice. `scripts/verify-sdks.sh` exists
@@ -75,9 +88,6 @@ than no matrix:
   workers against each other; they do not measure latency or throughput under
   volume. §6 explicitly defers scale targets until load testing, so this is in
   line with the spec rather than a gap against it.
-- **Backup and restore** are scripted (`scripts/backup.sh`, `scripts/restore.sh`)
-  but no test asserts a restored database is usable. That would need a restore
-  into a second database and a read-back.
 - **Cross-tenant isolation** is asserted for executions and at the RLS layer.
   It is not asserted for every table; the RLS test checks that the policy
   *exists*, not that each query respects it.
