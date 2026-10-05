@@ -203,8 +203,9 @@ function AppSidebar({ pathname }: { pathname: string }) {
     .find((n) => isActive(n.href));
   useEffect(() => {
     if (active) markVisited(active.href, active.label);
-    // Only on a route change; re-running each render would loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Only on a route change; re-running each render would loop. The
+    // exhaustive-deps rule is disabled project-wide, so no directive is needed
+    // here and adding one only produces an "unused directive" warning.
   }, [pathname]);
 
   return (

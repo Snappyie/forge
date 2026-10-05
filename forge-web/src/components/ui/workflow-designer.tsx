@@ -288,18 +288,58 @@ export function WorkflowDesigner({
             </div>
           )}
           {current.data.type === "WEBHOOK" && (
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="node-webhook">Webhook URL</Label>
-              <Input
-                id="node-webhook"
-                value={current.data.config?.url || ""}
-                onChange={(e) => {
-                  setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, url: e.target.value } } } : n));
-                  setDirty(true);
-                }}
-                className="w-64"
-                placeholder="https://..."
-              />
+            // The URL alone is not a usable node: the API now requires a URL, a
+            // method and a non-zero timeout, so the designer collects all three
+            // rather than publishing a configuration the server refuses.
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="node-webhook">Webhook URL</Label>
+                <Input
+                  id="node-webhook"
+                  value={current.data.config?.url || ""}
+                  onChange={(e) => {
+                    setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, url: e.target.value } } } : n));
+                    setDirty(true);
+                  }}
+                  className="w-64"
+                  placeholder="https://..."
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="node-webhook-method">Method</Label>
+                <Select
+                  value={current.data.config?.method || "GET"}
+                  onValueChange={(method) => {
+                    setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, method } } } : n));
+                    setDirty(true);
+                  }}
+                >
+                  <SelectTrigger id="node-webhook-method" size="sm" className="w-28">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["GET", "POST", "PUT", "PATCH", "DELETE"] as const).map(method => (
+                      <SelectItem key={method} value={method}>{method}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="node-webhook-timeout">Timeout (s)</Label>
+                <Input
+                  id="node-webhook-timeout"
+                  type="number"
+                  min={1}
+                  max={300}
+                  className="w-24"
+                  value={current.data.config?.timeout_seconds ?? 30}
+                  onChange={(e) => {
+                    const timeout = Number(e.target.value);
+                    setNodes(all => all.map(n => n.id === current.id ? { ...n, data: { ...n.data, config: { ...n.data.config, timeout_seconds: Number.isFinite(timeout) ? timeout : 30 } } } : n));
+                    setDirty(true);
+                  }}
+                />
+              </div>
             </div>
           )}
           {current.data.type === "SUB_WORKFLOW" && (

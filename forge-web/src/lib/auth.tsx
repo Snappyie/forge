@@ -44,6 +44,23 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => void;
   refresh: () => Promise<void>;
+  /**
+   * Adopts a token pair obtained another way — currently `POST
+   * /auth/token-login`, which exchanges an API key for a console session.
+   *
+   * Without this the sign-in-with-token form could obtain tokens and then
+   * discard them, leaving the console with no session and an immediate
+   * bounce back to /login.
+   */
+  adoptSession: (tokens: TokenLoginResponse) => Promise<void>;
+}
+
+/** The token pair every sign-in path returns. */
+export interface TokenLoginResponse {
+  access_token: string;
+  refresh_token: string;
+  tenant_id?: string;
+  role?: Role;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -226,6 +243,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, [session, signOut]);
 
+  const adoptSession = useCallback(
+    async (tokens: TokenLoginResponse) => {
+      applySession({
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        tenantId: tokens.tenant_id,
+        role: tokens.role,
+      });
+    },
+    [applySession],
+  );
+
   const signIn = useCallback(
     async (email: string, password: string) => {
       const data = await api.post<TokensResponse>("/auth/login", { email, password });
@@ -240,8 +269,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ session, loading, signIn, signOut, refresh }),
-    [session, loading, signIn, signOut, refresh],
+    () => ({ session, loading, signIn, signOut, refresh, adoptSession }),
+    [session, loading, signIn, signOut, refresh, adoptSession],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

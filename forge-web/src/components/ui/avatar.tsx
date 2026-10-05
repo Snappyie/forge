@@ -13,10 +13,15 @@ function Avatar({ className, ...props }: React.ComponentProps<"span">) {
   )
 }
 
-function AvatarImage({ className, ...props }: React.ComponentProps<"img">) {
+function AvatarImage({ className, alt = "", ...props }: React.ComponentProps<"img">) {
+  // The signed-in user's name is rendered beside the avatar, so the image is
+  // decorative. An explicit empty alt is what tells a screen reader to skip it
+  // rather than announce a filename.
   return (
+    // eslint-disable-next-line @next/next/no-img-element
     <img
       data-slot="avatar-image"
+      alt={alt}
       className={cn("aspect-square size-full object-cover", className)}
       {...props}
     />

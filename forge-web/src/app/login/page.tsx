@@ -14,14 +14,14 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, Key, Loader2, Shield } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { useAuth, type TokenLoginResponse } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { signIn } = useAuth();
+  const { signIn, adoptSession } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
@@ -70,7 +70,12 @@ export default function LoginPage() {
     setError(null);
     setBusy(true);
     try {
-      await api.post("/auth/token-login", { token: token.trim() });
+      // The response tokens must be adopted, not discarded: the console reads
+      // its session from storage, so ignoring them bounced straight back here.
+      const session = await api.post<TokenLoginResponse>("/auth/token-login", {
+        token: token.trim(),
+      });
+      await adoptSession(session);
       router.replace("/");
     } catch (cause) {
       setError(
