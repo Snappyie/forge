@@ -1,9 +1,21 @@
 **/target
 crates/forge-domain/target
-/node_modules
-.env.*
-.env
-**/.env
+
+# Dependencies. `node_modules` at any depth: the root-anchored form only
+# covered forge-web, so the SDK's own install was committable.
+node_modules/
+**/node_modules/
+
 # Python bytecode
 __pycache__/
 *.pyc
+
+.env.*
+.env
+**/.env
+
+# Test-only Node build output. `dist/` is deliberately *not* ignored: it is the
+# published artefact for the SDK, so a change to the sources must show the
+# recompiled JavaScript alongside it.
+sdk/node/dist-test/
+**/dist-test/
