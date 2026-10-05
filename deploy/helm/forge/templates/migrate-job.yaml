@@ -1,0 +1,85 @@
+{{- if .Values.migrations.enabled }}
+{{/*
+Migrations as a Job, and as a Helm pre-install hook so a release cannot roll out
+against a schema the new code does not expect.
+
+The previous `k8s/migrate-job.yaml` was built on the assumption that "starting
+the server is what applies migrations". That is true, and it is why the Job never
+completed: the container kept running as a server, so the Job sat forever without
+reaching `Complete`, and with `FORGE_SCHEDULER_ENABLED: true` it also ran a second
+scheduler alongside the Deployment - the exact thing the file existed to prevent.
+
+`--migrate-only` applies the schema and exits, which is what a Job needs. The
+hook ordering matters: `pre-install,pre-upgrade` so it finishes before the new
+replicas start.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "forge.fullname" . }}-migrate
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    # Roll the hook when the migration logic changes, so an upgrade does not skip
+    # a newly added migration because a Job with the old name already succeeded.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  # A migration that never finishes is a bad migration, not a slow one. Left
+  # unbounded it would hang the whole `helm upgrade`.
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "forge.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "forge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "forge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            {{- toYaml .Values.migrations.args | nindent 12 }}
+          env:
+            {{- include "forge.env" . | nindent 12 }}
+            - name: FORGE_AUTH_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forge.secretName" . }}
+                  key: auth-session-secret
+            - name: FORGE_API_KEY_HASHING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forge.secretName" . }}
+                  key: api-key-hashing-secret
+            - name: FORGE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | default (include "forge.secretName" .) }}
+                  key: {{ .Values.database.existingSecretKey }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+          {{- with .Values.extraVolumes }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+{{- end }}

@@ -19,6 +19,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A `.env` is a development convenience; its absence is not an error.
     let _ = dotenvy::dotenv();
 
+    // `--migrate-only` applies migrations and exits.
+    //
+    // The server migrates on startup, which is right for `run_local.sh` and for
+    // docker-compose, but wrong for Kubernetes: three replicas starting together
+    // race each other on the same DDL, and a `Job` built on that assumption never
+    // completes because the process keeps running instead of exiting. Deployments
+    // run this as a migration step and then start the replicas.
+    if std::env::args().any(|arg| arg == "--migrate-only") {
+        return migrate_only().await;
+    }
+
     // Spec 17.6: startup MUST fail on invalid critical configuration, so this
     // runs before logging is configured and reports to stderr.
     let config = match forge_config::Config::from_env() {
@@ -174,6 +185,35 @@ fn init_tracing(config: &forge_config::Config) {
 ///
 /// Accepts an IPv4 literal, an IPv6 literal, or a hostname. An unresolvable
 /// value falls back to binding every interface rather than refusing to start.
+/// Applies migrations and exits, so a Kubernetes `Job` can complete.
+async fn migrate_only() -> Result<(), Box<dyn std::error::Error>> {
+    // Configuration is validated exactly as in a normal start, so a bad secret is
+    // reported the same way rather than surfacing later as a confusing database
+    // error.
+    let config = match forge_config::Config::from_env() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!("configuration error: {e}");
+            std::process::exit(1);
+        }
+    };
+    init_tracing(&config);
+
+    info!("applying database migrations");
+    match Database::new(&config.server.database_url).await {
+        Ok(_) => {
+            info!("database migrations applied");
+            Ok(())
+        }
+        Err(e) => {
+            // A non-zero exit is what makes the Job's retry policy kick in, so
+            // this must fail the process rather than only logging.
+            error!(error = %e, "could not apply migrations");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn parse_host(host: &str) -> std::net::IpAddr {
     host.parse()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))

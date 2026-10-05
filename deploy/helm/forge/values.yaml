@@ -1,0 +1,179 @@
+# Default values for the Forge chart.
+#
+# The image tag is deliberately empty: an empty tag means "do not set one", and
+# the template then refuses to render rather than quietly deploying `:latest`.
+# The previous raw manifests hardcoded `forge/server:latest`, which is not a
+# pullable reference - CI built `forge/server:ci` with `push: false` and never
+# published anything, so `kubectl apply` could only ever fail with ErrImagePull.
+
+# -- Fully qualified image reference. Must be set to a pushed image.
+image:
+  repository: ""
+  # -- Empty means "fail rather than guess". Set alongside `repository`.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # -- Optional digest, which wins over `tag` when both are given.
+  digest: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 3
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Secrets live in their own object so a values change cannot silently rewrite
+# them. Supply them with an existing secret rather than inline values.
+existingSecret: ""
+
+secrets:
+  # -- REQUIRED. Signing key for session tokens.
+  authSessionSecret: ""
+  # -- REQUIRED. Pepper for API key hashing.
+  apiKeyHashingSecret: ""
+
+# Applied by a Job (or an init container) before the replicas start. Migrations
+# run at startup too, so this is belt-and-braces for the multi-replica case where
+# three pods would otherwise race each other on the same DDL.
+migrations:
+  enabled: true
+  # -- Overrides the image's default command when set.
+  args: ["--migrate-only"]
+  backoffLimit: 3
+  # -- Seconds a pod may take to become ready before it is restarted.
+  activeDeadlineSeconds: 600
+
+service:
+  type: ClusterIP
+  port: 3000
+
+api:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Slightly generous: a pod that fails its probe is killed mid-execution, and
+  # the lease reaper has to recover the work.
+  terminationGracePeriodSeconds: 45
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 70
+  # Spread across nodes so losing one does not take out the scheduler.
+  topologySpreadConstraints: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+
+# The console is a separate Next.js image from the Rust API, because they build
+# and scale differently. Disabled by default so the chart can be installed for
+# API-only use.
+console:
+  enabled: false
+  replicaCount: 2
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+    digest: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    port: 3000
+
+# The scheduler runs inside the API binary, but only one replica should lead at a
+# time. Leader election is a Postgres advisory lock acquired per tick, so extra
+# replicas are safe - they simply do not lead. Set this to false on the replicas
+# that should not, if you want to be explicit.
+scheduler:
+  enabled: true
+  pollInterval: 5s
+  batchSize: 100
+  maxCatchUp: 10
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: forge.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Egress rules. HTTP_REQUEST jobs call arbitrary hosts, so a policy that only
+# allows Postgres and DNS breaks them. `extraEgress` is how you re-open that.
+networkPolicy:
+  enabled: false
+  # -- Allow the API to reach Postgres and DNS only. Jobs that call external
+  # hosts will fail under this; see `extraEgress`.
+  restrictEgress: true
+  extraEgress: []
+
+# -- Where the database lives. Set `external` to true when the database is not
+# part of this release.
+database:
+  external: true
+  url: ""
+  existingSecret: ""
+  existingSecretKey: database-url
+  # Only used when `external` is false.
+  postgres:
+    image:
+      repository: postgres
+      tag: "16-alpine"
+    auth:
+      username: forge
+      database: forge
+      existingSecret: ""
+      password: ""
+
+config:
+  logLevel: info
+  logFormat: json
+  defaultTimezone: UTC
+  rateLimitPerSecond: 100
+  rateLimitBurst: 200
+  retention:
+    executionsDays: 30
+    auditDays: 365
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Extra volumes for a read-only root filesystem, which otherwise cannot write
+# anywhere.
+extraVolumes: []
+extraVolumeMounts: []

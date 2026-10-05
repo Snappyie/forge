@@ -1,0 +1,16 @@
+apiVersion: v2
+name: forge
+description: Forge job scheduler - API, console, scheduler and migrations
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - scheduler
+  - jobs
+  - queue
+  - orchestration
+home: https://forge.example.com
+sources:
+  - https://forge.example.com/forge-specification
+maintainers:
+  - name: Forge Platform

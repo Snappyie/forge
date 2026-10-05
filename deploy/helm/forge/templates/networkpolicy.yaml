@@ -1,0 +1,56 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Network policy.
+
+`restrictEgress` allows the database and DNS only. Note what that costs: the
+`HTTP_REQUEST` executor calls arbitrary hosts, so a job that fetches an external
+URL will fail under this policy. The previous raw manifests shipped exactly that
+restriction with a comment acknowledging the problem, which is the worst of both -
+installed by default and quietly breaking a documented job type.
+
+Set `networkPolicy.restrictEgress: false` for an environment where jobs call
+external services, or add the specific hosts through `extraEgress`.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "forge.fullname" . }}
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "forge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Ingress controllers and, when enabled, the console.
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+  egress:
+    # DNS, or name resolution fails and every egress rule below is moot.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.networkPolicy.restrictEgress }}
+    # The database, identified by port. A real deployment can narrow this to a
+    # podSelector for the database pods.
+    - ports:
+        - protocol: TCP
+          port: 5432
+    {{- else }}
+    # Unrestricted egress: HTTP_REQUEST jobs need it. Prefer
+    # `restrictEgress: true` with explicit `extraEgress` entries where possible.
+    - {}
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
