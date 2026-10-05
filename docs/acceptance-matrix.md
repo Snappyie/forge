@@ -23,6 +23,9 @@ cargo test -p forge-api --test acceptance_matrix
 # Backup and restore round trip. Needs a `pg_dump`/`pg_restore` that is not older
 # than the server; set FORGE_PG_DUMP / FORGE_PG_RESTORE if yours is.
 ./scripts/verify-backup-restore.sh
+
+# Load measurement. Slow, so ignored by default.
+cargo test -p forge-storage --test load -- --ignored --nocapture
 ```
 
 The matrix needs PostgreSQL. Without it the integration tests skip rather than
@@ -36,7 +39,7 @@ fail, so a checkout with no database still compiles and runs the unit tests.
 | Recovery | Expired worker leases are reconciled and eligible jobs recover safely | `recovery::an_expired_lease_leaves_the_execution_claimable_again`, `recovery::a_live_lease_is_not_recovered` |
 | Retries | Attempt history and backoff persist across restarts | `retries::a_transient_failure_schedules_a_retry`, `retries::a_permanent_failure_is_not_retried`, `retries::attempt_history_survives_a_new_connection` |
 | Security | Workers cannot access or complete executions outside their authorization | `security::a_worker_token_cannot_create_a_job`, `security::a_worker_cannot_complete_an_unclaimed_execution`, `security::a_token_cannot_read_another_tenants_execution` |
-| Capacity | Concurrency limits and queue policies are enforced under load | `capacity::*`, plus `forge-executor/tests/concurrency_acceptance.rs` (12 tests, `AT_CON-001`..`AT_CON-012`) |
+| Capacity | Concurrency limits and queue policies are enforced under load | `capacity::*` in this matrix, plus `forge-storage/tests/concurrency_acceptance.rs` (9 tests, `AT_CON-001`..`AT_CON-005`, covering job-, tenant- and queue-level limits, slot release on every terminal state, and recovery of an abandoned slot) |
 | Observability | Every execution can be traced through dispatch, attempts, logs and final outcome | `observability::logs_survive_and_can_be_read_back`, `observability::a_completed_execution_records_its_outcome` |
 | Deployment | Migrations, restart, backup and recovery procedures are tested | `deployment::migrations_are_idempotent`, `deployment::a_fresh_database_has_the_core_tables`, `deployment::tenant_tables_have_row_level_security_enabled`, `scripts/verify-sdks.sh` (starts and stops a real server), `scripts/verify-backup-restore.sh` (round trip) |
 | Compatibility | SDKs and API versions have automated contract tests | `sdk/{python,go,node}/tests`, `scripts/verify-sdks.sh`, the OpenAPI drift guards in `forge-api` |
@@ -84,10 +87,13 @@ because "the SDK compiles" never caught it.
 Stated plainly, because a matrix that reads as complete when it is not is worse
 than no matrix:
 
-- **Load** is concurrency-correctness, not throughput. The `AT_CON-*` tests race
-  workers against each other; they do not measure latency or throughput under
-  volume. §6 explicitly defers scale targets until load testing, so this is in
-  line with the spec rather than a gap against it.
+- **Throughput has a measurement but no target.** `crates/forge-storage/tests/load.rs`
+  measures the claim path under contention and prints throughput and p99
+  latency, but deliberately asserts no minimum: §6 says to choose targets after
+  estimating the expected workload, and inventing one here would be a number
+  with no deployment behind it. On the development machine it reports ~450
+  claims/s at p99 53 ms with 32 concurrent claimers against a 10-connection pool;
+  a real target needs a real workload estimate.
 - **Cross-tenant isolation** is asserted for executions and at the RLS layer.
   It is not asserted for every table; the RLS test checks that the policy
   *exists*, not that each query respects it.
