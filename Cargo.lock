@@ -829,8 +829,10 @@ name = "forge-executor"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "forge-auth",
  "forge-domain",
  "forge-storage",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
@@ -892,6 +894,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

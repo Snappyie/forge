@@ -367,6 +367,33 @@ impl<'a> WorkflowRunRepository<'a> {
         Ok(())
     }
 
+    /// Resets a node so it runs again, clearing its recorded outcome.
+    ///
+    /// Separate from [`Self::save_node_state`] because that method coalesces
+    /// `output`, which is right for a progress update and wrong here: a node
+    /// being reset for a rerun must lose the output of the attempt that produced
+    /// it, or a downstream condition branches on a stale result.
+    pub async fn reset_node(&self, run_id: Uuid, node_key: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflow_node_states SET
+                 state = 'PENDING',
+                 suspension_reason = NULL,
+                 resume_at = NULL,
+                 child_execution_id = NULL,
+                 required_role = NULL,
+                 output = NULL,
+                 failure_reason = NULL,
+                 updated_at = NOW()
+             WHERE workflow_execution_id = $1 AND node_key = $2",
+        )
+        .bind(run_id)
+        .bind(node_key)
+        .execute(self.pool)
+        .await
+        .map_err(StorageError::from_sqlx)?;
+        Ok(())
+    }
+
     /// Persists the engine's accumulated context so the next pass resumes from
     /// it. Node outputs and condition results live here.
     pub async fn save_context(&self, run_id: Uuid, context: &Value) -> Result<()> {

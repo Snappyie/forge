@@ -789,6 +789,55 @@ fn paths() -> Value {
         }),
     );
 
+    // --- partial rerun (`redesign.md` section 3) ---
+    //
+    // Resuming a settled run from its failed nodes is the differentiator: a full
+    // rerun re-executes work that already succeeded, which for a pipeline that
+    // charges a card or sends an email means doing it twice.
+    let run_id = vec![id_param("id")];
+    paths.insert(
+        "/workflows/executions/{id}/rerun".into(),
+        json!({
+            "post": op(
+                "Resume a failed workflow run", "workflows", "rerunWorkflowRun",
+                Some("workflows:write"), run_id.clone(),
+                Some(json_body(json!({
+                    "type": "object",
+                    "properties": {
+                        "nodes": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Nodes to reset; omitted means every node that did not succeed"
+                        },
+                        "include_completed": {
+                            "type": "boolean",
+                            "description": "Also redo nodes that succeeded. Off by default because it is the destructive direction."
+                        }
+                    }
+                }))),
+                "200",
+            )
+        }),
+    );
+    paths.insert(
+        "/workflows/executions/{id}/rerun-preview".into(),
+        json!({
+            "get": op(
+                "Show which nodes a rerun would reset", "workflows", "previewWorkflowRerun",
+                Some("workflows:read"), run_id.clone(), None, "200",
+            )
+        }),
+    );
+    paths.insert(
+        "/workflows/executions/{id}/context".into(),
+        json!({
+            "get": op(
+                "Read a workflow run's context", "workflows", "getWorkflowRunContext",
+                Some("workflows:read"), run_id, None, "200",
+            )
+        }),
+    );
+
     // --- queues (spec 05 endpoints 39-44) ---
     paths.insert(
         "/queues".into(),

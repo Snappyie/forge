@@ -442,6 +442,20 @@ pub fn create_router(
             post(crate::workflows::publish_specific_version),
         )
         .route(
+            // Partial rerun: resume a settled run from the nodes that did not
+            // succeed, preserving completed work and its outputs.
+            &format!("{PREFIX}/workflows/executions/:id/rerun"),
+            post(crate::rerun::rerun_execution),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:id/rerun-preview"),
+            get(crate::rerun::rerun_preview),
+        )
+        .route(
+            &format!("{PREFIX}/workflows/executions/:id/context"),
+            get(crate::rerun::run_context),
+        )
+        .route(
             &format!("{PREFIX}/workflows/:id/trigger"),
             post(crate::workflows::trigger),
         )

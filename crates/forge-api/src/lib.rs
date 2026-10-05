@@ -14,6 +14,7 @@ pub mod openapi;
 pub mod ops;
 pub mod parity;
 pub mod router;
+pub mod rerun;
 pub mod schedules;
 pub mod search;
 pub mod system;
