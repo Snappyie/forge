@@ -124,6 +124,7 @@ pub fn document(base_url: &str) -> Value {
             { "name": "environments" },
             { "name": "jobs" },
             { "name": "schedules" },
+            { "name": "migration" },
             { "name": "queues" },
             { "name": "workers" },
             { "name": "executions" },
@@ -741,6 +742,50 @@ fn paths() -> Value {
                 "200",
             ),
             "delete": op("Delete an environment", "environments", "deleteEnvironment", Some("settings:write"), app_id, None, "200"),
+        }),
+    );
+
+    // --- migration planning (`redesign.md` section 3) ---
+    //
+    // Plan and apply are separate because the spec asks for change previews and
+    // says nothing applies silently. The plan is echoed back on apply so the
+    // applied set is the reviewed set.
+    let migration_fields = vec![
+        json!({
+            "name": "from_environment", "in": "query", "required": true,
+            "schema": { "type": "string" }
+        }),
+        json!({
+            "name": "to_environment", "in": "query", "required": true,
+            "schema": { "type": "string" }
+        }),
+        json!({
+            "name": "application", "in": "query", "required": false,
+            "schema": { "type": "string" }
+        }),
+    ];
+    paths.insert(
+        "/migration/plan".into(),
+        json!({
+            "post": op(
+                "Plan a cross-environment migration", "migration", "planMigration",
+                Some("jobs:write"), migration_fields, None, "200",
+            )
+        }),
+    );
+    paths.insert(
+        "/migration/apply".into(),
+        json!({
+            "post": op(
+                "Apply a reviewed migration plan", "migration", "applyMigration",
+                Some("jobs:write"), vec![],
+                Some(json_body(json!({
+                    "type": "object",
+                    "required": ["plan"],
+                    "properties": { "plan": { "type": "object" } }
+                }))),
+                "200",
+            )
         }),
     );
 

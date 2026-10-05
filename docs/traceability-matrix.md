@@ -70,3 +70,6 @@ A detailed comparative assessment against Apache Airflow and PowerJob is maintai
 
 Complete system architecture and sequence diagrams for all core flows are detailed in
 [Architecture & Complete Execution Flows](file:///Users/neel/Downloads/forge-specification/docs/architecture-and-flows.md).
+
+Comprehensive feature parity audit against the product vision and roadmap is maintained in
+[Redesign Feature Parity Audit](file:///Users/neel/Downloads/forge-specification/docs/redesign-feature-parity.md).

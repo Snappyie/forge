@@ -132,6 +132,10 @@ impl<'a> JobRevisionRepository<'a> {
     /// Two queries rather than one join: a job may have no schedule (it runs
     /// only when triggered) and an inner join would silently drop it from the
     /// plan, so the operator would not be told a job exists and is not moving.
+    ///
+    /// The cron column is `cron_expression`, not `expression`. That was a real
+    /// failure rather than a theoretical one: every migration plan returned a
+    /// database error until it was corrected against the live schema.
     pub async fn migration_candidates(
         &self,
         tenant_id: TenantId,
@@ -147,9 +151,9 @@ impl<'a> JobRevisionRepository<'a> {
                    j.priority,
                    j.application_id,
                    a.slug AS application_slug,
-                   s.expression,
+                   s.cron_expression AS expression,
                    s.timezone,
-                   s.misfire_policy::text AS misfire_policy,
+                   s.misfire_policy,
                    s.enabled
               FROM jobs j
               LEFT JOIN applications a ON a.id = j.application_id

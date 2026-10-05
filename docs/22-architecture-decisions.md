@@ -565,6 +565,32 @@ Migration 023 closes the gap migration 021 opened — `service_accounts` was
 created after migration 020 had already built its policy list, so it shipped
 tenant-scoped and unprotected, and the isolation guard test did not name it.
 
+## ADR-0030 A job key is unique per environment, not per tenant
+
+Status: Accepted.
+
+Amends: 02-domain-model.md §2.2 (`key` uniqueness); 08-storage-specification.md §8.
+
+Decision:
+`jobs.key` is unique across `(tenant_id, environment_id, key)`. Rows with a null
+`environment_id` keep one-per-tenant uniqueness through a second partial index.
+
+Reason:
+`key` was unique across `(tenant_id, key)`, which makes cross-environment
+migration impossible in a way that is not obvious until it is attempted. The dev
+copy and the prod copy of one job share a key *by definition* — the key is what
+a migration matches on — so creating the second one failed with a unique
+violation. The feature could not work at all inside a single tenant.
+
+Scoping to the environment keeps the property that makes the key useful: a deep
+link carrying `?environment=prod&key=nightly` still resolves to exactly one job.
+
+The null case is handled rather than ignored. A job created before environments
+existed has no environment, and forcing every legacy row into one sentinel
+environment would collide them all; the second partial index gives those rows the
+old semantics so an operator who has not yet assigned an environment still cannot
+create two jobs with one key.
+
 ## Future ADR candidates
 
 - Queue implementation.

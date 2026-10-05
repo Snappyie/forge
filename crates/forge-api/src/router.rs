@@ -162,6 +162,17 @@ pub fn create_router(
             &format!("{PREFIX}/environments/by-slug/:slug"),
             get(crate::applications::get_environment_by_slug),
         )
+        // Migration planning. `redesign.md` section 3 names change previews as a
+        // differentiator, and nothing applies silently - so plan and apply are
+        // separate endpoints and the plan is echoed back on apply.
+        .route(
+            &format!("{PREFIX}/migration/plan"),
+            post(crate::migration::plan_migration),
+        )
+        .route(
+            &format!("{PREFIX}/migration/apply"),
+            post(crate::migration::apply_migration),
+        )
         .route(
             &format!("{PREFIX}/environments/:id"),
             get(crate::applications::get_environment)
