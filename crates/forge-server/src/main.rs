@@ -4,7 +4,7 @@
 //! outbox publisher, retention, heartbeat monitor), then shuts both down
 //! cleanly on SIGINT or SIGTERM.
 
-mod runtime;
+use forge_server::{console, runtime};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -84,6 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // The API, with the console's fallback mounted underneath it.
+    //
+    // Order matters: the API's own routes are matched first, so `/api/v1/**` can
+    // never be shadowed by the console, and the console's fallback answers only
+    // what the API did not claim. That is what lets one binary serve both from
+    // one origin, with no CORS and no second port.
     let app = forge_api::create_router(
         pool.clone(),
         &config.server.auth_session_secret,
@@ -92,7 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.limits.max_request_body_bytes,
         config.limits.max_log_bytes,
         config.server.api_key_hashing_secret.as_bytes(),
-    );
+    )
+    .fallback(console::serve);
 
     let addr = SocketAddr::from((parse_host(&config.server.host), config.server.port));
     let listener = tokio::net::TcpListener::bind(&addr).await?;

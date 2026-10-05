@@ -5,6 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+# A library so the serving layer can be tested and reused; `main.rs` is a thin
+# binary that wires configuration, the pool and the background runtime together.
+[lib]
+name = "forge_server"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
 chrono.workspace = true
@@ -22,3 +28,13 @@ forge-storage = { path = "../forge-storage" }
 forge-executor = { path = "../forge-executor" }
 forge-api = { path = "../forge-api" }
 forge-events = { path = "../forge-events" }
+# The statically exported console, embedded at compile time.
+rust-embed.workspace = true
+mime_guess.workspace = true
+percent-encoding.workspace = true
+
+[dev-dependencies]
+axum = "0.7"
+tokio = { workspace = true, features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+serde_json.workspace = true

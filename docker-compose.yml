@@ -41,19 +41,10 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
-  # The web console. Talks to the API through the compose network; the browser
-  # reaches the API through the host-published port above.
-  web:
-    build:
-      context: ./forge-web
-      dockerfile: Dockerfile
-    depends_on:
-      - server
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3000/api/v1
-    ports:
-      - "3001:3000"
-    restart: unless-stopped
+  # No separate console service: the exported console is compiled into the server
+  # binary, so `server` serves both the API and the UI on port 3000. A second
+  # service would mean two images to build, two to keep in step, and a second
+  # origin for the browser to reach.
 
   ecommerce-worker:
     build:

@@ -20,3 +20,9 @@ thiserror = "1.0"
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono", "uuid", "macros", "json", "migrate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Compiles the exported console into the server binary, so a deployment is one
+# executable with no Node runtime and no static file tree beside it.
+rust-embed = { version = "8", features = ["axum", "interpolate-folder-path"] }
+mime_guess = "2"
+# Decodes percent-escapes in request paths; Next route chunks contain  and .
+percent-encoding = "2"

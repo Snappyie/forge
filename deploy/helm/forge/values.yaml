@@ -80,26 +80,9 @@ api:
   podLabels: {}
   extraEnv: []
 
-# The console is a separate Next.js image from the Rust API, because they build
-# and scale differently. Disabled by default so the chart can be installed for
-# API-only use.
-console:
-  enabled: false
-  replicaCount: 2
-  image:
-    repository: ""
-    tag: ""
-    pullPolicy: IfNotPresent
-    digest: ""
-  resources:
-    requests:
-      cpu: 100m
-      memory: 192Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-  service:
-    port: 3000
+# The console is compiled into the server binary, so there is no separate
+# workload, image or deployment to configure. It is served from the same origin
+# as the API, which is what lets one binary be the whole deployment.
 
 # The scheduler runs inside the API binary, but only one replica should lead at a
 # time. Leader election is a Postgres advisory lock acquired per tick, so extra

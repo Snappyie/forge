@@ -7,8 +7,23 @@
  * branch on.
  */
 
+/**
+ * Where the API lives, relative to this page.
+ *
+ * Empty by default, so every request is same-origin (`/api/v1/jobs`). The Rust
+ * binary serves the console and the API from one origin, which is what lets a
+ * deployment be a single executable with no Node runtime and no CORS
+ * configuration. An absolute URL is still honoured for `next dev`, where the API
+ * runs on a different port.
+ *
+ * The fallback uses `||` rather than `??` deliberately: `NEXT_PUBLIC_API_URL` is
+ * inlined at build time, and an explicitly empty value is the intended way to say
+ * "same-origin". With `??` an empty string would not fall through and every
+ * request would go to `""`, producing requests against the page's own URL without
+ * the `/api/v1` prefix.
+ */
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000/api/v1";
+  process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 
 /** The spec 02.14 error taxonomy, as codes the server returns. */
 export type ApiErrorCode =

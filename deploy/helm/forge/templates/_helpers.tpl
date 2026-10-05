@@ -80,17 +80,6 @@ rather than a missing value.
 {{- end -}}
 {{- end -}}
 
-{{- define "forge.consoleImage" -}}
-{{- $img := .Values.console.image -}}
-{{- if $img.digest -}}
-{{- printf "%s@%s" $img.repository $img.digest -}}
-{{- else if $img.tag -}}
-{{- printf "%s:%s" $img.repository $img.tag -}}
-{{- else -}}
-{{- fail "console.image.tag or console.image.digest is required when console.enabled is true." -}}
-{{- end -}}
-{{- end -}}
-
 {{/*
 Environment shared by every Forge process.
 

@@ -1,17 +1,24 @@
-# Multi-stage build producing a small runtime image.
+# Multi-stage build producing one self-contained image.
 #
-# The build stage compiles the whole workspace; the runtime stage carries only
-# the binaries and the shared libraries they need. Migrations are embedded in
-# the binary (via sqlx::migrate!), so no .sql files are needed at runtime.
+# The output is a single executable with the API and the compiled console inside
+# it: no Node runtime, no `node_modules`, and no static file tree. The runtime
+# stage carries only that binary and the shared libraries it needs.
+#
+# Migrations are embedded via `sqlx::migrate!` and the console via `rust-embed`,
+# so neither needs to be present at runtime.
 
 FROM rust:1.94-slim AS builder
 
 # `openssl-sys` (via sqlx's TLS backend) compiles vendored OpenSSL when no system
 # copy is present; the build-essential and pkg-config packages let it link
 # against the system library instead, which is both faster and reproducible.
+#
+# Node is needed here, and only here: the console is exported to static files and
+# compiled into the binary, so the runtime stage needs neither Node nor the
+# exported tree.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev ca-certificates && \
+        pkg-config libssl-dev ca-certificates nodejs npm && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -19,9 +26,21 @@ WORKDIR /build
 # Dependency manifests first, so a source-only change reuses the cached layer.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# `.env*` is excluded by .dockerignore, so nothing local leaks in. The empty
+# value is set explicitly anyway: `NEXT_PUBLIC_*` is inlined at build time, and
+# relying on the source default alone means one stray environment variable - or a
+# future edit to that default - silently produces a console pointing at some
+# other host.
 COPY forge-web ./forge-web
 
-# Build the server, worker-capable CLI, and the tooling the scripts call.
+# The build script runs `npm ci` and `npm run build` when `forge-web/out` is
+# absent, then the Rust build embeds the result.
+#
+# `NEXT_PUBLIC_API_URL` is set empty, which the console reads as "same-origin":
+# every request goes to `/api/v1/...` on the host serving the page, so the single
+# binary needs no CORS configuration and no second origin.
+ENV NEXT_PUBLIC_API_URL=
+
 RUN cargo build --release --bin forge-server --bin forge && \
     strip target/release/forge-server target/release/forge
 
