@@ -18,6 +18,9 @@ import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   Bell,
+  Boxes,
+  GitCompareArrows,
+  Globe,
   CalendarClock,
   CalendarDays,
   CircleDot,
@@ -48,6 +51,7 @@ export interface NavGroup {
 
 /** The live counts behind the sidebar badges. */
 export interface NavCounts {
+  applications?: number;
   running?: number;
   alerts?: number;
   incidents?: number;
@@ -90,6 +94,12 @@ export function buildNav(counts: NavCounts): NavGroup[] {
     {
       label: "Define",
       items: [
+        {
+          href: "/applications",
+          label: "Applications",
+          icon: Boxes,
+          count: counts.applications,
+        },
         { href: "/jobs", label: "Jobs", icon: ClipboardList, count: counts.jobs },
         { href: "/schedules", label: "Schedules", icon: CalendarClock },
         {
@@ -104,6 +114,7 @@ export function buildNav(counts: NavCounts): NavGroup[] {
     {
       label: "Capacity",
       items: [
+        { href: "/environments", label: "Environments", icon: Globe },
         { href: "/queues", label: "Queues", icon: Layers, count: counts.queues },
         { href: "/workers", label: "Workers", icon: Users, count: counts.workers },
       ],
@@ -111,6 +122,7 @@ export function buildNav(counts: NavCounts): NavGroup[] {
     {
       label: "Govern",
       items: [
+        { href: "/migration", label: "Migrate jobs", icon: GitCompareArrows },
         { href: "/audit", label: "Audit log", icon: ScrollText },
         { href: "/integrations", label: "Integrations", icon: Plug },
         { href: "/admin", label: "Administration", icon: Settings },

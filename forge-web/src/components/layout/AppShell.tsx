@@ -161,6 +161,7 @@ function useNavCounts(): NavCounts {
     workers?: { ready?: number; busy?: number; offline?: number };
     jobs_total?: number;
     workflows_total?: number;
+    applications_total?: number;
   }>("/dashboard");
 
   if (dashboard.state !== "ready" || !dashboard.data) return {};
@@ -175,6 +176,10 @@ function useNavCounts(): NavCounts {
     w ? (w.ready ?? 0) + (w.busy ?? 0) + (w.offline ?? 0) : undefined;
 
   return {
+    // Counted from the aggregate the shell already fetches, so the sidebar
+    // badge cannot disagree with the Applications screen. An absent field leaves
+    // the count undefined and the badge is omitted rather than shown as zero.
+    applications: dashboard.data.applications_total,
     running,
     // Only badge Alerts when something needs a human, otherwise every tenant
     // that is simply healthy shows a permanent red "0".

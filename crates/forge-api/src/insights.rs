@@ -500,8 +500,35 @@ pub async fn dashboard(
     .await
     .map_err(ApiError::from)?;
 
+    /*
+     * Counts for the navigation badges.
+     *
+     * The console has always read `jobs_total`, `workflows_total` and a queue
+     * count from this aggregate, and none of them were ever sent - so those
+     * badges silently rendered as nothing rather than as zero, and nobody
+     * noticed because "absent" and "no jobs" look the same on a sidebar.
+     *
+     * One query, four counts, so the sidebar costs nothing extra: it already
+     * fetches this aggregate on nearly every page.
+     */
+    let totals: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM jobs       WHERE tenant_id = $1),
+             (SELECT count(*) FROM workflows  WHERE tenant_id = $1),
+             (SELECT count(*) FROM queues     WHERE tenant_id = $1),
+             (SELECT count(*) FROM applications WHERE tenant_id = $1)",
+    )
+    .bind(auth.tenant_id.into_uuid())
+    .fetch_one(&state.pool)
+    .await
+    .map_err(ApiError::from)?;
+
     Ok(Json(ApiResponse::new(
         json!({
+            "jobs_total": totals.0,
+            "workflows_total": totals.1,
+            "queues_total": totals.2,
+            "applications_total": totals.3,
             "executions": {
                 "queued": executions.0,
                 "running": executions.1,

@@ -445,3 +445,96 @@ export interface IdentityProvider {
   created_at: string;
 }
 
+
+/**
+ * An application: the PowerJob-style grouping jobs belong to.
+ *
+ * `job_count` comes from the server rather than being counted in the browser,
+ * so the number on the list is the number the database agrees with.
+ */
+export interface Application {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  labels: Record<string, unknown>;
+  job_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The closed set of environment kinds the API accepts. */
+export type EnvironmentKind = "development" | "staging" | "production" | "other";
+
+export interface Environment {
+  id: string;
+  slug: string;
+  name: string;
+  kind: EnvironmentKind;
+  description: string | null;
+  /**
+   * Whether changes here need production-grade confirmation.
+   *
+   * Computed server-side from `kind`, so the guardrail does not depend on every
+   * client implementing the rule correctly.
+   */
+  protected: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** What a migration will do with one job. */
+export type MigrationAction = "create" | "update" | "unchanged";
+
+/** Which side of a job a binding names. */
+export type BindingKind = "queue" | "worker_pool" | "secret";
+
+/** Why a binding needs a human decision. */
+export type UnresolvedReason = "missing_in_target" | "configuration_differs" | "foreign_tenant";
+
+export interface UnresolvedBinding {
+  kind: BindingKind;
+  source_name: string;
+  reason: UnresolvedReason;
+}
+
+export interface MigrationEntry {
+  source_key: string;
+  name: string;
+  action: MigrationAction;
+  unresolved: UnresolvedBinding[];
+}
+
+/**
+ * The plan an operator reviews before anything is applied.
+ *
+ * `include` lists the fields that cross. Bindings are absent by default: they
+ * name destination objects that have to be resolved, and a migration that
+ * copied them verbatim would point production at a dev queue.
+ */
+export interface MigrationPlan {
+  source_tenant: string;
+  source_environment: string;
+  target_tenant: string;
+  target_environment: string;
+  application: string | null;
+  entries: MigrationEntry[];
+  include: { kind: string }[];
+}
+
+export interface MigrationPlanResponse {
+  plan: MigrationPlan;
+  summary: {
+    create: number;
+    update: number;
+    unchanged: number;
+  };
+  note: string;
+}
+
+/** What a rerun would reset, per node. */
+export interface RerunPreviewNode {
+  node_key: string;
+  state: string;
+  would_rerun: boolean;
+}

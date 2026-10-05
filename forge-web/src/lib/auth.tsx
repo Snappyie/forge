@@ -117,7 +117,15 @@ interface TokensResponse {
 let exchangeInFlight: { token: string; promise: Promise<TokensResponse> } | null = null;
 
 function exchangeRefreshToken(token: string): Promise<TokensResponse> {
-  if (exchangeInFlight?.token === token) return exchangeInFlight.promise;
+  // Optional chaining plus `===` narrows badly here: when `exchangeInFlight` is
+  // null the left side is `undefined`, so the comparison is *true* for an
+  // undefined token and the next line dereferences null. That crashed every
+  // page in the console, not just the ones that triggered it.
+  //
+  // Reading the field into a local keeps the check explicit and gives
+  // TypeScript something it can narrow without a cast.
+  const inFlight = exchangeInFlight;
+  if (inFlight !== null && inFlight.token === token) return inFlight.promise;
 
   const promise = request<TokensResponse>("/auth/refresh", {
     method: "POST",
