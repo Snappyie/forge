@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
 chrono.workspace = true
+# A per-process scheduler instance identity, used for leadership and claims.
+uuid.workspace = true
 sqlx.workspace = true
 axum = "0.7"
 tracing = "0.1"

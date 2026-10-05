@@ -81,7 +81,8 @@ impl Runtime {
         tokio::spawn(async move {
             // A random instance identity per process, so two servers claiming
             // concurrently never share a claim (spec 09.3).
-            let engine = SchedulerEngine::new(pool, batch);
+            let instance_id = uuid::Uuid::new_v4();
+            let engine = SchedulerEngine::new(pool.clone(), batch).with_instance_id(instance_id);
             let mut ticker = tokio::time::interval(interval);
             // Skip missed ticks rather than firing a burst of catch-up work after
             // the process was paused.
@@ -90,12 +91,52 @@ impl Runtime {
             info!(
                 interval_ms = interval.as_millis() as u64,
                 batch_size = batch,
+                %instance_id,
                 "scheduler loop started"
             );
+
+            /*
+             * Leadership is advisory, not correctness.
+             *
+             * Duplicate execution creation is already prevented at the row
+             * level: `claim_due` takes a per-schedule lease and a unique index on
+             * `(schedule_id, scheduled_for)` stops two schedulers producing the
+             * same occurrence. The lock exists so N replicas do not all run the
+             * same claim query on every tick and come back empty but one, and so
+             * failover is observable rather than silent.
+             *
+             * It is acquired lazily inside the loop rather than held for the
+             * process lifetime: a leader that dies has its connection reaped,
+             * the lock is released, and the next tick of any replica picks it up.
+             * That is faster and simpler than a lease with an expiry window
+             * during which nobody leads.
+             */
+            let mut leadership: Option<forge_scheduler::leader::LeaderGuard> = None;
 
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
+                        if leadership.is_none() {
+                            match forge_scheduler::leader::try_acquire(&pool, instance_id).await {
+                                Ok(Some(guard)) => {
+                                    info!(%instance_id, "acquired scheduler leadership");
+                                    leadership = Some(guard);
+                                }
+                                Ok(None) => {
+                                    tracing::debug!(%instance_id, "another instance leads; idling");
+                                    continue;
+                                }
+                                Err(error) => {
+                                    // A database problem must not stop the
+                                    // scheduler: the row-level guarantees still
+                                    // hold, so it is safer to keep evaluating than
+                                    // to stop on an advisory-lock error.
+                                    warn!(%error, "could not acquire scheduler leadership; continuing without it");
+                                    continue;
+                                }
+                            }
+                        }
+
                         let report = engine.tick().await;
                         if !report.is_empty() {
                             info!(
@@ -112,6 +153,14 @@ impl Runtime {
                         }
                     }
                     _ = shutdown.recv() => {
+                        if let Some(guard) = leadership.take() {
+                            // Hand over explicitly so the next replica can lead
+                            // immediately rather than waiting for the connection
+                            // to be reaped.
+                            if let Err(error) = forge_scheduler::leader::release(guard).await {
+                                warn!(%error, "could not release scheduler leadership cleanly");
+                            }
+                        }
                         info!("scheduler loop stopping");
                         return;
                     }
